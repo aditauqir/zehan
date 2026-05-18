@@ -60,6 +60,12 @@ struct ZehanApp: App {
                 .keyboardShortcut("s", modifiers: [.command, .shift])
                 .disabled(store.activeBrain == nil)
             }
+
+            CommandMenu("Settings") {
+                Button("Configure Model") {
+                    store.configureModelFromUser()
+                }
+            }
         }
     }
 }
