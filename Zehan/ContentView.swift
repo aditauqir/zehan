@@ -26,7 +26,8 @@ struct ContentView: View {
         .frame(minWidth: 1120, minHeight: 720)
         .sheet(isPresented: $store.isShowingPageSearch) {
             PageSearchView(store: store)
-                .frame(width: 560, height: 420)
+                .frame(width: 520, height: 286)
+                .presentationBackground(.clear)
         }
     }
 }
@@ -245,6 +246,7 @@ private struct BrainSidebarHeader: View {
 private struct PageSearchView: View {
     @ObservedObject var store: BrainStore
     @State private var query = ""
+    @FocusState private var isSearchFocused: Bool
 
     private var results: [NoteSearchResult] {
         store.searchNotes(matching: query)
@@ -254,22 +256,31 @@ private struct PageSearchView: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 18, weight: .medium))
+                    .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(.secondary)
 
                 TextField("Search pages", text: $query)
-                    .font(.system(size: 24, weight: .medium))
+                    .font(.system(size: 18, weight: .medium))
                     .textFieldStyle(.plain)
+                    .focused($isSearchFocused)
             }
-            .padding(.horizontal, 22)
-            .frame(height: 72)
+            .padding(.horizontal, 18)
+            .frame(height: 52)
             .background(.ultraThinMaterial)
 
-            Divider().opacity(0.45)
+            Divider().opacity(0.35)
 
             if results.isEmpty {
-                ContentUnavailableView("No Matching Pages", systemImage: "doc.text.magnifyingglass")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 8) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 22))
+                        .foregroundStyle(.tertiary)
+
+                    Text("No Matching Pages")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(results) { result in
                     Button {
@@ -278,24 +289,34 @@ private struct PageSearchView: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 5) {
                             Text(result.title)
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(.system(size: 13, weight: .semibold))
                                 .lineLimit(1)
 
                             Text(result.preview)
-                                .font(.system(size: 12))
+                                .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
-                                .lineLimit(2)
+                                .lineLimit(1)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 6)
+                        .padding(.vertical, 5)
                     }
                     .buttonStyle(.plain)
+                    .listRowBackground(Color.clear)
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
             }
         }
-        .background(.regularMaterial)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(.white.opacity(0.22), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 28, y: 16)
+        .task {
+            isSearchFocused = true
+        }
     }
 }
 

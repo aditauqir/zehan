@@ -17,41 +17,47 @@ struct ZehanApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
-            CommandMenu("Brain") {
-                Button("Open Brain Vault") {
-                    store.openBrainVaultFromUser()
-                }
-                .keyboardShortcut("k", modifiers: .command)
-
-                Button("Create New Brain") {
-                    store.createBrainVaultFromUser()
-                }
-                .keyboardShortcut("n", modifiers: [.command, .shift])
-
-                Button("Save Vault") {
-                    store.saveVault()
-                }
-                .keyboardShortcut("s", modifiers: [.command, .shift])
-                .disabled(store.activeBrain == nil)
-            }
-
-            CommandMenu("Page") {
+            CommandGroup(replacing: .newItem) {
                 Button("New Page") {
                     store.newDraft()
                 }
                 .keyboardShortcut("n", modifiers: .command)
                 .disabled(store.activeBrain == nil)
 
+                Button("Create New Brain") {
+                    store.createBrainVaultFromUser()
+                }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+            }
+
+            CommandGroup(after: .newItem) {
+                Divider()
+
                 Button("Open Page") {
-                    store.showPageSearch()
+                    store.togglePageSearch()
                 }
                 .keyboardShortcut("o", modifiers: .command)
                 .disabled(store.activeBrain == nil)
 
+                Button("Open Brain Vault") {
+                    store.openBrainVaultFromUser()
+                }
+                .keyboardShortcut("k", modifiers: .command)
+
+                Divider()
+            }
+
+            CommandGroup(replacing: .saveItem) {
                 Button("Save Page") {
                     store.saveCurrentNote()
                 }
                 .keyboardShortcut("s", modifiers: .command)
+                .disabled(store.activeBrain == nil)
+
+                Button("Save Vault") {
+                    store.saveVault()
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
                 .disabled(store.activeBrain == nil)
             }
         }

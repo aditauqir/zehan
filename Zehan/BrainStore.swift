@@ -54,7 +54,7 @@ final class BrainStore: ObservableObject {
 
         let panel = NSOpenPanel()
         panel.title = "Choose Where to Store Your Brain"
-        panel.message = "Select a folder. Zehan will create a .brain file in that folder."
+        panel.message = "Select a folder. Zehan will create a visible .brain vault file in that folder."
         panel.prompt = "Create Brain"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -68,7 +68,7 @@ final class BrainStore: ObservableObject {
     func openBrainVaultFromUser() {
         let panel = NSOpenPanel()
         panel.title = "Open Brain Vault"
-        panel.message = "Select the folder that contains your Zehan .brain file."
+        panel.message = "Select the folder that contains your Zehan .brain vault file."
         panel.prompt = "Open Vault"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -85,15 +85,18 @@ final class BrainStore: ObservableObject {
 
             do {
                 try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
-                let brainURL = folderURL.appendingPathComponent(".brain")
-                guard !FileManager.default.fileExists(atPath: brainURL.path) else {
-                    status = "That folder already contains a .brain file"
+                let brainName = cleanBrainName(explicitName)
+                    ?? (folderURL.lastPathComponent.isEmpty ? "Untitled Brain" : folderURL.lastPathComponent)
+                let brainURL = folderURL.appendingPathComponent(
+                    "\(brainFileName(for: brainName)).brain",
+                    isDirectory: false
+                )
+                guard findBrainFile(in: folderURL) == nil else {
+                    status = "That folder already contains a .brain vault file"
                     return
                 }
 
                 let now = Date()
-                let brainName = cleanBrainName(explicitName)
-                    ?? (folderURL.lastPathComponent.isEmpty ? "Untitled Brain" : folderURL.lastPathComponent)
                 let brain = BrainFile(
                     schemaVersion: 1,
                     vault: VaultIdentity(
@@ -129,7 +132,7 @@ final class BrainStore: ObservableObject {
     }
 
     func openBrain(fileURL: URL, showsInvalidVaultAlert: Bool = false) {
-        let folderURL = fileURL.lastPathComponent == ".brain"
+        let folderURL = isBrainFile(fileURL)
             ? fileURL.deletingLastPathComponent()
             : fileURL
 
@@ -138,9 +141,8 @@ final class BrainStore: ObservableObject {
             defer { isBusy = false }
 
             do {
-                let brainURL = folderURL.appendingPathComponent(".brain")
-                guard FileManager.default.fileExists(atPath: brainURL.path) else {
-                    let message = "That folder does not contain a Zehan .brain file."
+                guard let brainURL = brainURL(from: fileURL) else {
+                    let message = "That folder does not contain a Zehan .brain vault file."
                     status = message
                     if showsInvalidVaultAlert {
                         showAlert(title: "Cannot Open Vault", message: message)
@@ -190,6 +192,15 @@ final class BrainStore: ObservableObject {
         }
 
         isShowingPageSearch = true
+    }
+
+    func togglePageSearch() {
+        guard activeBrain != nil else {
+            status = "Open or create a brain first"
+            return
+        }
+
+        isShowingPageSearch.toggle()
     }
 
     func openNote(id: Note.ID) {
@@ -440,6 +451,48 @@ final class BrainStore: ObservableObject {
 
     private func writeBrain(_ brain: BrainFile, to url: URL) throws {
         try encoder.encode(brain).write(to: url, options: .atomic)
+    }
+
+    private func brainURL(from url: URL) -> URL? {
+        if isBrainFile(url), FileManager.default.fileExists(atPath: url.path) {
+            return url
+        }
+
+        return findBrainFile(in: url)
+    }
+
+    private func findBrainFile(in folderURL: URL) -> URL? {
+        let hiddenBrainURL = folderURL.appendingPathComponent(".brain")
+        if FileManager.default.fileExists(atPath: hiddenBrainURL.path) {
+            return hiddenBrainURL
+        }
+
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: folderURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsSubdirectoryDescendants]
+        ) else {
+            return nil
+        }
+
+        return urls
+            .filter { $0.pathExtension == "brain" }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            .first
+    }
+
+    private func isBrainFile(_ url: URL) -> Bool {
+        url.lastPathComponent == ".brain" || url.pathExtension == "brain"
+    }
+
+    private func brainFileName(for name: String) -> String {
+        let invalidCharacters = CharacterSet(charactersIn: "/:")
+        let fileName = name
+            .components(separatedBy: invalidCharacters)
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return fileName.isEmpty ? "Untitled Brain" : fileName
     }
 
     private func cleanBrainName(_ name: String?) -> String? {
