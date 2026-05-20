@@ -1,6 +1,6 @@
 //
-//  ZehanApp.swift
-//  Zehan
+//  ZirnApp.swift
+//  Zirn
 //
 //  Created by Adi Tauqir on 5/15/26.
 //
@@ -8,7 +8,7 @@
 import SwiftUI
 
 @main
-struct ZehanApp: App {
+struct ZirnApp: App {
     @StateObject private var store = BrainStore()
 
     var body: some Scene {
@@ -48,17 +48,19 @@ struct ZehanApp: App {
             }
 
             CommandGroup(replacing: .saveItem) {
-                Button("Save Page") {
-                    store.saveCurrentNote()
-                }
-                .keyboardShortcut("s", modifiers: .command)
-                .disabled(store.activeBrain == nil)
-
                 Button("Save Vault") {
                     store.saveVault()
                 }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
                 .disabled(store.activeBrain == nil)
+            }
+
+            CommandGroup(after: .pasteboard) {
+                Button("Delete Page") {
+                    store.deleteSelectedNote()
+                }
+                .keyboardShortcut(.delete, modifiers: .command)
+                .disabled(store.activeBrain == nil || (store.selectedNoteID == nil && store.currentNoteID == nil))
             }
 
             CommandMenu("Settings") {

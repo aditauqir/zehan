@@ -1,6 +1,6 @@
 //
 //  BrainStore.swift
-//  Zehan
+//  Zirn
 //
 //  Created by Adi Tauqir on 5/15/26.
 //
@@ -8,6 +8,7 @@
 import Combine
 import Foundation
 import AppKit
+import Security
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -27,21 +28,36 @@ final class BrainStore: ObservableObject {
     @Published var isBusy = false
     @Published var isShowingPageSearch = false
     @Published var recentVaults: [RecentVault] = []
-    @Published var selectedAssistantModel: AssistantModel = .gpt
+    @Published var graphLinks: [BrainLinkReference] = []
+    @Published var selectedAssistantModel: AssistantModel = .groq
     @Published var assistantPrompt = ""
     @Published var isGeneratingAssistantResponse = false
+    @Published var isShowingModelConfiguration = false
+    @Published var pendingAssistantPreview: AssistantPreview?
 
     private let encoder: JSONEncoder
     private let decoder = JSONDecoder()
     private let recentVaultsKey = "RecentVaults"
     private let openAIAPIKeyKey = "Assistant.OpenAIAPIKey"
+    private let openAIAPIKeyService = "noortech.Zirn.openai.apiKey"
+    private let legacyOpenAIAPIKeyService = "noortech.Zehan.openai.apiKey"
+    private let apiKeyAccount = "default"
     private let openAIModelKey = "Assistant.OpenAIModel"
+    private let groqAPIKeyKey = "Assistant.GroqAPIKey"
+    private let groqAPIKeyService = "noortech.Zirn.groq.apiKey"
+    private let groqModelKey = "Assistant.GroqModel"
     private let ollamaURLKey = "Assistant.OllamaURL"
     private let ollamaModelKey = "Assistant.OllamaModel"
     private var openAIAPIKey = ""
     private var openAIModel = "gpt-5"
+    private var groqAPIKey = ""
+    private var groqModel = "llama-3.3-70b-versatile"
     private var ollamaURL = "http://localhost:11434"
     private var ollamaModel = "llama3.2"
+    private var autosaveTask: Task<Void, Never>?
+    private var pendingAssistantInsertion: PendingAssistantInsertion?
+    private var isApplyingAssistantOutput = false
+    private var noteIdentityDatabase: NoteIdentityDatabase?
 
     init() {
         encoder = JSONEncoder()
@@ -69,7 +85,7 @@ final class BrainStore: ObservableObject {
 
         let panel = NSOpenPanel()
         panel.title = "Choose Where to Store Your Brain"
-        panel.message = "Select a folder. Zehan will create a visible .brain vault file in that folder."
+        panel.message = "Select a folder. Zirn will create a visible .brain vault file in that folder."
         panel.prompt = "Create Brain"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -83,7 +99,7 @@ final class BrainStore: ObservableObject {
     func openBrainVaultFromUser() {
         let panel = NSOpenPanel()
         panel.title = "Open Brain Vault"
-        panel.message = "Select the folder that contains your Zehan .brain vault file."
+        panel.message = "Select the folder that contains your Zirn .brain vault file."
         panel.prompt = "Open Vault"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -124,15 +140,17 @@ final class BrainStore: ObservableObject {
                     graph: BrainGraph(notes: [], links: []),
                     sourceRegistry: SourceRegistryPointer(path: "sources.json"),
                     ai: BrainAIPreferences(
-                        provider: "openai",
+                        provider: "groq",
                         openaiModel: "gpt-5.5",
+                        groqModel: "llama-3.3-70b-versatile",
                         ollamaModel: "llama3.2",
                         ollamaURL: "http://localhost:11434",
                         appleModel: nil
                     ),
                     styleMemory: [],
+                    memory: BrainMemory(writingArtifacts: [], preferences: [], updatedAt: nil),
                     app: BrainAppCompatibility(
-                        appID: "noortech.Zehan",
+                        appID: "noortech.Zirn",
                         minAppVersion: "1.0",
                         lastOpenedWith: "1.0"
                     )
@@ -157,7 +175,7 @@ final class BrainStore: ObservableObject {
 
             do {
                 guard let brainURL = brainURL(from: fileURL) else {
-                    let message = "That folder does not contain a Zehan .brain vault file."
+                    let message = "That folder does not contain a Zirn .brain vault file."
                     status = message
                     if showsInvalidVaultAlert {
                         showAlert(title: "Cannot Open Vault", message: message)
@@ -173,7 +191,8 @@ final class BrainStore: ObservableObject {
                     brainURL: brainURL,
                     updatedAt: brain.vault.updatedAt
                 )
-                newDraft()
+                noteIdentityDatabase = try NoteIdentityDatabase(vaultFolderURL: folderURL)
+                resetDraft()
                 try loadNotes()
                 recordRecentVault(note: notes.first)
                 status = "\(brain.vault.name) opened"
@@ -187,14 +206,34 @@ final class BrainStore: ObservableObject {
     }
 
     func closeBrain() {
+        autosaveTask?.cancel()
+        autosaveTask = nil
+        pendingAssistantInsertion = nil
+        pendingAssistantPreview = nil
+        noteIdentityDatabase = nil
         activeBrain = nil
         notes = []
         selectedNoteID = nil
-        newDraft()
+        graphLinks = []
+        resetDraft()
         status = "Choose a brain"
     }
 
     func newDraft() {
+        pendingAssistantInsertion = nil
+        pendingAssistantPreview = nil
+        currentNoteID = nil
+        selectedNoteID = nil
+        title = "Untitled"
+        content = Self.starterMarkdown
+        if activeBrain != nil {
+            saveCurrentNote(statusText: "Page created")
+        }
+    }
+
+    private func resetDraft() {
+        pendingAssistantInsertion = nil
+        pendingAssistantPreview = nil
         currentNoteID = nil
         selectedNoteID = nil
         title = "Untitled"
@@ -205,6 +244,7 @@ final class BrainStore: ObservableObject {
         title = newTitle
         content = contentBySettingDocumentTitle(newTitle, in: content)
         updateCurrentNoteSummaryTitle(to: displayTitle(for: newTitle))
+        scheduleAutosave()
     }
 
     func updateContentFromEditor(_ newContent: String) {
@@ -214,6 +254,8 @@ final class BrainStore: ObservableObject {
             title = documentTitle
             updateCurrentNoteSummaryTitle(to: displayTitle(for: documentTitle))
         }
+        learnFromUserCorrectionIfNeeded(revisedContent: newContent)
+        scheduleAutosave()
     }
 
     func showPageSearch() {
@@ -235,12 +277,19 @@ final class BrainStore: ObservableObject {
     }
 
     func openNote(id: Note.ID) {
+        if let currentNoteID, currentNoteID != id {
+            autosaveTask?.cancel()
+            autosaveTask = nil
+            saveCurrentNote()
+        }
+
         guard let noteURL = noteURL(for: id) else { return }
         withActiveBrainAccess {
             do {
                 let note = try readNote(from: noteURL)
                 currentNoteID = note.id
                 selectedNoteID = note.id
+                pendingAssistantInsertion = nil
                 title = note.title
                 content = note.content
                 recordRecentVault(
@@ -257,7 +306,23 @@ final class BrainStore: ObservableObject {
         }
     }
 
+    func openLinkedNote(named linkedTitle: String) {
+        let normalizedTitle = normalizedLinkTitle(linkedTitle)
+        guard let note = notes.first(where: { normalizedLinkTitle($0.title) == normalizedTitle }) else {
+            status = "No page named \(linkedTitle)"
+            return
+        }
+
+        openNote(id: note.id)
+    }
+
     func saveCurrentNote() {
+        saveCurrentNote(statusText: "Autosaved")
+    }
+
+    private func saveCurrentNote(statusText: String) {
+        autosaveTask?.cancel()
+        autosaveTask = nil
         withActiveBrainAccess {
             do {
                 guard let brain = activeBrain else { return }
@@ -278,6 +343,12 @@ final class BrainStore: ObservableObject {
                     ? existingURL!
                     : markdownNoteURL(for: note, in: brain)
                 try writeMarkdownNote(note, to: targetURL)
+                try noteIdentityDatabase?.upsert(
+                    noteID: note.id,
+                    title: note.title,
+                    fileName: targetURL.lastPathComponent,
+                    updatedAt: note.updatedAt
+                )
                 if let existingURL, existingURL.pathExtension == "json" {
                     try? FileManager.default.removeItem(at: existingURL)
                 }
@@ -294,7 +365,7 @@ final class BrainStore: ObservableObject {
                         updatedAt: note.updatedAt
                     )
                 )
-                status = "Saved"
+                status = statusText
             } catch {
                 status = error.localizedDescription
             }
@@ -302,57 +373,47 @@ final class BrainStore: ObservableObject {
     }
 
     func configureModelFromUser() {
-        let apiKeyField = NSSecureTextField(string: openAIAPIKey)
-        let openAIModelField = NSTextField(string: openAIModel)
-        let ollamaURLField = NSTextField(string: ollamaURL)
-        let ollamaModelField = NSTextField(string: ollamaModel)
+        isShowingModelConfiguration = true
+    }
 
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.spacing = 10
-        stack.alignment = .leading
-        stack.translatesAutoresizingMaskIntoConstraints = false
+    var assistantConfigurationSnapshot: AssistantConfiguration {
+        AssistantConfiguration(
+            openAIAPIKey: openAIAPIKey,
+            openAIModel: openAIModel,
+            groqAPIKey: groqAPIKey,
+            groqModel: groqModel,
+            ollamaURL: ollamaURL,
+            ollamaModel: ollamaModel
+        )
+    }
 
-        [
-            ("OpenAI API Key", apiKeyField),
-            ("GPT Model", openAIModelField),
-            ("Ollama URL", ollamaURLField),
-            ("Ollama Model", ollamaModelField)
-        ].forEach { label, field in
-            let row = NSStackView()
-            row.orientation = .vertical
-            row.spacing = 4
-            row.alignment = .leading
+    func saveModelConfiguration(
+        openAIAPIKey: String,
+        openAIModel: String,
+        groqAPIKey: String,
+        groqModel: String,
+        ollamaURL: String,
+        ollamaModel: String
+    ) {
+        self.openAIAPIKey = openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.openAIModel = openAIModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.groqAPIKey = groqAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.groqModel = groqModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.ollamaURL = ollamaURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.ollamaModel = ollamaModel.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            let text = NSTextField(labelWithString: label)
-            text.font = .systemFont(ofSize: 12, weight: .medium)
+        if self.openAIModel.isEmpty { self.openAIModel = "gpt-5" }
+        if self.groqModel.isEmpty { self.groqModel = "llama-3.3-70b-versatile" }
+        if self.ollamaURL.isEmpty { self.ollamaURL = "http://localhost:11434" }
+        if self.ollamaModel.isEmpty { self.ollamaModel = "llama3.2" }
 
-            field.frame = NSRect(x: 0, y: 0, width: 360, height: 24)
-            row.addArrangedSubview(text)
-            row.addArrangedSubview(field)
-            stack.addArrangedSubview(row)
+        do {
+            try saveAssistantConfiguration()
+            isShowingModelConfiguration = false
+            status = "Model settings saved"
+        } catch {
+            status = error.localizedDescription
         }
-
-        let alert = NSAlert()
-        alert.messageText = "Configure Model"
-        alert.informativeText = "Enter the credentials and local settings needed by the selected model."
-        alert.accessoryView = stack
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        openAIAPIKey = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        openAIModel = openAIModelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        ollamaURL = ollamaURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        ollamaModel = ollamaModelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if openAIModel.isEmpty { openAIModel = "gpt-5" }
-        if ollamaURL.isEmpty { ollamaURL = "http://localhost:11434" }
-        if ollamaModel.isEmpty { ollamaModel = "llama3.2" }
-
-        saveAssistantConfiguration()
-        status = "Model settings saved"
     }
 
     func submitAssistantPrompt() {
@@ -360,12 +421,27 @@ final class BrainStore: ObservableObject {
         guard !prompt.isEmpty, !isGeneratingAssistantResponse else { return }
 
         assistantPrompt = ""
+        pendingAssistantPreview = nil
         isGeneratingAssistantResponse = true
         status = "\(selectedAssistantModel.title) is writing"
 
         Task {
             await generateAssistantResponse(for: prompt)
         }
+    }
+
+    func acceptAssistantPreview() {
+        guard let preview = pendingAssistantPreview else { return }
+        applyAssistantDocumentOutput(preview.markdown, prompt: preview.prompt)
+        try? updateStyleMemory(with: content)
+        pendingAssistantPreview = nil
+        status = "\(preview.providerTitle) inserted Markdown"
+    }
+
+    func rejectAssistantPreview() {
+        guard let preview = pendingAssistantPreview else { return }
+        pendingAssistantPreview = nil
+        status = "\(preview.providerTitle) output rejected"
     }
 
     func saveVault() {
@@ -381,15 +457,152 @@ final class BrainStore: ObservableObject {
 
     func deleteCurrentNote() {
         guard let id = currentNoteID else { return }
+        deleteNote(id: id)
+    }
+
+    func deleteSelectedNote() {
+        guard let id = selectedNoteID ?? currentNoteID else { return }
+        deleteNote(id: id)
+    }
+
+    func deleteNote(id: Note.ID) {
+        autosaveTask?.cancel()
+        autosaveTask = nil
         withActiveBrainAccess {
             do {
+                let deletedCurrentNote = currentNoteID == id
+                try learnFromDeletionIfNeeded(noteID: id)
                 if let noteURL = noteURL(for: id), FileManager.default.fileExists(atPath: noteURL.path) {
                     try FileManager.default.removeItem(at: noteURL)
                 }
-                newDraft()
+                try noteIdentityDatabase?.remove(noteID: id)
                 try loadNotes()
+                if deletedCurrentNote {
+                    if let nextNote = notes.first,
+                       let noteURL = noteURL(for: nextNote.id) {
+                        let note = try readNote(from: noteURL)
+                        currentNoteID = note.id
+                        selectedNoteID = note.id
+                        title = note.title
+                        content = note.content
+                    } else {
+                        resetDraft()
+                    }
+                } else if selectedNoteID == id {
+                    selectedNoteID = currentNoteID
+                }
                 try syncBrainMetadata()
                 status = "Deleted"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    private func scheduleAutosave() {
+        guard activeBrain != nil else { return }
+        autosaveTask?.cancel()
+        autosaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 650_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.saveCurrentNote(statusText: "Autosaved")
+            }
+        }
+    }
+
+    func renameNoteFromUser(id: Note.ID) {
+        let currentTitle = notes.first(where: { $0.id == id })?.title ?? "Untitled"
+        guard let newTitle = requestText(
+            title: "Rename Page",
+            message: "Choose the title that appears in the sidebar.",
+            placeholder: "Page title",
+            initialValue: currentTitle
+        ) else { return }
+
+        renameNote(id: id, to: newTitle)
+    }
+
+    func showNoteNutshell(id: Note.ID) {
+        guard let noteURL = noteURL(for: id) else { return }
+
+        withActiveBrainAccess {
+            do {
+                let note = try readNote(from: noteURL)
+                let plainText = plainText(fromMarkdown: note.content)
+                let wordCount = plainText.split { $0.isWhitespace || $0.isNewline }.count
+                let formatter = DateFormatter()
+                formatter.dateStyle = .medium
+                formatter.timeStyle = .short
+
+                let preview = plainText.isEmpty
+                    ? "No body text yet."
+                    : String(plainText.prefix(240))
+
+                let alert = NSAlert()
+                alert.messageText = note.title
+                alert.informativeText = """
+                File: \(noteURL.lastPathComponent)
+                Updated: \(formatter.string(from: note.updatedAt))
+                Words: \(wordCount)
+
+                \(preview)
+                """
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "Done")
+                alert.runModal()
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    private func renameNote(id: Note.ID, to newTitle: String) {
+        let cleanTitle = displayTitle(for: newTitle)
+
+        withActiveBrainAccess {
+            do {
+                guard let brain = activeBrain,
+                      let oldURL = noteURL(for: id)
+                else { return }
+
+                let oldNote = try readNote(from: oldURL)
+                let renamedNote = Note(
+                    id: oldNote.id,
+                    title: cleanTitle,
+                    content: contentBySettingDocumentTitle(cleanTitle, in: oldNote.content),
+                    createdAt: oldNote.createdAt,
+                    updatedAt: Date()
+                )
+                let newURL = markdownNoteURL(for: renamedNote, in: brain)
+
+                try writeMarkdownNote(renamedNote, to: newURL)
+                try noteIdentityDatabase?.upsert(
+                    noteID: renamedNote.id,
+                    title: renamedNote.title,
+                    fileName: newURL.lastPathComponent,
+                    updatedAt: renamedNote.updatedAt
+                )
+                if oldURL != newURL, FileManager.default.fileExists(atPath: oldURL.path) {
+                    try FileManager.default.removeItem(at: oldURL)
+                }
+
+                if currentNoteID == id {
+                    title = renamedNote.title
+                    content = renamedNote.content
+                    selectedNoteID = id
+                }
+
+                try loadNotes()
+                try syncBrainMetadata()
+                recordRecentVault(
+                    note: NoteSummary(
+                        id: renamedNote.id,
+                        title: renamedNote.title,
+                        updatedAt: renamedNote.updatedAt
+                    )
+                )
+                status = "Renamed"
             } catch {
                 status = error.localizedDescription
             }
@@ -589,10 +802,45 @@ final class BrainStore: ObservableObject {
         )
         .filter { $0.pathExtension == "md" || $0.pathExtension == "json" }
 
-        notes = try noteURLs
-            .map { try readNote(from: $0) }
+        var seenIDs = Set<Note.ID>()
+        let loadedNotes = try noteURLs.map { url in
+            var note = try readNote(from: url)
+            let fileName = url.lastPathComponent
+            let metadataID = note.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            let indexedID = noteIdentityDatabase?.noteID(forFileName: fileName)
+            let candidateID = indexedID ?? (metadataID.isEmpty ? nil : note.id)
+            let finalID: Note.ID
+
+            if let candidateID, !seenIDs.contains(candidateID) {
+                finalID = candidateID
+            } else {
+                finalID = UUID().uuidString
+            }
+
+            if finalID != note.id {
+                note = Note(
+                    id: finalID,
+                    title: note.title,
+                    content: note.content,
+                    createdAt: note.createdAt,
+                    updatedAt: Date()
+                )
+                try writeNote(note, to: url)
+            }
+
+            try noteIdentityDatabase?.upsert(
+                noteID: note.id,
+                title: note.title,
+                fileName: fileName,
+                updatedAt: note.updatedAt
+            )
+            seenIDs.insert(note.id)
+            return note
+        }
+        notes = loadedNotes
             .map { NoteSummary(id: $0.id, title: $0.title, updatedAt: $0.updatedAt) }
             .sorted { $0.updatedAt > $1.updatedAt }
+        graphLinks = buildGraphLinks(from: loadedNotes)
     }
 
     private func syncBrainMetadata() throws {
@@ -603,6 +851,7 @@ final class BrainStore: ObservableObject {
         brain.graph.notes = notes.map {
             BrainNoteReference(id: $0.id, title: $0.title, updatedAt: $0.updatedAt)
         }
+        brain.graph.links = graphLinks
         brain.app.lastOpenedWith = "1.0"
         try writeBrain(brain, to: activeBrain.brainURL)
         self.activeBrain = BrainSummary(
@@ -623,6 +872,77 @@ final class BrainStore: ObservableObject {
         brain.styleMemory.removeAll { $0 == sample }
         brain.styleMemory.insert(sample, at: 0)
         brain.styleMemory = Array(brain.styleMemory.prefix(6))
+        var memory = brain.memory ?? BrainMemory(writingArtifacts: [], preferences: [], updatedAt: nil)
+        memory.writingArtifacts.removeAll { $0.excerpt == sample }
+        memory.writingArtifacts.insert(
+            WritingArtifact(
+                id: UUID().uuidString,
+                sourceNoteID: currentNoteID,
+                sourceTitle: displayTitle(for: title),
+                excerpt: sample,
+                wordCount: sample.split { $0.isWhitespace || $0.isNewline }.count,
+                createdAt: Date()
+            ),
+            at: 0
+        )
+        memory.writingArtifacts = Array(memory.writingArtifacts.prefix(12))
+        memory.updatedAt = Date()
+        brain.memory = memory
+        brain.vault.updatedAt = Date()
+        try writeBrain(brain, to: activeBrain.brainURL)
+    }
+
+    private func learnFromUserCorrectionIfNeeded(revisedContent: String) {
+        guard !isApplyingAssistantOutput,
+              let pendingAssistantInsertion,
+              pendingAssistantInsertion.noteID == currentNoteID
+        else { return }
+
+        let signals = CorrectionLearningEngine.signals(
+            from: pendingAssistantInsertion,
+            revisedContent: revisedContent
+        )
+        guard !signals.isEmpty else { return }
+
+        do {
+            try recordCorrectionSignals(signals)
+            self.pendingAssistantInsertion = nil
+            status = "Learned from correction"
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    private func learnFromDeletionIfNeeded(noteID: Note.ID) throws {
+        guard let pendingAssistantInsertion,
+              pendingAssistantInsertion.noteID == noteID
+        else { return }
+
+        let signals = CorrectionLearningEngine.signals(
+            from: pendingAssistantInsertion,
+            revisedContent: ""
+        )
+        guard !signals.isEmpty else { return }
+
+        try recordCorrectionSignals(signals)
+        self.pendingAssistantInsertion = nil
+    }
+
+    private func recordCorrectionSignals(_ signals: [CorrectionSignal]) throws {
+        guard let activeBrain else { return }
+
+        var brain = try readBrain(from: activeBrain.brainURL)
+        var memory = brain.memory ?? BrainMemory(writingArtifacts: [], preferences: [], updatedAt: nil)
+
+        var correctionSignals = memory.correctionSignals ?? []
+        correctionSignals.insert(contentsOf: signals, at: 0)
+        memory.correctionSignals = Array(correctionSignals.prefix(48))
+        memory.correctionPreferences = CorrectionLearningEngine.mergedPreferences(
+            existing: memory.correctionPreferences ?? [],
+            signals: signals
+        )
+        memory.updatedAt = Date()
+        brain.memory = memory
         brain.vault.updatedAt = Date()
         try writeBrain(brain, to: activeBrain.brainURL)
     }
@@ -644,11 +964,69 @@ final class BrainStore: ObservableObject {
             return styleSample(from: content)
         }
 
-        let samples = ([styleSample(from: content)] + brain.styleMemory)
+        let artifacts = brain.memory?.writingArtifacts.map(\.excerpt) ?? []
+        let samples = ([styleSample(from: content)] + brain.styleMemory + artifacts)
             .filter { !$0.isEmpty }
             .prefix(4)
 
         return samples.joined(separator: "\n\n")
+    }
+
+    private func learnedCorrectionMemory() -> String {
+        guard let activeBrain,
+              let brain = try? readBrain(from: activeBrain.brainURL),
+              let memory = brain.memory
+        else {
+            return ""
+        }
+
+        return CorrectionLearningEngine.promptContext(
+            preferences: memory.correctionPreferences ?? [],
+            signals: memory.correctionSignals ?? []
+        )
+    }
+
+    private func buildGraphLinks(from loadedNotes: [Note]) -> [BrainLinkReference] {
+        var notesByTitle: [String: [Note.ID]] = [:]
+        for note in loadedNotes {
+            notesByTitle[normalizedLinkTitle(note.title), default: []].append(note.id)
+        }
+
+        var seen = Set<String>()
+        var links: [BrainLinkReference] = []
+
+        for note in loadedNotes {
+            for targetTitle in wikiLinks(in: note.content) {
+                guard let targetID = notesByTitle[normalizedLinkTitle(targetTitle)]?.first(where: { $0 != note.id }),
+                      targetID != note.id
+                else { continue }
+
+                let key = "\(note.id)->\(targetID)"
+                guard !seen.contains(key) else { continue }
+                seen.insert(key)
+                links.append(BrainLinkReference(from: note.id, to: targetID, kind: "wiki"))
+            }
+        }
+
+        return links
+    }
+
+    private func normalizedLinkTitle(_ title: String) -> String {
+        title
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+
+    private func wikiLinks(in markdown: String) -> [String] {
+        let pattern = #"\[\[([^\]\|]+)(?:\|[^\]]+)?\]\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(markdown.startIndex..<markdown.endIndex, in: markdown)
+
+        return regex.matches(in: markdown, range: range).compactMap { match in
+            guard let titleRange = Range(match.range(at: 1), in: markdown) else { return nil }
+            let title = markdown[titleRange].trimmingCharacters(in: .whitespacesAndNewlines)
+            return title.isEmpty ? nil : title
+        }
     }
 
     private func readBrain(from url: URL) throws -> BrainFile {
@@ -737,6 +1115,14 @@ final class BrainStore: ObservableObject {
         try Data(markdown.utf8).write(to: url, options: .atomic)
     }
 
+    private func writeNote(_ note: Note, to url: URL) throws {
+        if url.pathExtension == "md" {
+            try writeMarkdownNote(note, to: url)
+        } else {
+            try encoder.encode(note).write(to: url, options: .atomic)
+        }
+    }
+
     private func brainURL(from url: URL) -> URL? {
         if isBrainFile(url), FileManager.default.fileExists(atPath: url.path) {
             return url
@@ -817,36 +1203,56 @@ final class BrainStore: ObservableObject {
     }
 
     private func generateAssistantResponse(for prompt: String) async {
+        defer {
+            isGeneratingAssistantResponse = false
+        }
+
         do {
             let output: String
+            let providerTitle = selectedAssistantModel.title
             switch selectedAssistantModel {
             case .gpt:
                 output = try await generateWithOpenAI(prompt: prompt)
+            case .groq:
+                output = try await generateWithGroq(prompt: prompt)
             case .placeholder:
                 output = generatePlaceholderMarkdown(prompt: prompt)
             case .ollama:
                 output = try await generateWithOllama(prompt: prompt)
             }
 
-            appendAssistantOutput(output)
+            guard !cleanedAssistantMarkdown(output).isEmpty else {
+                throw AssistantError.requestFailed("The model returned no Markdown.")
+            }
+
+            applyAssistantDocumentOutput(output, prompt: prompt)
             try? updateStyleMemory(with: content)
-            status = "\(selectedAssistantModel.title) added Markdown"
+            pendingAssistantPreview = nil
+            status = "\(providerTitle) updated Markdown"
         } catch {
             status = error.localizedDescription
         }
-
-        isGeneratingAssistantResponse = false
     }
 
-    private func appendAssistantOutput(_ output: String) {
+    private func applyAssistantDocumentOutput(_ output: String, prompt: String) {
         let cleanOutput = cleanedAssistantMarkdown(output)
         guard !cleanOutput.isEmpty else { return }
 
-        let separator = content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? ""
-            : "\n\n"
-        updateContentFromEditor(content + separator + cleanOutput)
-        saveCurrentNote()
+        let contentBeforeInsertion = content
+        isApplyingAssistantOutput = true
+        defer { isApplyingAssistantOutput = false }
+        withAnimation(.easeInOut(duration: 0.24)) {
+            updateContentFromEditor(cleanOutput)
+        }
+        saveCurrentNote(statusText: "AI updated")
+        pendingAssistantInsertion = CorrectionLearningEngine.makePendingInsertion(
+            noteID: currentNoteID,
+            noteTitle: displayTitle(for: title),
+            prompt: prompt,
+            contentBeforeInsertion: contentBeforeInsertion,
+            insertedMarkdown: cleanOutput,
+            contentAfterInsertion: cleanOutput
+        )
     }
 
     private func generateWithOpenAI(prompt: String) async throws -> String {
@@ -868,6 +1274,37 @@ final class BrainStore: ObservableObject {
         let (data, response) = try await URLSession.shared.data(for: request)
         try validateHTTPResponse(response, data: data)
         return try extractOpenAIOutputText(from: data)
+    }
+
+    private func generateWithGroq(prompt: String) async throws -> String {
+        guard !groqAPIKey.isEmpty else {
+            throw AssistantError.missingConfiguration("Add a Groq API key in Settings > Configure Model.")
+        }
+
+        var request = URLRequest(url: URL(string: "https://api.groq.com/openai/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(groqAPIKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": groqModel,
+            "messages": [
+                [
+                    "role": "system",
+                    "content": assistantInstructions()
+                ],
+                [
+                    "role": "user",
+                    "content": assistantInput(for: prompt)
+                ]
+            ],
+            "temperature": 0.35,
+            "max_completion_tokens": 4096,
+            "stream": false
+        ])
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validateHTTPResponse(response, data: data)
+        return try extractChatCompletionOutputText(from: data)
     }
 
     private func generateWithOllama(prompt: String) async throws -> String {
@@ -897,19 +1334,25 @@ final class BrainStore: ObservableObject {
 
         - Draft the idea in your own language.
         - Add context, examples, and next steps.
-        - Replace this placeholder with model output after configuring GPT or Ollama.
+        - Replace this placeholder with model output after configuring Groq, GPT, or Ollama.
         """
     }
 
     private func assistantInstructions() -> String {
         """
-        You are Zehan's writing assistant. Return only clean Markdown that can be pasted directly into the current document.
+        You are Zirn's writing assistant. You edit the user's current Markdown document in place.
+        You will receive the full current document and a user request. Return the complete revised Markdown document, not a patch, diff, explanation, or separate suggestion.
+        If the user asks to add, include the original document plus the addition in the best location.
+        If the user asks to edit, rewrite only the needed parts and preserve everything else.
+        If the user asks to delete, remove the requested text or section and keep the remaining document coherent.
+        If the user asks to organize, restructure the whole document cleanly while preserving meaning.
         Do not wrap the answer in code fences unless the user specifically asks for code.
         Do not include meta commentary, apologies, or explanations of what you changed.
         Match the user's writing pattern, vocabulary, rhythm, heading style, and density when possible.
-        Preserve the user's existing edits. Prefer appending a new section or paragraph instead of rewriting existing text.
-        If the user asks for edits, make the smallest useful change and keep user-authored wording intact.
+        Treat correction-derived preferences as stronger than passive style samples.
+        Preserve the user's existing edits. Make the smallest useful change unless the user asks for a larger rewrite.
         Output polished Markdown with clear headings, short paragraphs, and useful lists only when lists are natural.
+        Use Obsidian-style wiki links like [[Page Title]] only when linking is genuinely useful.
         """
     }
 
@@ -924,8 +1367,14 @@ final class BrainStore: ObservableObject {
         Current Markdown document:
         \(content)
 
+        Required output:
+        Return the complete revised Markdown document only.
+
         Learned user writing samples:
         \(learnedStyleMemory())
+
+        Correction-derived preferences, strongest first:
+        \(learnedCorrectionMemory())
         """
     }
 
@@ -972,20 +1421,120 @@ final class BrainStore: ObservableObject {
         throw AssistantError.requestFailed("The model returned no Markdown.")
     }
 
+    private func extractChatCompletionOutputText(from data: Data) throws -> String {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let firstChoice = choices.first,
+              let message = firstChoice["message"] as? [String: Any],
+              let content = message["content"] as? String
+        else {
+            throw AssistantError.requestFailed("The model returned no Markdown.")
+        }
+
+        return content
+    }
+
     private func loadAssistantConfiguration() {
         let defaults = UserDefaults.standard
-        openAIAPIKey = defaults.string(forKey: openAIAPIKeyKey) ?? ""
+        let keychainAPIKey = loadAPIKeyFromKeychain(service: openAIAPIKeyService)
+            ?? loadAPIKeyFromKeychain(service: legacyOpenAIAPIKeyService)
+        let legacyDefaultsAPIKey = defaults.string(forKey: openAIAPIKeyKey)
+        openAIAPIKey = keychainAPIKey ?? legacyDefaultsAPIKey ?? ""
+        if keychainAPIKey == nil,
+           let legacyDefaultsAPIKey,
+           !legacyDefaultsAPIKey.isEmpty,
+           let keyData = legacyDefaultsAPIKey.data(using: .utf8) {
+            try? saveKeychainData(keyData, service: openAIAPIKeyService)
+        }
+        defaults.removeObject(forKey: openAIAPIKeyKey)
         openAIModel = defaults.string(forKey: openAIModelKey) ?? "gpt-5"
+        let keychainGroqKey = loadAPIKeyFromKeychain(service: groqAPIKeyService)
+        let legacyDefaultsGroqKey = defaults.string(forKey: groqAPIKeyKey)
+        groqAPIKey = keychainGroqKey ?? legacyDefaultsGroqKey ?? ""
+        if keychainGroqKey == nil,
+           let legacyDefaultsGroqKey,
+           !legacyDefaultsGroqKey.isEmpty,
+           let keyData = legacyDefaultsGroqKey.data(using: .utf8) {
+            try? saveKeychainData(keyData, service: groqAPIKeyService)
+        }
+        defaults.removeObject(forKey: groqAPIKeyKey)
+        groqModel = defaults.string(forKey: groqModelKey) ?? "llama-3.3-70b-versatile"
         ollamaURL = defaults.string(forKey: ollamaURLKey) ?? "http://localhost:11434"
         ollamaModel = defaults.string(forKey: ollamaModelKey) ?? "llama3.2"
     }
 
-    private func saveAssistantConfiguration() {
+    private func saveAssistantConfiguration() throws {
         let defaults = UserDefaults.standard
-        defaults.set(openAIAPIKey, forKey: openAIAPIKeyKey)
+        if openAIAPIKey.isEmpty {
+            deleteAPIKeyFromKeychain(service: openAIAPIKeyService)
+        } else if let keyData = openAIAPIKey.data(using: .utf8) {
+            try saveKeychainData(keyData, service: openAIAPIKeyService)
+        }
+        if groqAPIKey.isEmpty {
+            deleteAPIKeyFromKeychain(service: groqAPIKeyService)
+        } else if let keyData = groqAPIKey.data(using: .utf8) {
+            try saveKeychainData(keyData, service: groqAPIKeyService)
+        }
+        defaults.removeObject(forKey: openAIAPIKeyKey)
+        defaults.removeObject(forKey: groqAPIKeyKey)
         defaults.set(openAIModel, forKey: openAIModelKey)
+        defaults.set(groqModel, forKey: groqModelKey)
         defaults.set(ollamaURL, forKey: ollamaURLKey)
         defaults.set(ollamaModel, forKey: ollamaModelKey)
+    }
+
+    private func loadAPIKeyFromKeychain(service: String) -> String? {
+        var query = keychainBaseQuery(service: service)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess,
+              let data = item as? Data,
+              let key = String(data: data, encoding: .utf8),
+              !key.isEmpty
+        else { return nil }
+
+        return key
+    }
+
+    private func saveKeychainData(_ data: Data, service: String) throws {
+        var query = keychainBaseQuery(service: service)
+        let updateAttributes: [String: Any] = [
+            kSecValueData as String: data
+        ]
+        let addAttributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+
+        let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return
+        }
+
+        guard updateStatus == errSecItemNotFound else {
+            throw AssistantError.missingConfiguration("Could not update the API key in Keychain.")
+        }
+
+        query.merge(addAttributes) { _, new in new }
+        let addStatus = SecItemAdd(query as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw AssistantError.missingConfiguration("Could not save the API key in Keychain.")
+        }
+    }
+
+    private func deleteAPIKeyFromKeychain(service: String) {
+        SecItemDelete(keychainBaseQuery(service: service) as CFDictionary)
+    }
+
+    private func keychainBaseQuery(service: String) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: apiKeyAccount
+        ]
     }
 
     private func searchPreview(
@@ -1048,6 +1597,13 @@ final class BrainStore: ObservableObject {
 
     private func noteURL(for id: Note.ID, in brain: BrainSummary) -> URL? {
         let folder = notesFolderURL(for: brain)
+        if let indexedFileName = noteIdentityDatabase?.fileName(forNoteID: id) {
+            let indexedURL = folder.appendingPathComponent(indexedFileName)
+            if FileManager.default.fileExists(atPath: indexedURL.path) {
+                return indexedURL
+            }
+        }
+
         let markdownURL = folder.appendingPathComponent("\(id).md")
         if FileManager.default.fileExists(atPath: markdownURL.path) {
             return markdownURL
@@ -1278,7 +1834,25 @@ struct RecentVault: Identifiable, Codable, Equatable {
     let bookmarkData: Data?
 }
 
+struct AssistantConfiguration: Equatable {
+    let openAIAPIKey: String
+    let openAIModel: String
+    let groqAPIKey: String
+    let groqModel: String
+    let ollamaURL: String
+    let ollamaModel: String
+}
+
+struct AssistantPreview: Identifiable, Equatable {
+    let id = UUID()
+    let prompt: String
+    let markdown: String
+    let providerTitle: String
+    let createdAt: Date
+}
+
 enum AssistantModel: String, CaseIterable, Identifiable {
+    case groq
     case gpt
     case placeholder
     case ollama
@@ -1287,6 +1861,8 @@ enum AssistantModel: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .groq:
+            return "Groq"
         case .gpt:
             return "GPT"
         case .placeholder:
@@ -1332,7 +1908,25 @@ struct BrainFile: Codable {
     var sourceRegistry: SourceRegistryPointer
     var ai: BrainAIPreferences
     var styleMemory: [String]
+    var memory: BrainMemory?
     var app: BrainAppCompatibility
+}
+
+struct BrainMemory: Codable {
+    var writingArtifacts: [WritingArtifact]
+    var preferences: [String]
+    var correctionSignals: [CorrectionSignal]? = nil
+    var correctionPreferences: [CorrectionPreference]? = nil
+    var updatedAt: Date?
+}
+
+struct WritingArtifact: Codable, Identifiable {
+    let id: String
+    let sourceNoteID: String?
+    let sourceTitle: String
+    let excerpt: String
+    let wordCount: Int
+    let createdAt: Date
 }
 
 struct VaultIdentity: Codable {
@@ -1366,6 +1960,7 @@ struct SourceRegistryPointer: Codable {
 struct BrainAIPreferences: Codable {
     var provider: String
     var openaiModel: String
+    var groqModel: String?
     var ollamaModel: String
     var ollamaURL: String
     var appleModel: String?

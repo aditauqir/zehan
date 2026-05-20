@@ -25,3 +25,14 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+
+# Local secrets / API keys
+.env
+.env.*
+*.env
+*.local
+Secrets.xcconfig
+*.secrets
+*.keys
+APIKeys.plist
+Secrets.plist
