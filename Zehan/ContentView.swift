@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @ObservedObject var store: BrainStore
@@ -237,68 +238,127 @@ private struct WorkspaceView: View {
     @State private var isEditingMarkdown = false
     @State private var isShowingMarkdownHelp = false
     @State private var isReadingMode = false
+    @State private var isGraphExpanded = false
+    @State private var promptPillHeight: CGFloat = 38
+    @State private var isDocumentDropTargeted = false
 
     var body: some View {
-        NavigationSplitView {
-            VStack(spacing: 12) {
-                BrainSidebarHeader(store: store)
-                .onTapGesture {
-                    isEditingMarkdown = false
-                }
-
-                ScrollView {
-                    LazyVStack(spacing: 6) {
-                        ForEach(store.notes) { note in
-                            NoteSidebarRow(
-                                note: note,
-                                isSelected: store.selectedNoteID == note.id || store.currentNoteID == note.id,
-                                open: {
-                                    withAnimation(.easeInOut(duration: 0.18)) {
-                                        isEditingMarkdown = false
-                                        store.openNote(id: note.id)
-                                    }
-                                },
-                                rename: {
-                                    isEditingMarkdown = false
-                                    store.renameNoteFromUser(id: note.id)
-                                },
-                                nutshell: {
-                                    isEditingMarkdown = false
-                                    store.showNoteNutshell(id: note.id)
-                                },
-                                delete: {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        isEditingMarkdown = false
-                                        store.deleteNote(id: note.id)
-                                    }
-                                }
-                            )
-                        }
+        ZStack {
+            NavigationSplitView {
+                VStack(spacing: 12) {
+                    BrainSidebarHeader(store: store)
+                    .onTapGesture {
+                        isEditingMarkdown = false
                     }
-                    .padding(.top, 8)
-                }
-                .scrollContentBackground(.hidden)
-                .onTapGesture {
-                    isEditingMarkdown = false
-                }
 
-                NoteGraphView(
+                    ScrollView {
+                        LazyVStack(spacing: 6) {
+                            ForEach(store.notes) { note in
+                                NoteSidebarRow(
+                                    note: note,
+                                    isSelected: store.selectedNoteID == note.id || store.currentNoteID == note.id,
+                                    open: {
+                                        withAnimation(.easeInOut(duration: 0.18)) {
+                                            isEditingMarkdown = false
+                                            store.openNote(id: note.id)
+                                        }
+                                    },
+                                    rename: {
+                                        isEditingMarkdown = false
+                                        store.renameNoteFromUser(id: note.id)
+                                    },
+                                    nutshell: {
+                                        isEditingMarkdown = false
+                                        store.showNoteNutshell(id: note.id)
+                                    },
+                                    delete: {
+                                        withAnimation(.easeInOut(duration: 0.2)) {
+                                            isEditingMarkdown = false
+                                            store.deleteNote(id: note.id)
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                        .padding(.top, 8)
+                    }
+                    .scrollContentBackground(.hidden)
+                    .onTapGesture {
+                        isEditingMarkdown = false
+                    }
+
+                    ContextUsageBar(store: store)
+
+                    NoteGraphView(
+                        notes: store.notes,
+                        links: store.graphLinks,
+                        selectedNoteID: store.currentNoteID,
+                        maxVisibleNotes: 12,
+                        openNote: { noteID in
+                            isEditingMarkdown = false
+                            store.openNote(id: noteID)
+                        },
+                        expand: {
+                            withAnimation(.easeInOut(duration: 0.24)) {
+                                isGraphExpanded = true
+                            }
+                        }
+                    )
+                    .frame(height: 152)
+                    .padding(.bottom, 10)
+                }
+                .padding(.horizontal, 12)
+                .navigationSplitViewColumnWidth(min: 220, ideal: 260)
+            } detail: {
+                ZStack(alignment: .bottom) {
+                    workspaceDetail
+                }
+            }
+
+            if isGraphExpanded {
+                ExpandedGraphOverlay(
                     notes: store.notes,
                     links: store.graphLinks,
                     selectedNoteID: store.currentNoteID,
                     openNote: { noteID in
                         isEditingMarkdown = false
                         store.openNote(id: noteID)
+                    },
+                    close: {
+                        withAnimation(.easeInOut(duration: 0.22)) {
+                            isGraphExpanded = false
+                        }
                     }
                 )
-                .frame(height: 152)
-                .padding(.bottom, 10)
+                .transition(.scale(scale: 0.985).combined(with: .opacity))
+                .zIndex(4)
             }
-            .padding(.horizontal, 12)
-            .navigationSplitViewColumnWidth(min: 220, ideal: 260)
-        } detail: {
-            ZStack(alignment: .bottom) {
-                VStack(spacing: 0) {
+
+            if isDocumentDropTargeted {
+                DocumentDropSplash()
+                    .transition(.scale(scale: 0.96).combined(with: .opacity))
+                    .zIndex(5)
+            }
+        }
+        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDocumentDropTargeted) { providers in
+            handleDocumentDrop(providers)
+        }
+        .animation(.easeInOut(duration: 0.22), value: isReadingMode)
+        .animation(.easeInOut(duration: 0.24), value: isGraphExpanded)
+        .animation(.easeInOut(duration: 0.18), value: isDocumentDropTargeted)
+        .animation(.easeInOut(duration: 0.22), value: store.notes)
+        .animation(.easeInOut(duration: 0.18), value: store.status)
+        .animation(.easeInOut(duration: 0.2), value: store.isGeneratingAssistantResponse)
+        .sheet(isPresented: $isShowingMarkdownHelp) {
+            MarkdownHelpView()
+                .frame(width: 620, height: 680)
+                .presentationBackground(.regularMaterial)
+        }
+    }
+
+    private var workspaceDetail: some View {
+        ZStack(alignment: .bottom) {
+            VStack(spacing: 0) {
                     HStack {
                         DocumentChromeControls(
                             canDelete: store.selectedNoteID != nil || store.currentNoteID != nil,
@@ -328,7 +388,9 @@ private struct WorkspaceView: View {
                     MarkdownEditingSurface(
                         content: contentBinding,
                         isEditing: $isEditingMarkdown,
-                        openLinkedNote: { store.openLinkedNote(named: $0) }
+                        searchHighlight: store.activeSearchHighlight,
+                        openLinkedNote: { store.openLinkedNote(named: $0) },
+                        clearSearchHighlight: store.clearSearchHighlight
                     )
                         .padding(.horizontal, 38)
                         .padding(.top, 18)
@@ -365,9 +427,12 @@ private struct WorkspaceView: View {
                     if !isReadingMode {
                         AssistantFloatingPill(store: store)
                             .transition(.scale(scale: 0.96).combined(with: .opacity))
+                            .onPreferenceChange(PillHeightPreferenceKey.self) { height in
+                                promptPillHeight = max(38, height)
+                            }
                     }
 
-                    ReadingModeToggle(isOn: $isReadingMode)
+                    ReadingModeToggle(isOn: $isReadingMode, size: promptPillHeight)
                 }
                 .padding(.bottom, 54)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -376,16 +441,6 @@ private struct WorkspaceView: View {
                         isEditingMarkdown = false
                     }
                 )
-            }
-        }
-        .animation(.easeInOut(duration: 0.22), value: isReadingMode)
-        .animation(.easeInOut(duration: 0.22), value: store.notes)
-        .animation(.easeInOut(duration: 0.18), value: store.status)
-        .animation(.easeInOut(duration: 0.2), value: store.isGeneratingAssistantResponse)
-        .sheet(isPresented: $isShowingMarkdownHelp) {
-            MarkdownHelpView()
-                .frame(width: 620, height: 680)
-                .presentationBackground(.regularMaterial)
         }
     }
 
@@ -394,6 +449,50 @@ private struct WorkspaceView: View {
             get: { store.content },
             set: { store.updateContentFromEditor($0) }
         )
+    }
+
+    private func handleDocumentDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) else {
+            store.status = "Only PDFs and Word documents are supported"
+            return false
+        }
+
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+            let url: URL?
+            if let data = item as? Data {
+                url = URL(dataRepresentation: data, relativeTo: nil)
+            } else {
+                url = item as? URL
+            }
+
+            guard let url else { return }
+            Task { @MainActor in
+                store.attachPromptDocument(from: url)
+            }
+        }
+        return true
+    }
+}
+
+private struct DocumentDropSplash: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "doc.badge.plus")
+                .font(.system(size: 32, weight: .semibold))
+                .foregroundStyle(.blue.opacity(0.88))
+
+            Text("Only PDFs and Word documents supported")
+                .font(.system(size: 18, weight: .semibold))
+        }
+        .padding(.horizontal, 34)
+        .padding(.vertical, 28)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(.white.opacity(0.22), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.24), radius: 30, y: 16)
     }
 }
 
@@ -633,12 +732,17 @@ private struct NoteGraphView: View {
     let notes: [NoteSummary]
     let links: [BrainLinkReference]
     let selectedNoteID: Note.ID?
+    var maxVisibleNotes: Int? = 12
     let openNote: (Note.ID) -> Void
+    var expand: (() -> Void)?
+    @State private var nodeOffsets: [String: CGSize] = [:]
+    @State private var activeDragOffsets: [String: CGSize] = [:]
 
     var body: some View {
         GeometryReader { proxy in
-            let visibleNotes = Array(notes.prefix(12))
-            let positions = nodePositions(for: visibleNotes, in: proxy.size)
+            let visibleNotes = maxVisibleNotes.map { Array(notes.prefix($0)) } ?? notes
+            let basePositions = nodePositions(for: visibleNotes, in: proxy.size)
+            let positions = adjustedPositions(from: basePositions)
 
             ZStack {
                 Canvas { context, _ in
@@ -666,6 +770,22 @@ private struct NoteGraphView: View {
                             openNote(note.id)
                         }
                         .position(point)
+                        .gesture(
+                            DragGesture(minimumDistance: 2)
+                                .onChanged { value in
+                                    activeDragOffsets[note.id] = value.translation
+                                }
+                                .onEnded { value in
+                                    let existing = nodeOffsets[note.id] ?? .zero
+                                    nodeOffsets[note.id] = CGSize(
+                                        width: existing.width + value.translation.width,
+                                        height: existing.height + value.translation.height
+                                    )
+                                    activeDragOffsets[note.id] = .zero
+                                }
+                        )
+                        .animation(.interactiveSpring(response: 0.24, dampingFraction: 0.76), value: activeDragOffsets[note.id])
+                        .animation(.spring(response: 0.34, dampingFraction: 0.72), value: nodeOffsets[note.id])
                     }
                 }
             }
@@ -676,6 +796,27 @@ private struct NoteGraphView: View {
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        }
+        .overlay(alignment: .topTrailing) {
+            if let expand {
+                Button {
+                    expand()
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .foregroundStyle(.primary.opacity(0.66))
+                        .frame(width: 26, height: 26)
+                        .background(.ultraThinMaterial)
+                        .clipShape(Circle())
+                        .overlay {
+                            Circle()
+                                .stroke(.white.opacity(0.16), lineWidth: 0.8)
+                        }
+                }
+                .buttonStyle(.plain)
+                .help("Expand Graph")
+                .padding(8)
+            }
         }
     }
 
@@ -698,6 +839,119 @@ private struct NoteGraphView: View {
             positions[note.id] = point
         }
         return positions
+    }
+
+    private func adjustedPositions(from basePositions: [String: CGPoint]) -> [String: CGPoint] {
+        basePositions.mapValues { point in point }
+            .reduce(into: [:]) { output, item in
+                let id = item.key
+                let offset = nodeOffsets[id] ?? .zero
+                let activeOffset = activeDragOffsets[id] ?? .zero
+                output[id] = CGPoint(
+                    x: item.value.x + offset.width + activeOffset.width,
+                    y: item.value.y + offset.height + activeOffset.height
+                )
+            }
+    }
+}
+
+private struct ContextUsageBar: View {
+    @ObservedObject var store: BrainStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Label("Context", systemImage: "gauge.with.dots.needle.50percent")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Text("\(store.contextUsagePercent)%")
+                    .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .contentTransition(.numericText())
+            }
+
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.10))
+
+                    Capsule()
+                        .fill(usageGradient)
+                        .frame(width: max(8, proxy.size.width * store.contextUsageFraction))
+                }
+            }
+            .frame(height: 7)
+        }
+        .padding(.horizontal, 2)
+        .padding(.top, 2)
+    }
+
+    private var usageGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color(red: 0.28, green: 0.72, blue: 0.95),
+                Color(red: 0.66, green: 0.84, blue: 0.28)
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
+}
+
+private struct ExpandedGraphOverlay: View {
+    let notes: [NoteSummary]
+    let links: [BrainLinkReference]
+    let selectedNoteID: Note.ID?
+    let openNote: (Note.ID) -> Void
+    let close: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.34)
+                .ignoresSafeArea()
+                .onTapGesture(perform: close)
+
+            VStack(spacing: 12) {
+                HStack(spacing: 12) {
+                    Label("Graph", systemImage: "point.3.connected.trianglepath.dotted")
+                        .font(.system(size: 15, weight: .semibold))
+
+                    Spacer()
+
+                    Button(action: close) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .frame(width: 32, height: 32)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close Graph")
+                }
+
+                NoteGraphView(
+                    notes: notes,
+                    links: links,
+                    selectedNoteID: selectedNoteID,
+                    maxVisibleNotes: nil,
+                    openNote: openNote,
+                    expand: nil
+                )
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.regularMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(.white.opacity(0.18), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.34), radius: 34, y: 18)
+            .padding(28)
+        }
     }
 }
 
@@ -833,7 +1087,9 @@ private struct NoteSidebarRow: View {
 private struct MarkdownEditingSurface: View {
     @Binding var content: String
     @Binding var isEditing: Bool
+    let searchHighlight: SearchHighlight?
     let openLinkedNote: (String) -> Void
+    let clearSearchHighlight: () -> Void
 
     var body: some View {
         Group {
@@ -856,18 +1112,34 @@ private struct MarkdownEditingSurface: View {
     }
 
     private var renderedPreview: some View {
-        ScrollView {
-            MarkdownPreview(content: content, openLinkedNote: openLinkedNote)
-                .padding(.horizontal, 26)
-                .padding(.top, 2)
-                .padding(.bottom, 24)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        ScrollViewReader { reader in
+            ScrollView {
+                MarkdownPreview(
+                    content: content,
+                    searchHighlight: searchHighlight,
+                    openLinkedNote: openLinkedNote
+                )
+                    .padding(.horizontal, 26)
+                    .padding(.top, 2)
+                    .padding(.bottom, 24)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .onChange(of: searchHighlight) { _, highlight in
+                guard let highlight else { return }
+                withAnimation(.easeInOut(duration: 0.28)) {
+                    reader.scrollTo(highlight.blockIndex, anchor: .center)
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor).opacity(0.72))
         .contentShape(Rectangle())
         .onTapGesture {
-            isEditing = true
+            if searchHighlight != nil {
+                clearSearchHighlight()
+            } else {
+                isEditing = true
+            }
         }
     }
 }
@@ -905,7 +1177,7 @@ private struct AssistantPreviewPanel: View {
             }
 
             ScrollView {
-                MarkdownPreview(content: preview.markdown, openLinkedNote: openLinkedNote)
+                MarkdownPreview(content: preview.markdown, searchHighlight: nil, openLinkedNote: openLinkedNote)
                     .padding(.trailing, 4)
             }
             .frame(maxHeight: 220)
@@ -924,6 +1196,7 @@ private struct AssistantPreviewPanel: View {
 
 private struct ReadingModeToggle: View {
     @Binding var isOn: Bool
+    let size: CGFloat
     @State private var isHovered = false
 
     var body: some View {
@@ -935,7 +1208,7 @@ private struct ReadingModeToggle: View {
             Image(systemName: "eyeglasses")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(.primary.opacity(isOn ? 0.9 : 0.62))
-                .frame(width: 38, height: 38)
+                .frame(width: size, height: size)
                 .background(.ultraThinMaterial)
                 .clipShape(Circle())
                 .overlay {
@@ -959,12 +1232,39 @@ private struct ReadingModeToggle: View {
     }
 }
 
+private struct PillHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 38
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private struct AssistantFloatingPill: View {
     @ObservedObject var store: BrainStore
     @FocusState private var isPromptFocused: Bool
+    @State private var isExpandedComposerPresented = false
 
     var body: some View {
         VStack(alignment: .center, spacing: 8) {
+            if isExpandedComposerPresented {
+                ExpandedPromptComposer(
+                    prompt: $store.assistantPrompt,
+                    submit: submitOrPreviewThinking,
+                    close: {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            isExpandedComposerPresented = false
+                        }
+                    }
+                )
+                .transition(.scale(scale: 0.96).combined(with: .opacity))
+            }
+
+            if store.isUsingWebSearch {
+                WebSearchStatusPill()
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             if isThinking {
                 ThinkingStatusPill()
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -976,7 +1276,7 @@ private struct AssistantFloatingPill: View {
                         Button {
                             store.selectedAssistantModel = model
                         } label: {
-                            if store.selectedAssistantModel == model {
+                            if model == store.selectedAssistantModel {
                                 Label(model.title, systemImage: "checkmark")
                             } else {
                                 Text(model.title)
@@ -984,16 +1284,19 @@ private struct AssistantFloatingPill: View {
                         }
                     }
                 } label: {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 4) {
                         Text(store.selectedAssistantModel.title)
-                            .font(.system(size: 10.5, weight: .semibold))
+                            .font(.system(size: 12.2, weight: .semibold))
+                            .lineLimit(1)
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 7.5, weight: .semibold))
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundStyle(.secondary)
                     }
-                    .foregroundStyle(.primary.opacity(0.78))
+                    .frame(width: 104, alignment: .leading)
                 }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
                 .buttonStyle(.plain)
-                .frame(width: 42, alignment: .leading)
 
                 Rectangle()
                     .fill(Color.primary.opacity(0.12))
@@ -1009,6 +1312,49 @@ private struct AssistantFloatingPill: View {
                         submitOrPreviewThinking()
                     }
 
+                if let attachment = store.assistantAttachment {
+                    HStack(spacing: 4) {
+                        Image(systemName: "paperclip")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(attachment.fileName)
+                            .font(.system(size: 10.5, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: 92)
+                        Button {
+                            store.removePromptAttachment()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove attachment")
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .frame(height: 24)
+                    .background(Color.primary.opacity(0.06))
+                    .clipShape(Capsule())
+                } else {
+                    Image(systemName: "paperclip")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary.opacity(0.58))
+                        .frame(width: 24, height: 24)
+                        .help("Drag a PDF or Word document anywhere into the app")
+                }
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        isExpandedComposerPresented.toggle()
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .help("Expand prompt")
+
                 Button {
                     submitOrPreviewThinking()
                 } label: {
@@ -1017,7 +1363,7 @@ private struct AssistantFloatingPill: View {
                         .symbolRenderingMode(.hierarchical)
                 }
                 .buttonStyle(.plain)
-                .disabled(store.assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isThinking)
+                .disabled(!hasPromptInput && !isThinking)
             }
             .padding(.leading, 11)
             .padding(.trailing, 7)
@@ -1025,6 +1371,11 @@ private struct AssistantFloatingPill: View {
             .frame(width: pillWidth)
             .frame(minHeight: 34)
             .background(.ultraThinMaterial)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(key: PillHeightPreferenceKey.self, value: proxy.size.height)
+                }
+            }
             .clipShape(RoundedRectangle(cornerRadius: pillCornerRadius, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: pillCornerRadius, style: .continuous)
@@ -1040,6 +1391,7 @@ private struct AssistantFloatingPill: View {
         .animation(.easeOut(duration: 0.18), value: pillWidth)
         .animation(.easeInOut(duration: 0.18), value: pillCornerRadius)
         .animation(.easeOut(duration: 0.18), value: isThinking)
+        .animation(.easeInOut(duration: 0.18), value: store.assistantAttachment)
     }
 
     private var isThinking: Bool {
@@ -1047,11 +1399,11 @@ private struct AssistantFloatingPill: View {
     }
 
     private var pillWidth: CGFloat {
-        min(640, max(340, 116 + estimatedPromptWidth))
+        min(760, max(430, 230 + estimatedPromptWidth + attachmentWidth))
     }
 
     private var textFieldWidth: CGFloat {
-        max(178, pillWidth - 116)
+        max(158, pillWidth - 272 - attachmentWidth)
     }
 
     private var pillCornerRadius: CGFloat {
@@ -1066,6 +1418,15 @@ private struct AssistantFloatingPill: View {
     private var estimatedPromptWidth: CGFloat {
         let characterWidth: CGFloat = 7.35
         return min(524, max(86, CGFloat(measuredPromptText.count) * characterWidth))
+    }
+
+    private var attachmentWidth: CGFloat {
+        store.assistantAttachment == nil ? 24 : 128
+    }
+
+    private var hasPromptInput: Bool {
+        !store.assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || store.assistantAttachment != nil
     }
 
     private var borderColor: Color {
@@ -1089,12 +1450,72 @@ private struct AssistantFloatingPill: View {
             return
         }
 
-        guard !store.assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard hasPromptInput else {
             return
         }
 
         withAnimation(.easeInOut(duration: 0.2)) {
             store.submitAssistantPrompt()
+        }
+    }
+}
+
+private struct ExpandedPromptComposer: View {
+    @Binding var prompt: String
+    let submit: () -> Void
+    let close: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack {
+                Text("Prompt")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Button(action: close) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .help("Close")
+            }
+
+            TextEditor(text: $prompt)
+                .font(.system(size: 14))
+                .scrollContentBackground(.hidden)
+                .focused($isFocused)
+                .padding(8)
+                .background(Color.primary.opacity(0.055))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            HStack {
+                Spacer()
+                Button {
+                    submit()
+                    close()
+                } label: {
+                    Label("Send", systemImage: "arrow.up.circle.fill")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.borderless)
+                .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(14)
+        .frame(width: 620, height: 246)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(.white.opacity(0.18), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.22), radius: 26, y: 14)
+        .onAppear {
+            isFocused = true
         }
     }
 }
@@ -1112,6 +1533,28 @@ private struct ThinkingStatusPill: View {
                 AnimatedThinkingBorder(lineWidth: 0.75)
             }
             .shadow(color: .white.opacity(0.16), radius: 8)
+    }
+}
+
+private struct WebSearchStatusPill: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "globe")
+                .font(.system(size: 10.5, weight: .semibold))
+
+            Text("Web search")
+                .font(.system(size: 11, weight: .semibold))
+        }
+        .foregroundStyle(Color.blue.opacity(0.92))
+        .padding(.horizontal, 12)
+        .frame(height: 26)
+        .background(.ultraThinMaterial)
+        .clipShape(Capsule())
+        .overlay {
+            Capsule()
+                .stroke(Color.blue.opacity(0.22), lineWidth: 0.75)
+        }
+        .shadow(color: Color.blue.opacity(0.12), radius: 8)
     }
 }
 
@@ -1146,6 +1589,7 @@ private struct AnimatedThinkingBorder: View {
 
 private struct MarkdownPreview: View {
     let content: String
+    let searchHighlight: SearchHighlight?
     let openLinkedNote: (String) -> Void
 
     private var blocks: [MarkdownBlock] {
@@ -1156,6 +1600,7 @@ private struct MarkdownPreview: View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(blocks) { block in
                 blockView(block)
+                    .id(block.id)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1175,64 +1620,73 @@ private struct MarkdownPreview: View {
 
     @ViewBuilder
     private func blockView(_ block: MarkdownBlock) -> some View {
+        let isHighlighted = searchHighlight?.blockIndex == block.id
+
         switch block.kind {
         case .heading(let level, let text):
-            inlineText(text)
+            inlineText(text, highlighted: isHighlighted)
                 .font(.system(size: headingSize(for: level), weight: headingWeight(for: level)))
                 .padding(.top, level == 1 ? 0 : 5)
                 .padding(.bottom, 2)
+                .highlightedSearchBlock(isHighlighted)
 
         case .paragraph(let text):
-            inlineText(text)
+            inlineText(text, highlighted: isHighlighted)
                 .font(.system(size: 15.5))
                 .lineSpacing(4)
+                .highlightedSearchBlock(isHighlighted)
 
         case .bullet(let text):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("•")
                     .font(.system(size: 15.5, weight: .semibold))
-                inlineText(text)
+                inlineText(text, highlighted: isHighlighted)
                     .font(.system(size: 15.5))
             }
+            .highlightedSearchBlock(isHighlighted)
 
         case .task(let isDone, let text):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: isDone ? "checkmark.square.fill" : "square")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(isDone ? .green.opacity(0.82) : .secondary)
-                inlineText(text)
+                inlineText(text, highlighted: isHighlighted)
                     .font(.system(size: 15.5))
                     .foregroundStyle(isDone ? .secondary : .primary)
             }
+            .highlightedSearchBlock(isHighlighted)
 
         case .numbered(let number, let text):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("\(number).")
                     .font(.system(size: 15.5, weight: .medium))
                     .foregroundStyle(.secondary)
-                inlineText(text)
+                inlineText(text, highlighted: isHighlighted)
                     .font(.system(size: 15.5))
             }
+            .highlightedSearchBlock(isHighlighted)
 
         case .quote(let text):
             HStack(alignment: .top, spacing: 12) {
                 RoundedRectangle(cornerRadius: 1)
                     .fill(.secondary.opacity(0.28))
                     .frame(width: 3)
-                inlineText(text)
+                inlineText(text, highlighted: isHighlighted)
                     .font(.system(size: 15.5).italic())
                     .foregroundStyle(.secondary)
             }
             .padding(.vertical, 2)
+            .highlightedSearchBlock(isHighlighted)
 
         case .code(let text):
-            Text(text)
+            inlineText(text, highlighted: isHighlighted)
                 .font(.system(size: 13.5, design: .monospaced))
                 .textSelection(.enabled)
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.quaternary.opacity(0.45))
                 .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .highlightedSearchBlock(isHighlighted)
 
         case .divider:
             Rectangle()
@@ -1242,7 +1696,11 @@ private struct MarkdownPreview: View {
         }
     }
 
-    private func inlineText(_ markdown: String) -> Text {
+    private func inlineText(_ markdown: String, highlighted: Bool = false) -> Text {
+        if highlighted, let query = searchHighlight?.query, !query.isEmpty {
+            return Text(attributedSearchText(markdown, query: query))
+        }
+
         let normalized = markdownByHighlightingWikiLinks(markdown)
             .replacingOccurrences(
                 of: #"==([^=]+)=="#,
@@ -1260,6 +1718,16 @@ private struct MarkdownPreview: View {
         }
 
         return Text(normalized)
+    }
+
+    private func attributedSearchText(_ text: String, query: String) -> AttributedString {
+        var attributed = AttributedString(text)
+        guard let range = attributed.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) else {
+            return attributed
+        }
+        attributed[range].backgroundColor = .yellow.opacity(0.55)
+        attributed[range].foregroundColor = .black
+        return attributed
     }
 
     private func markdownByHighlightingWikiLinks(_ markdown: String) -> String {
@@ -1319,7 +1787,7 @@ private struct MarkdownBlock: Identifiable {
         case divider
     }
 
-    let id = UUID()
+    let id: Int
     let kind: Kind
 
     static func parse(_ markdown: String) -> [MarkdownBlock] {
@@ -1329,9 +1797,13 @@ private struct MarkdownBlock: Identifiable {
         var codeLines: [String] = []
         var isInCodeBlock = false
 
+        func append(_ kind: Kind) {
+            blocks.append(MarkdownBlock(id: blocks.count, kind: kind))
+        }
+
         func flushParagraph() {
             guard !paragraph.isEmpty else { return }
-            blocks.append(MarkdownBlock(kind: .paragraph(paragraph.joined(separator: " "))))
+            append(.paragraph(paragraph.joined(separator: " ")))
             paragraph.removeAll()
         }
 
@@ -1340,7 +1812,7 @@ private struct MarkdownBlock: Identifiable {
 
             if trimmed.hasPrefix("```") {
                 if isInCodeBlock {
-                    blocks.append(MarkdownBlock(kind: .code(codeLines.joined(separator: "\n"))))
+                    append(.code(codeLines.joined(separator: "\n")))
                     codeLines.removeAll()
                 } else {
                     flushParagraph()
@@ -1361,23 +1833,23 @@ private struct MarkdownBlock: Identifiable {
 
             if let heading = parseHeading(trimmed) {
                 flushParagraph()
-                blocks.append(MarkdownBlock(kind: .heading(level: heading.level, text: heading.text)))
+                append(.heading(level: heading.level, text: heading.text))
             } else if isDivider(trimmed) {
                 flushParagraph()
-                blocks.append(MarkdownBlock(kind: .divider))
+                append(.divider)
             } else if let task = parseTask(trimmed) {
                 flushParagraph()
-                blocks.append(MarkdownBlock(kind: .task(isDone: task.isDone, text: task.text)))
+                append(.task(isDone: task.isDone, text: task.text))
             } else if let bullet = parseBullet(trimmed) {
                 flushParagraph()
-                blocks.append(MarkdownBlock(kind: .bullet(bullet)))
+                append(.bullet(bullet))
             } else if let numbered = parseNumbered(trimmed) {
                 flushParagraph()
-                blocks.append(MarkdownBlock(kind: .numbered(numbered.number, numbered.text)))
+                append(.numbered(numbered.number, numbered.text))
             } else if trimmed.hasPrefix(">") {
                 flushParagraph()
                 let text = trimmed.dropFirst().trimmingCharacters(in: .whitespaces)
-                blocks.append(MarkdownBlock(kind: .quote(text)))
+                append(.quote(text))
             } else {
                 paragraph.append(trimmed)
             }
@@ -1385,7 +1857,7 @@ private struct MarkdownBlock: Identifiable {
 
         flushParagraph()
         if isInCodeBlock, !codeLines.isEmpty {
-            blocks.append(MarkdownBlock(kind: .code(codeLines.joined(separator: "\n"))))
+            append(.code(codeLines.joined(separator: "\n")))
         }
 
         return blocks
@@ -1426,6 +1898,19 @@ private struct MarkdownBlock: Identifiable {
         let textStart = line.index(after: markerIndex)
         guard textStart < line.endIndex, line[textStart] == " " else { return nil }
         return (number, String(line[line.index(after: textStart)...]))
+    }
+}
+
+private extension View {
+    func highlightedSearchBlock(_ isHighlighted: Bool) -> some View {
+        self
+            .padding(isHighlighted ? 4 : 0)
+            .background {
+                if isHighlighted {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.yellow.opacity(0.22))
+                }
+            }
     }
 }
 
@@ -1476,22 +1961,18 @@ private struct ModelConfigurationView: View {
     @ObservedObject var store: BrainStore
     @Environment(\.dismiss) private var dismiss
 
-    @State private var openAIAPIKey: String
-    @State private var openAIModel: String
+    @State private var openRouterAPIKey: String
+    @State private var openRouterModel: String
     @State private var groqAPIKey: String
     @State private var groqModel: String
-    @State private var ollamaURL: String
-    @State private var ollamaModel: String
 
     init(store: BrainStore) {
         self.store = store
         let configuration = store.assistantConfigurationSnapshot
-        _openAIAPIKey = State(initialValue: configuration.openAIAPIKey)
-        _openAIModel = State(initialValue: configuration.openAIModel)
+        _openRouterAPIKey = State(initialValue: configuration.openRouterAPIKey)
+        _openRouterModel = State(initialValue: configuration.openRouterModel)
         _groqAPIKey = State(initialValue: configuration.groqAPIKey)
         _groqModel = State(initialValue: configuration.groqModel)
-        _ollamaURL = State(initialValue: configuration.ollamaURL)
-        _ollamaModel = State(initialValue: configuration.ollamaModel)
     }
 
     var body: some View {
@@ -1506,7 +1987,7 @@ private struct ModelConfigurationView: View {
                     Text("Configure Model")
                         .font(.system(size: 24, weight: .bold))
 
-                    Text("Add the credentials and local endpoints Zirn should use for Groq, GPT, and Ollama.")
+                    Text("Add the credentials Zirn should use for OpenRouter and Groq.")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1514,28 +1995,20 @@ private struct ModelConfigurationView: View {
             }
 
             VStack(alignment: .leading, spacing: 14) {
+                ConfigurationField(title: "OpenRouter API Key") {
+                    SecureField("sk-or-...", text: $openRouterAPIKey)
+                }
+
+                ConfigurationField(title: "OpenRouter Model") {
+                    TextField("openai/gpt-5", text: $openRouterModel)
+                }
+
                 ConfigurationField(title: "Groq API Key") {
                     SecureField("gsk-...", text: $groqAPIKey)
                 }
 
                 ConfigurationField(title: "Groq Model") {
                     TextField("llama-3.3-70b-versatile", text: $groqModel)
-                }
-
-                ConfigurationField(title: "OpenAI API Key") {
-                    SecureField("sk-...", text: $openAIAPIKey)
-                }
-
-                ConfigurationField(title: "GPT Model") {
-                    TextField("gpt-5", text: $openAIModel)
-                }
-
-                ConfigurationField(title: "Ollama URL") {
-                    TextField("http://localhost:11434", text: $ollamaURL)
-                }
-
-                ConfigurationField(title: "Ollama Model") {
-                    TextField("llama3.2", text: $ollamaModel)
                 }
             }
 
@@ -1551,12 +2024,10 @@ private struct ModelConfigurationView: View {
 
                 Button {
                     store.saveModelConfiguration(
-                        openAIAPIKey: openAIAPIKey,
-                        openAIModel: openAIModel,
+                        openRouterAPIKey: openRouterAPIKey,
+                        openRouterModel: openRouterModel,
                         groqAPIKey: groqAPIKey,
-                        groqModel: groqModel,
-                        ollamaURL: ollamaURL,
-                        ollamaModel: ollamaModel
+                        groqModel: groqModel
                     )
                     dismiss()
                 } label: {
@@ -1630,15 +2101,15 @@ private struct PageSearchView: View {
             } else {
                 List(results) { result in
                     Button {
-                        store.openNote(id: result.id)
+                        store.openSearchResult(result)
                         store.isShowingPageSearch = false
                     } label: {
                         VStack(alignment: .leading, spacing: 5) {
-                            Text(result.title)
+                            Text(highlightedText(result.title, query: query))
                                 .font(.system(size: 13, weight: .semibold))
                                 .lineLimit(1)
 
-                            Text(result.preview)
+                            Text(highlightedText(result.preview, query: query))
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
@@ -1663,6 +2134,19 @@ private struct PageSearchView: View {
         .task {
             isSearchFocused = true
         }
+    }
+
+    private func highlightedText(_ text: String, query: String) -> AttributedString {
+        var attributed = AttributedString(text)
+        let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanQuery.isEmpty,
+              let range = attributed.range(of: cleanQuery, options: [.caseInsensitive, .diacriticInsensitive])
+        else {
+            return attributed
+        }
+        attributed[range].backgroundColor = .yellow.opacity(0.58)
+        attributed[range].foregroundColor = .black
+        return attributed
     }
 }
 

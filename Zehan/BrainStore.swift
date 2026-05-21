@@ -8,7 +8,7 @@
 import Combine
 import Foundation
 import AppKit
-import Security
+import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -29,31 +29,28 @@ final class BrainStore: ObservableObject {
     @Published var isShowingPageSearch = false
     @Published var recentVaults: [RecentVault] = []
     @Published var graphLinks: [BrainLinkReference] = []
-    @Published var selectedAssistantModel: AssistantModel = .groq
+    @Published var selectedAssistantModel: AssistantModel = .openRouter
     @Published var assistantPrompt = ""
     @Published var isGeneratingAssistantResponse = false
+    @Published var isUsingWebSearch = false
     @Published var isShowingModelConfiguration = false
     @Published var pendingAssistantPreview: AssistantPreview?
+    @Published var activeSearchHighlight: SearchHighlight?
+    @Published var assistantAttachment: PromptAttachment?
 
     private let encoder: JSONEncoder
     private let decoder = JSONDecoder()
     private let recentVaultsKey = "RecentVaults"
     private let openAIAPIKeyKey = "Assistant.OpenAIAPIKey"
-    private let openAIAPIKeyService = "noortech.Zirn.openai.apiKey"
-    private let legacyOpenAIAPIKeyService = "noortech.Zehan.openai.apiKey"
-    private let apiKeyAccount = "default"
     private let openAIModelKey = "Assistant.OpenAIModel"
+    private let openRouterAPIKeyKey = "Assistant.OpenRouterAPIKey"
+    private let openRouterModelKey = "Assistant.OpenRouterModel"
     private let groqAPIKeyKey = "Assistant.GroqAPIKey"
-    private let groqAPIKeyService = "noortech.Zirn.groq.apiKey"
     private let groqModelKey = "Assistant.GroqModel"
-    private let ollamaURLKey = "Assistant.OllamaURL"
-    private let ollamaModelKey = "Assistant.OllamaModel"
-    private var openAIAPIKey = ""
-    private var openAIModel = "gpt-5"
+    private var openRouterAPIKey = ""
+    private var openRouterModel = "openai/gpt-5"
     private var groqAPIKey = ""
     private var groqModel = "llama-3.3-70b-versatile"
-    private var ollamaURL = "http://localhost:11434"
-    private var ollamaModel = "llama3.2"
     private var autosaveTask: Task<Void, Never>?
     private var pendingAssistantInsertion: PendingAssistantInsertion?
     private var isApplyingAssistantOutput = false
@@ -73,6 +70,16 @@ final class BrainStore: ObservableObject {
             .split { $0.isWhitespace || $0.isNewline }
             .count
         return "\(wordCount) words · \(content.count.formatted()) characters"
+    }
+
+    var contextUsageFraction: Double {
+        let attachmentCount = assistantAttachment?.extractedText.count ?? 0
+        let estimatedCharacters = content.count + assistantPrompt.count + attachmentCount
+        return min(1, Double(estimatedCharacters) / 128_000)
+    }
+
+    var contextUsagePercent: Int {
+        Int((contextUsageFraction * 100).rounded())
     }
 
     func createBrainVaultFromUser() {
@@ -140,11 +147,11 @@ final class BrainStore: ObservableObject {
                     graph: BrainGraph(notes: [], links: []),
                     sourceRegistry: SourceRegistryPointer(path: "sources.json"),
                     ai: BrainAIPreferences(
-                        provider: "groq",
-                        openaiModel: "gpt-5.5",
+                        provider: "openrouter",
+                        openaiModel: "openai/gpt-5",
                         groqModel: "llama-3.3-70b-versatile",
-                        ollamaModel: "llama3.2",
-                        ollamaURL: "http://localhost:11434",
+                        ollamaModel: nil,
+                        ollamaURL: nil,
                         appleModel: nil
                     ),
                     styleMemory: [],
@@ -277,6 +284,7 @@ final class BrainStore: ObservableObject {
     }
 
     func openNote(id: Note.ID) {
+        activeSearchHighlight = nil
         if let currentNoteID, currentNoteID != id {
             autosaveTask?.cancel()
             autosaveTask = nil
@@ -378,34 +386,26 @@ final class BrainStore: ObservableObject {
 
     var assistantConfigurationSnapshot: AssistantConfiguration {
         AssistantConfiguration(
-            openAIAPIKey: openAIAPIKey,
-            openAIModel: openAIModel,
+            openRouterAPIKey: openRouterAPIKey,
+            openRouterModel: openRouterModel,
             groqAPIKey: groqAPIKey,
-            groqModel: groqModel,
-            ollamaURL: ollamaURL,
-            ollamaModel: ollamaModel
+            groqModel: groqModel
         )
     }
 
     func saveModelConfiguration(
-        openAIAPIKey: String,
-        openAIModel: String,
+        openRouterAPIKey: String,
+        openRouterModel: String,
         groqAPIKey: String,
-        groqModel: String,
-        ollamaURL: String,
-        ollamaModel: String
+        groqModel: String
     ) {
-        self.openAIAPIKey = openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.openAIModel = openAIModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.openRouterAPIKey = openRouterAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.openRouterModel = openRouterModel.trimmingCharacters(in: .whitespacesAndNewlines)
         self.groqAPIKey = groqAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         self.groqModel = groqModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.ollamaURL = ollamaURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.ollamaModel = ollamaModel.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if self.openAIModel.isEmpty { self.openAIModel = "gpt-5" }
+        if self.openRouterModel.isEmpty { self.openRouterModel = "openai/gpt-5" }
         if self.groqModel.isEmpty { self.groqModel = "llama-3.3-70b-versatile" }
-        if self.ollamaURL.isEmpty { self.ollamaURL = "http://localhost:11434" }
-        if self.ollamaModel.isEmpty { self.ollamaModel = "llama3.2" }
 
         do {
             try saveAssistantConfiguration()
@@ -418,11 +418,12 @@ final class BrainStore: ObservableObject {
 
     func submitAssistantPrompt() {
         let prompt = assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, !isGeneratingAssistantResponse else { return }
+        guard (!prompt.isEmpty || assistantAttachment != nil), !isGeneratingAssistantResponse else { return }
 
         assistantPrompt = ""
         pendingAssistantPreview = nil
         isGeneratingAssistantResponse = true
+        isUsingWebSearch = selectedAssistantModel.supportsWebSearch && promptSuggestsWebSearch(prompt)
         status = "\(selectedAssistantModel.title) is writing"
 
         Task {
@@ -613,7 +614,13 @@ final class BrainStore: ObservableObject {
         let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanQuery.isEmpty else {
             return notes.map {
-                NoteSearchResult(id: $0.id, title: $0.title, preview: "Recently updated")
+                NoteSearchResult(
+                    id: $0.id,
+                    title: $0.title,
+                    preview: "Recently updated",
+                    query: "",
+                    blockIndex: nil
+                )
             }
         }
 
@@ -628,7 +635,10 @@ final class BrainStore: ObservableObject {
             let plainContent = plainText(fromMarkdown: note.content)
             let fileName = noteURL.lastPathComponent
             let titleMatches = note.title.localizedCaseInsensitiveContains(cleanQuery)
-            let contentMatches = note.content.localizedCaseInsensitiveContains(cleanQuery)
+            let matchingBlock = markdownSearchBlocks(from: note.content)
+                .first { $0.text.localizedCaseInsensitiveContains(cleanQuery) }
+            let contentMatches = matchingBlock != nil
+                || note.content.localizedCaseInsensitiveContains(cleanQuery)
                 || plainContent.localizedCaseInsensitiveContains(cleanQuery)
             let fileNameMatches = fileName.localizedCaseInsensitiveContains(cleanQuery)
             guard titleMatches || contentMatches || fileNameMatches else { return nil }
@@ -642,10 +652,56 @@ final class BrainStore: ObservableObject {
                     plainContent: plainContent,
                     fileName: fileName,
                     titleMatches: titleMatches,
-                    fileNameMatches: fileNameMatches
-                )
+                    fileNameMatches: fileNameMatches,
+                    matchingBlockText: matchingBlock?.text
+                ),
+                query: cleanQuery,
+                blockIndex: titleMatches ? 0 : matchingBlock?.index
             )
         }
+    }
+
+    func openSearchResult(_ result: NoteSearchResult) {
+        openNote(id: result.id)
+        if let blockIndex = result.blockIndex, !result.query.isEmpty {
+            activeSearchHighlight = SearchHighlight(
+                noteID: result.id,
+                query: result.query,
+                blockIndex: blockIndex
+            )
+        } else {
+            activeSearchHighlight = nil
+        }
+    }
+
+    func clearSearchHighlight() {
+        activeSearchHighlight = nil
+    }
+
+    func attachPromptDocument(from url: URL) {
+        guard isSupportedPromptDocument(url) else {
+            status = "Only PDFs and Word documents are supported"
+            return
+        }
+
+        let didStart = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStart {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let extractedText = extractedPromptDocumentText(from: url)
+        assistantAttachment = PromptAttachment(
+            fileName: url.lastPathComponent,
+            fileExtension: url.pathExtension.lowercased(),
+            extractedText: extractedText
+        )
+        status = "\(url.lastPathComponent) attached"
+    }
+
+    func removePromptAttachment() {
+        assistantAttachment = nil
     }
 
     func openRecentVault(_ recentVault: RecentVault) {
@@ -1205,20 +1261,17 @@ final class BrainStore: ObservableObject {
     private func generateAssistantResponse(for prompt: String) async {
         defer {
             isGeneratingAssistantResponse = false
+            isUsingWebSearch = false
         }
 
         do {
             let output: String
             let providerTitle = selectedAssistantModel.title
             switch selectedAssistantModel {
-            case .gpt:
-                output = try await generateWithOpenAI(prompt: prompt)
+            case .openRouter:
+                output = try await generateWithOpenRouter(prompt: prompt)
             case .groq:
                 output = try await generateWithGroq(prompt: prompt)
-            case .placeholder:
-                output = generatePlaceholderMarkdown(prompt: prompt)
-            case .ollama:
-                output = try await generateWithOllama(prompt: prompt)
             }
 
             guard !cleanedAssistantMarkdown(output).isEmpty else {
@@ -1255,25 +1308,42 @@ final class BrainStore: ObservableObject {
         )
     }
 
-    private func generateWithOpenAI(prompt: String) async throws -> String {
-        guard !openAIAPIKey.isEmpty else {
-            throw AssistantError.missingConfiguration("Add an OpenAI API key in Settings > Configure Model.")
+    private func generateWithOpenRouter(prompt: String) async throws -> String {
+        guard !openRouterAPIKey.isEmpty else {
+            throw AssistantError.missingConfiguration("Add an OpenRouter API key in Settings > Configure Model.")
         }
 
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
+        var request = URLRequest(url: URL(string: "https://openrouter.ai/api/v1/chat/completions")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(openAIAPIKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": openAIModel,
-            "instructions": assistantInstructions(),
-            "input": assistantInput(for: prompt),
-            "store": false
-        ])
+        request.setValue("Bearer \(openRouterAPIKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("Zirn", forHTTPHeaderField: "X-Title")
+        var body: [String: Any] = [
+            "model": openRouterModel,
+            "messages": [
+                [
+                    "role": "system",
+                    "content": assistantInstructions()
+                ],
+                [
+                    "role": "user",
+                    "content": assistantInput(for: prompt)
+                ]
+            ],
+            "temperature": 0.35,
+            "max_tokens": 4096,
+            "stream": false
+        ]
+        if isUsingWebSearch {
+            body["plugins"] = [
+                ["id": "web"]
+            ]
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
         try validateHTTPResponse(response, data: data)
-        return try extractOpenAIOutputText(from: data)
+        return try extractChatCompletionOutputText(from: data)
     }
 
     private func generateWithGroq(prompt: String) async throws -> String {
@@ -1307,37 +1377,6 @@ final class BrainStore: ObservableObject {
         return try extractChatCompletionOutputText(from: data)
     }
 
-    private func generateWithOllama(prompt: String) async throws -> String {
-        guard let url = URL(string: ollamaURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/api/generate") else {
-            throw AssistantError.missingConfiguration("Add a valid Ollama URL in Settings > Configure Model.")
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": ollamaModel,
-            "prompt": "\(assistantInstructions())\n\n\(assistantInput(for: prompt))",
-            "stream": false
-        ])
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validateHTTPResponse(response, data: data)
-
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        return json?["response"] as? String ?? ""
-    }
-
-    private func generatePlaceholderMarkdown(prompt: String) -> String {
-        """
-        ## \(prompt)
-
-        - Draft the idea in your own language.
-        - Add context, examples, and next steps.
-        - Replace this placeholder with model output after configuring Groq, GPT, or Ollama.
-        """
-    }
-
     private func assistantInstructions() -> String {
         """
         You are Zirn's writing assistant. You edit the user's current Markdown document in place.
@@ -1359,7 +1398,10 @@ final class BrainStore: ObservableObject {
     private func assistantInput(for prompt: String) -> String {
         """
         User request:
-        \(prompt)
+        \(prompt.isEmpty ? "Use the attached document to update or extend the current Markdown document." : prompt)
+
+        Attached document:
+        \(assistantAttachmentContext())
 
         Current document title:
         \(title)
@@ -1376,6 +1418,42 @@ final class BrainStore: ObservableObject {
         Correction-derived preferences, strongest first:
         \(learnedCorrectionMemory())
         """
+    }
+
+    private func assistantAttachmentContext() -> String {
+        guard let assistantAttachment else { return "None" }
+        let text = assistantAttachment.extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clippedText = String(text.prefix(24_000))
+        if clippedText.isEmpty {
+            return "\(assistantAttachment.fileName) (\(assistantAttachment.fileExtension.uppercased())) attached, but no readable text could be extracted."
+        }
+        return """
+        File: \(assistantAttachment.fileName)
+        Type: \(assistantAttachment.fileExtension.uppercased())
+        Text:
+        \(clippedText)
+        """
+    }
+
+    private func promptSuggestsWebSearch(_ prompt: String) -> Bool {
+        let lowercasedPrompt = prompt.lowercased()
+        let webTerms = [
+            "web",
+            "search",
+            "internet",
+            "online",
+            "latest",
+            "current",
+            "today",
+            "news",
+            "browse",
+            "browser",
+            "recent",
+            "url",
+            "http",
+            "website"
+        ]
+        return webTerms.contains { lowercasedPrompt.contains($0) }
     }
 
     private func cleanedAssistantMarkdown(_ markdown: String) -> String {
@@ -1400,27 +1478,6 @@ final class BrainStore: ObservableObject {
         }
     }
 
-    private func extractOpenAIOutputText(from data: Data) throws -> String {
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw AssistantError.requestFailed("Could not read model response.")
-        }
-
-        if let outputText = json["output_text"] as? String {
-            return outputText
-        }
-
-        if let output = json["output"] as? [[String: Any]] {
-            return output.compactMap { item in
-                guard let content = item["content"] as? [[String: Any]] else { return nil }
-                return content.compactMap { contentItem in
-                    contentItem["text"] as? String
-                }.joined(separator: "\n")
-            }.joined(separator: "\n")
-        }
-
-        throw AssistantError.requestFailed("The model returned no Markdown.")
-    }
-
     private func extractChatCompletionOutputText(from data: Data) throws -> String {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
@@ -1436,105 +1493,26 @@ final class BrainStore: ObservableObject {
 
     private func loadAssistantConfiguration() {
         let defaults = UserDefaults.standard
-        let keychainAPIKey = loadAPIKeyFromKeychain(service: openAIAPIKeyService)
-            ?? loadAPIKeyFromKeychain(service: legacyOpenAIAPIKeyService)
-        let legacyDefaultsAPIKey = defaults.string(forKey: openAIAPIKeyKey)
-        openAIAPIKey = keychainAPIKey ?? legacyDefaultsAPIKey ?? ""
-        if keychainAPIKey == nil,
-           let legacyDefaultsAPIKey,
-           !legacyDefaultsAPIKey.isEmpty,
-           let keyData = legacyDefaultsAPIKey.data(using: .utf8) {
-            try? saveKeychainData(keyData, service: openAIAPIKeyService)
-        }
+        openRouterAPIKey = defaults.string(forKey: openRouterAPIKeyKey)
+            ?? defaults.string(forKey: openAIAPIKeyKey)
+            ?? ""
+        openRouterModel = defaults.string(forKey: openRouterModelKey)
+            ?? defaults.string(forKey: openAIModelKey)
+            ?? "openai/gpt-5"
         defaults.removeObject(forKey: openAIAPIKeyKey)
-        openAIModel = defaults.string(forKey: openAIModelKey) ?? "gpt-5"
-        let keychainGroqKey = loadAPIKeyFromKeychain(service: groqAPIKeyService)
-        let legacyDefaultsGroqKey = defaults.string(forKey: groqAPIKeyKey)
-        groqAPIKey = keychainGroqKey ?? legacyDefaultsGroqKey ?? ""
-        if keychainGroqKey == nil,
-           let legacyDefaultsGroqKey,
-           !legacyDefaultsGroqKey.isEmpty,
-           let keyData = legacyDefaultsGroqKey.data(using: .utf8) {
-            try? saveKeychainData(keyData, service: groqAPIKeyService)
-        }
-        defaults.removeObject(forKey: groqAPIKeyKey)
+        defaults.removeObject(forKey: openAIModelKey)
+        groqAPIKey = defaults.string(forKey: groqAPIKeyKey) ?? ""
         groqModel = defaults.string(forKey: groqModelKey) ?? "llama-3.3-70b-versatile"
-        ollamaURL = defaults.string(forKey: ollamaURLKey) ?? "http://localhost:11434"
-        ollamaModel = defaults.string(forKey: ollamaModelKey) ?? "llama3.2"
     }
 
     private func saveAssistantConfiguration() throws {
         let defaults = UserDefaults.standard
-        if openAIAPIKey.isEmpty {
-            deleteAPIKeyFromKeychain(service: openAIAPIKeyService)
-        } else if let keyData = openAIAPIKey.data(using: .utf8) {
-            try saveKeychainData(keyData, service: openAIAPIKeyService)
-        }
-        if groqAPIKey.isEmpty {
-            deleteAPIKeyFromKeychain(service: groqAPIKeyService)
-        } else if let keyData = groqAPIKey.data(using: .utf8) {
-            try saveKeychainData(keyData, service: groqAPIKeyService)
-        }
-        defaults.removeObject(forKey: openAIAPIKeyKey)
-        defaults.removeObject(forKey: groqAPIKeyKey)
-        defaults.set(openAIModel, forKey: openAIModelKey)
+        defaults.set(openRouterAPIKey, forKey: openRouterAPIKeyKey)
+        defaults.set(openRouterModel, forKey: openRouterModelKey)
+        defaults.set(groqAPIKey, forKey: groqAPIKeyKey)
         defaults.set(groqModel, forKey: groqModelKey)
-        defaults.set(ollamaURL, forKey: ollamaURLKey)
-        defaults.set(ollamaModel, forKey: ollamaModelKey)
-    }
-
-    private func loadAPIKeyFromKeychain(service: String) -> String? {
-        var query = keychainBaseQuery(service: service)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess,
-              let data = item as? Data,
-              let key = String(data: data, encoding: .utf8),
-              !key.isEmpty
-        else { return nil }
-
-        return key
-    }
-
-    private func saveKeychainData(_ data: Data, service: String) throws {
-        var query = keychainBaseQuery(service: service)
-        let updateAttributes: [String: Any] = [
-            kSecValueData as String: data
-        ]
-        let addAttributes: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ]
-
-        let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
-        if updateStatus == errSecSuccess {
-            return
-        }
-
-        guard updateStatus == errSecItemNotFound else {
-            throw AssistantError.missingConfiguration("Could not update the API key in Keychain.")
-        }
-
-        query.merge(addAttributes) { _, new in new }
-        let addStatus = SecItemAdd(query as CFDictionary, nil)
-        guard addStatus == errSecSuccess else {
-            throw AssistantError.missingConfiguration("Could not save the API key in Keychain.")
-        }
-    }
-
-    private func deleteAPIKeyFromKeychain(service: String) {
-        SecItemDelete(keychainBaseQuery(service: service) as CFDictionary)
-    }
-
-    private func keychainBaseQuery(service: String) -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: apiKeyAccount
-        ]
+        defaults.removeObject(forKey: openAIAPIKeyKey)
+        defaults.removeObject(forKey: openAIModelKey)
     }
 
     private func searchPreview(
@@ -1543,8 +1521,14 @@ final class BrainStore: ObservableObject {
         plainContent: String,
         fileName: String,
         titleMatches: Bool,
-        fileNameMatches: Bool
+        fileNameMatches: Bool,
+        matchingBlockText: String?
     ) -> String {
+        if let matchingBlockText,
+           let blockPreview = preview(for: query, in: matchingBlockText) {
+            return blockPreview
+        }
+
         if let contentPreview = preview(for: query, in: plainContent)
             ?? preview(for: query, in: note.content) {
             return contentPreview
@@ -1572,6 +1556,92 @@ final class BrainStore: ObservableObject {
             .replacingOccurrences(of: #"[*_~\[\]()>#]"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func markdownSearchBlocks(from markdown: String) -> [(index: Int, text: String)] {
+        let lines = markdown.components(separatedBy: .newlines)
+        var blocks: [(Int, String)] = []
+        var paragraph: [String] = []
+        var codeLines: [String] = []
+        var isInCodeBlock = false
+
+        func append(_ text: String) {
+            blocks.append((blocks.count, plainText(fromMarkdown: text)))
+        }
+
+        func flushParagraph() {
+            guard !paragraph.isEmpty else { return }
+            append(paragraph.joined(separator: " "))
+            paragraph.removeAll()
+        }
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.hasPrefix("```") {
+                if isInCodeBlock {
+                    append(codeLines.joined(separator: "\n"))
+                    codeLines.removeAll()
+                } else {
+                    flushParagraph()
+                }
+                isInCodeBlock.toggle()
+                continue
+            }
+
+            if isInCodeBlock {
+                codeLines.append(line)
+                continue
+            }
+
+            guard !trimmed.isEmpty else {
+                flushParagraph()
+                continue
+            }
+
+            if trimmed.hasPrefix("#"),
+               trimmed.drop(while: { $0 == "#" }).first == " " {
+                flushParagraph()
+                append(trimmed)
+            } else if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+                flushParagraph()
+                append(trimmed)
+            } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
+                flushParagraph()
+                append(String(trimmed.dropFirst(2)))
+            } else if trimmed.hasPrefix(">") {
+                flushParagraph()
+                append(String(trimmed.dropFirst()))
+            } else if let markerIndex = trimmed.firstIndex(where: { $0 == "." || $0 == ")" }),
+                      Int(trimmed[..<markerIndex]) != nil {
+                flushParagraph()
+                append(String(trimmed[trimmed.index(after: markerIndex)...]))
+            } else {
+                paragraph.append(trimmed)
+            }
+        }
+
+        flushParagraph()
+        if isInCodeBlock, !codeLines.isEmpty {
+            append(codeLines.joined(separator: "\n"))
+        }
+        return blocks
+    }
+
+    private func isSupportedPromptDocument(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        return ext == "pdf" || ext == "doc" || ext == "docx"
+    }
+
+    private func extractedPromptDocumentText(from url: URL) -> String {
+        switch url.pathExtension.lowercased() {
+        case "pdf":
+            return PDFDocument(url: url)?.string ?? ""
+        case "docx", "doc":
+            return (try? NSAttributedString(url: url, options: [:], documentAttributes: nil).string) ?? ""
+        default:
+            return ""
+        }
     }
 
     private func preview(for query: String, in content: String) -> String? {
@@ -1821,6 +1891,20 @@ struct NoteSearchResult: Identifiable, Equatable {
     let id: String
     let title: String
     let preview: String
+    let query: String
+    let blockIndex: Int?
+}
+
+struct SearchHighlight: Equatable {
+    let noteID: String
+    let query: String
+    let blockIndex: Int
+}
+
+struct PromptAttachment: Equatable {
+    let fileName: String
+    let fileExtension: String
+    let extractedText: String
 }
 
 struct RecentVault: Identifiable, Codable, Equatable {
@@ -1835,12 +1919,10 @@ struct RecentVault: Identifiable, Codable, Equatable {
 }
 
 struct AssistantConfiguration: Equatable {
-    let openAIAPIKey: String
-    let openAIModel: String
+    let openRouterAPIKey: String
+    let openRouterModel: String
     let groqAPIKey: String
     let groqModel: String
-    let ollamaURL: String
-    let ollamaModel: String
 }
 
 struct AssistantPreview: Identifiable, Equatable {
@@ -1852,24 +1934,22 @@ struct AssistantPreview: Identifiable, Equatable {
 }
 
 enum AssistantModel: String, CaseIterable, Identifiable {
+    case openRouter
     case groq
-    case gpt
-    case placeholder
-    case ollama
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
+        case .openRouter:
+            return "OpenRouter"
         case .groq:
             return "Groq"
-        case .gpt:
-            return "GPT"
-        case .placeholder:
-            return "Placeholder"
-        case .ollama:
-            return "Ollama"
         }
+    }
+
+    var supportsWebSearch: Bool {
+        self == .openRouter
     }
 }
 
@@ -1961,8 +2041,8 @@ struct BrainAIPreferences: Codable {
     var provider: String
     var openaiModel: String
     var groqModel: String?
-    var ollamaModel: String
-    var ollamaURL: String
+    var ollamaModel: String?
+    var ollamaURL: String?
     var appleModel: String?
 }
 
