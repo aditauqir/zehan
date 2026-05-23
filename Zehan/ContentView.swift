@@ -429,6 +429,7 @@ private struct WorkspaceView: View {
                         content: contentBinding,
                         isEditing: $isEditingMarkdown,
                         searchHighlight: store.activeSearchHighlight,
+                        noteTitles: store.notes.map(\.title),
                         openLinkedNote: { store.openLinkedNote(named: $0) },
                         clearSearchHighlight: store.clearSearchHighlight
                     )
@@ -480,11 +481,6 @@ private struct WorkspaceView: View {
                 }
                 .padding(.bottom, 54)
                 .frame(maxWidth: .infinity, alignment: .center)
-                .simultaneousGesture(
-                    TapGesture().onEnded {
-                        isEditingMarkdown = false
-                    }
-                )
         }
     }
 
@@ -863,7 +859,6 @@ private struct NoteGraphView: View {
     var expand: (() -> Void)?
     @State private var nodeOffsets: [String: CGSize] = [:]
     @State private var activeDragOffsets: [String: CGSize] = [:]
-    @State private var droppingNodeID: String?
 
     var body: some View {
         GeometryReader { proxy in
@@ -891,54 +886,47 @@ private struct NoteGraphView: View {
                 ForEach(visibleNotes) { note in
                     if let point = positions[note.id] {
                         let isDragging = activeDragOffsets[note.id] != nil
-                        let isDropping = droppingNodeID == note.id
 
-                        GraphNodeButton(
+                        GraphNodeView(
                             note: note,
                             isSelected: note.id == selectedNoteID
-                        ) {
+                        )
+                        .position(point)
+                        .scaleEffect(isDragging ? 1.08 : 1)
+                        .zIndex(isDragging ? 2 : 1)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
                             openNote(note.id)
                         }
-                        .position(point)
-                        .scaleEffect(isDragging ? 1.1 : (isDropping ? 0.97 : 1))
-                        .rotationEffect(.degrees(isDragging ? Double((activeDragOffsets[note.id]?.width ?? 0) / 34) : 0))
-                        .zIndex(isDragging || isDropping ? 2 : 1)
-                        .gesture(
-                            DragGesture(minimumDistance: 2)
+                        .highPriorityGesture(
+                            DragGesture(minimumDistance: 1)
                                 .onChanged { value in
-                                    droppingNodeID = nil
                                     activeDragOffsets[note.id] = value.translation
                                 }
                                 .onEnded { value in
+                                    guard let base = basePositions[note.id] else { return }
                                     let existing = nodeOffsets[note.id] ?? .zero
-                                    let restingOffset = CGSize(
-                                        width: existing.width + value.translation.width,
-                                        height: existing.height + value.translation.height
+                                    let desiredPoint = CGPoint(
+                                        x: base.x + existing.width + value.translation.width,
+                                        y: base.y + existing.height + value.translation.height
                                     )
-                                    withAnimation(.spring(response: 0.24, dampingFraction: 0.58)) {
+                                    let finalPoint = clampedNodePoint(desiredPoint, in: proxy.size)
+                                    withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.78)) {
                                         nodeOffsets[note.id] = CGSize(
-                                            width: restingOffset.width,
-                                            height: restingOffset.height + 16
+                                            width: finalPoint.x - base.x,
+                                            height: finalPoint.y - base.y
                                         )
                                         activeDragOffsets[note.id] = nil
-                                        droppingNodeID = note.id
-                                    }
-
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-                                        withAnimation(.spring(response: 0.42, dampingFraction: 0.48)) {
-                                            nodeOffsets[note.id] = restingOffset
-                                            droppingNodeID = nil
-                                        }
                                     }
                                 }
                         )
-                        .animation(.interactiveSpring(response: 0.24, dampingFraction: 0.76), value: activeDragOffsets[note.id])
+                        .animation(.interactiveSpring(response: 0.06, dampingFraction: 1), value: activeDragOffsets[note.id])
                         .animation(.spring(response: 0.34, dampingFraction: 0.72), value: nodeOffsets[note.id])
                         .animation(.spring(response: 0.22, dampingFraction: 0.62), value: isDragging)
-                        .animation(.spring(response: 0.36, dampingFraction: 0.52), value: isDropping)
                     }
                 }
             }
+            .coordinateSpace(name: "graphCanvas")
         }
         .padding(10)
         .background(.ultraThinMaterial)
@@ -1003,55 +991,34 @@ private struct NoteGraphView: View {
                 )
             }
     }
+
+    private func clampedNodePoint(_ point: CGPoint, in size: CGSize) -> CGPoint {
+        CGPoint(
+            x: min(max(point.x, 18), max(18, size.width - 18)),
+            y: min(max(point.y, 18), max(18, size.height - 18))
+        )
+    }
 }
 
 private struct ContextUsageBar: View {
     @ObservedObject var store: BrainStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Label("Usage", systemImage: "gauge.with.dots.needle.50percent")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(.secondary)
+        HStack {
+            Label("Usage", systemImage: "gauge.with.dots.needle.50percent")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(.secondary)
 
-                Spacer()
+            Spacer()
 
-                Text("\(store.contextUsageLabel) · \(store.contextUsagePercent)%")
-                    .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .contentTransition(.numericText())
-            }
-
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.10))
-
-                    Capsule()
-                        .fill(usageGradient)
-                        .frame(width: max(8, proxy.size.width * store.contextUsageFraction))
-                }
-            }
-            .frame(height: 7)
-
-            Text(store.contextUsageDetail)
-                .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
+            Text("\(store.contextUsagePercent)%")
+                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .contentTransition(.numericText())
         }
         .padding(.horizontal, 2)
         .padding(.top, 2)
-    }
-
-    private var usageGradient: LinearGradient {
-        LinearGradient(
-            colors: [
-                Color(red: 0.28, green: 0.72, blue: 0.95),
-                Color(red: 0.66, green: 0.84, blue: 0.28)
-            ],
-            startPoint: .leading,
-            endPoint: .trailing
-        )
+        .frame(height: 20)
     }
 }
 
@@ -1059,48 +1026,20 @@ private struct OCRUploadCounterView: View {
     @ObservedObject var store: BrainStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Label("Uploads", systemImage: "doc.viewfinder")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(.secondary)
+        HStack {
+            Label("Uploads", systemImage: "doc.viewfinder")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(.secondary)
 
-                Spacer()
+            Spacer()
 
-                Text(store.ocrUploadCounterLabel)
-                    .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .contentTransition(.numericText())
-            }
-
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.10))
-
-                    Capsule()
-                        .fill(uploadGradient)
-                        .frame(width: max(8, proxy.size.width * (1 - store.ocrUploadUsageFraction)))
-                }
-            }
-            .frame(height: 7)
-
-            Text(store.ocrUploadCounterDetail)
-                .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
+            Text(store.ocrUploadCounterLabel)
+                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .contentTransition(.numericText())
         }
         .padding(.horizontal, 2)
-    }
-
-    private var uploadGradient: LinearGradient {
-        LinearGradient(
-            colors: [
-                Color(red: 0.95, green: 0.62, blue: 0.28),
-                Color(red: 0.42, green: 0.78, blue: 0.56)
-            ],
-            startPoint: .leading,
-            endPoint: .trailing
-        )
+        .frame(height: 20)
     }
 }
 
@@ -1117,7 +1056,7 @@ private struct ExpandedGraphOverlay: View {
                 .ignoresSafeArea()
                 .onTapGesture(perform: close)
 
-            VStack(spacing: 12) {
+            VStack(spacing: 8) {
                 HStack(spacing: 12) {
                     Label("Graph", systemImage: "point.3.connected.trianglepath.dotted")
                         .font(.system(size: 15, weight: .semibold))
@@ -1127,13 +1066,14 @@ private struct ExpandedGraphOverlay: View {
                     Button(action: close) {
                         Image(systemName: "xmark")
                             .font(.system(size: 12, weight: .bold))
-                            .frame(width: 32, height: 32)
+                            .frame(width: 28, height: 28)
                             .background(.ultraThinMaterial)
                             .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
                     .help("Close Graph")
                 }
+                .frame(height: 30)
 
                 NoteGraphView(
                     notes: notes,
@@ -1144,7 +1084,9 @@ private struct ExpandedGraphOverlay: View {
                     expand: nil
                 )
             }
-            .padding(18)
+            .padding(.horizontal, 18)
+            .padding(.top, 10)
+            .padding(.bottom, 16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.regularMaterial)
             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
@@ -1158,34 +1100,30 @@ private struct ExpandedGraphOverlay: View {
     }
 }
 
-private struct GraphNodeButton: View {
+private struct GraphNodeView: View {
     let note: NoteSummary
     let isSelected: Bool
-    let open: () -> Void
 
     @State private var isHovered = false
 
     var body: some View {
-        Button(action: open) {
-            VStack(spacing: 4) {
-                Circle()
-                    .fill(isSelected ? .green.opacity(0.85) : .primary.opacity(isHovered ? 0.72 : 0.52))
-                    .frame(width: isSelected ? 14 : 10, height: isSelected ? 14 : 10)
-                    .overlay {
-                        Circle()
-                            .stroke(.primary.opacity(isHovered || isSelected ? 0.24 : 0.08), lineWidth: 1)
-                            .frame(width: isSelected ? 20 : 16, height: isSelected ? 20 : 16)
-                    }
+        VStack(spacing: 4) {
+            Circle()
+                .fill(isSelected ? .green.opacity(0.85) : .primary.opacity(isHovered ? 0.72 : 0.52))
+                .frame(width: isSelected ? 14 : 10, height: isSelected ? 14 : 10)
+                .overlay {
+                    Circle()
+                        .stroke(.primary.opacity(isHovered || isSelected ? 0.24 : 0.08), lineWidth: 1)
+                        .frame(width: isSelected ? 20 : 16, height: isSelected ? 20 : 16)
+                }
 
-                Text(note.title)
-                    .font(.system(size: 8, weight: isSelected ? .semibold : .regular))
-                    .foregroundStyle(isHovered ? Color.primary.opacity(0.72) : Color.secondary)
-                    .lineLimit(1)
-                    .frame(width: 62)
-            }
-            .contentShape(Rectangle())
+            Text(note.title)
+                .font(.system(size: 8, weight: isSelected ? .semibold : .regular))
+                .foregroundStyle(isHovered ? Color.primary.opacity(0.72) : Color.secondary)
+                .lineLimit(1)
+                .frame(width: 62)
         }
-        .buttonStyle(.plain)
+        .contentShape(Rectangle())
         .help(note.title)
         .onHover { hovering in
             isHovered = hovering
@@ -1291,8 +1229,34 @@ private struct MarkdownEditingSurface: View {
     @Binding var content: String
     @Binding var isEditing: Bool
     let searchHighlight: SearchHighlight?
+    let noteTitles: [String]
     let openLinkedNote: (String) -> Void
     let clearSearchHighlight: () -> Void
+
+    private var linkSuggestions: [String] {
+        guard let context = activeWikiLinkContext,
+              !context.query.isEmpty
+        else { return [] }
+
+        let normalizedQuery = normalizedLinkSuggestionText(context.query)
+        guard !normalizedQuery.isEmpty else { return [] }
+
+        let uniqueTitles = Array(NSOrderedSet(array: noteTitles)).compactMap { $0 as? String }
+        let prefixMatches = uniqueTitles.filter {
+            normalizedLinkSuggestionText($0).hasPrefix(normalizedQuery)
+        }
+
+        if prefixMatches.count >= 2 {
+            return Array(prefixMatches.prefix(2))
+        }
+
+        let containsMatches = uniqueTitles.filter {
+            !prefixMatches.contains($0)
+                && normalizedLinkSuggestionText($0).contains(normalizedQuery)
+        }
+
+        return Array((prefixMatches + containsMatches).prefix(2))
+    }
 
     var body: some View {
         Group {
@@ -1308,10 +1272,24 @@ private struct MarkdownEditingSurface: View {
     }
 
     private var editor: some View {
-        TextEditor(text: $content)
-            .font(.system(size: 15, design: .monospaced))
-            .scrollContentBackground(.hidden)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        ZStack(alignment: .bottomLeading) {
+            TextEditor(text: $content)
+                .font(.system(size: 15, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if !linkSuggestions.isEmpty {
+                LinkSuggestionMenu(
+                    query: activeWikiLinkContext?.query ?? "",
+                    suggestions: linkSuggestions,
+                    select: completeWikiLink
+                )
+                .padding(.leading, 18)
+                .padding(.bottom, 18)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+        .animation(.easeInOut(duration: 0.14), value: linkSuggestions)
     }
 
     private var renderedPreview: some View {
@@ -1344,6 +1322,101 @@ private struct MarkdownEditingSurface: View {
                 isEditing = true
             }
         }
+    }
+
+    private var activeWikiLinkContext: WikiLinkSuggestionContext? {
+        guard let openRange = content.range(of: "[[", options: .backwards) else { return nil }
+        let queryStart = openRange.upperBound
+        let queryRange = queryStart..<content.endIndex
+        let rawQuery = String(content[queryRange])
+
+        guard !rawQuery.contains("]]"),
+              !rawQuery.contains("\n"),
+              !rawQuery.contains("["),
+              !rawQuery.contains("]"),
+              rawQuery.count <= 80
+        else {
+            return nil
+        }
+
+        let query = rawQuery
+            .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+            .first
+            .map(String.init) ?? rawQuery
+
+        return WikiLinkSuggestionContext(
+            range: openRange.lowerBound..<content.endIndex,
+            query: query.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private func completeWikiLink(with title: String) {
+        guard let context = activeWikiLinkContext else { return }
+        content.replaceSubrange(context.range, with: "[[\(title)]]")
+    }
+
+    private func normalizedLinkSuggestionText(_ text: String) -> String {
+        text
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private struct WikiLinkSuggestionContext {
+    let range: Range<String.Index>
+    let query: String
+}
+
+private struct LinkSuggestionMenu: View {
+    let query: String
+    let suggestions: [String]
+    let select: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(suggestions, id: \.self) { title in
+                Button {
+                    select(title)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "link")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16, height: 16)
+
+                        Text(highlightedTitle(title))
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .lineLimit(1)
+
+                        Spacer(minLength: 10)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(width: 220, height: 30, alignment: .leading)
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(6)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(.white.opacity(0.20), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
+        .help("Complete link")
+    }
+
+    private func highlightedTitle(_ title: String) -> AttributedString {
+        var attributed = AttributedString(title)
+        guard !query.isEmpty,
+              let range = attributed.range(of: query, options: [.caseInsensitive, .diacriticInsensitive])
+        else { return attributed }
+
+        attributed[range].foregroundColor = .accentColor
+        attributed[range].font = .system(size: 12.5, weight: .bold)
+        return attributed
     }
 }
 
@@ -1485,7 +1558,7 @@ private struct AssistantFloatingPill: View {
                     .padding(.bottom, 2)
                     .frame(width: pillWidth)
                 } else {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 7) {
                         modelMenu
 
                         Rectangle()
@@ -1501,16 +1574,24 @@ private struct AssistantFloatingPill: View {
                             .onSubmit {
                                 submitOrPreviewThinking()
                             }
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                isPromptFocused = true
+                            }
 
                         attachmentControl
                         expandToggle
                         sendButton
                     }
-                    .padding(.leading, 5)
-                    .padding(.trailing, 4)
+                    .padding(.leading, 10)
+                    .padding(.trailing, 7)
                     .padding(.vertical, 6)
                     .frame(width: pillWidth)
                     .frame(minHeight: 34)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        isPromptFocused = true
+                    }
                 }
             }
             .padding(isExpandedComposerPresented ? 5 : 0)
@@ -1521,6 +1602,14 @@ private struct AssistantFloatingPill: View {
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: pillCornerRadius, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: pillCornerRadius, style: .continuous))
+            .onTapGesture {
+                if isExpandedComposerPresented {
+                    isExpandedPromptFocused = true
+                } else {
+                    isPromptFocused = true
+                }
+            }
             .overlay {
                 RoundedRectangle(cornerRadius: pillCornerRadius, style: .continuous)
                     .stroke(borderColor, lineWidth: isPromptFocused ? 0.6 : 1)
@@ -1568,6 +1657,7 @@ private struct AssistantFloatingPill: View {
                     .font(.system(size: 8.5, weight: .bold))
                     .foregroundStyle(.secondary)
             }
+            .padding(.leading, 3)
             .frame(width: modelMenuWidth, alignment: .leading)
             .contentShape(Rectangle())
         }
@@ -1717,7 +1807,7 @@ private struct AssistantFloatingPill: View {
     }
 
     private var textFieldWidth: CGFloat {
-        min(430, max(96, estimatedPromptWidth))
+        min(430, max(180, estimatedPromptWidth))
     }
 
     private var pillCornerRadius: CGFloat {
@@ -1743,11 +1833,11 @@ private struct AssistantFloatingPill: View {
     }
 
     private var compactPillWidth: CGFloat {
-        modelMenuWidth + 1 + textFieldWidth + attachmentWidth + 22 + 24 + 25 + 9
+        modelMenuWidth + 1 + textFieldWidth + attachmentWidth + 22 + 24 + 25 + 18
     }
 
     private var modelMenuWidth: CGFloat {
-        store.selectedAssistantModel == .groq ? 45 : 62
+        store.selectedAssistantModel == .groq ? 52 : 70
     }
 
     private var hasPromptInput: Bool {

@@ -60,6 +60,7 @@ final class BrainStore: ObservableObject {
     private var pendingAssistantInsertion: PendingAssistantInsertion?
     private var isApplyingAssistantOutput = false
     private var noteIdentityDatabase: NoteIdentityDatabase?
+    private var searchIndex: [NoteSearchIndexEntry] = []
 
     private static let mistralBudgetUSD = 10.0
     private static let mistralInputPricePerMillionTokens = 0.50
@@ -271,6 +272,7 @@ final class BrainStore: ObservableObject {
         notes = []
         selectedNoteID = nil
         graphLinks = []
+        searchIndex = []
         resetDraft()
         status = "Choose a brain"
     }
@@ -682,6 +684,7 @@ final class BrainStore: ObservableObject {
             return notes.map {
                 NoteSearchResult(
                     id: $0.id,
+                    noteID: $0.id,
                     title: $0.title,
                     preview: "Recently updated",
                     query: "",
@@ -690,48 +693,37 @@ final class BrainStore: ObservableObject {
             }
         }
 
-        return notes.compactMap { noteSummary in
-            guard let noteURL = noteURL(for: noteSummary.id),
-                  let data = try? Data(contentsOf: noteURL),
-                  let note = try? readNote(from: noteURL, data: data)
-            else {
-                return nil
+        let queryTokens = searchTokens(in: cleanQuery)
+        guard !queryTokens.isEmpty else { return [] }
+
+        return searchIndex
+            .filter { entry in
+                queryTokens.allSatisfy { entry.normalizedText.contains($0) }
             }
-
-            let plainContent = plainText(fromMarkdown: note.content)
-            let fileName = noteURL.lastPathComponent
-            let titleMatches = note.title.localizedCaseInsensitiveContains(cleanQuery)
-            let matchingBlock = markdownSearchBlocks(from: note.content)
-                .first { $0.text.localizedCaseInsensitiveContains(cleanQuery) }
-            let contentMatches = matchingBlock != nil
-                || note.content.localizedCaseInsensitiveContains(cleanQuery)
-                || plainContent.localizedCaseInsensitiveContains(cleanQuery)
-            let fileNameMatches = fileName.localizedCaseInsensitiveContains(cleanQuery)
-            guard titleMatches || contentMatches || fileNameMatches else { return nil }
-
-            return NoteSearchResult(
-                id: note.id,
-                title: note.title,
-                preview: searchPreview(
+            .sorted { lhs, rhs in
+                if lhs.rank != rhs.rank { return lhs.rank < rhs.rank }
+                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+            }
+            .prefix(120)
+            .enumerated()
+            .map { offset, entry in
+                NoteSearchResult(
+                    id: "\(entry.noteID)-\(entry.kind)-\(entry.blockIndex ?? -1)-\(offset)",
+                    noteID: entry.noteID,
+                    title: entry.title,
+                    preview: searchResultPreview(for: cleanQuery, tokens: queryTokens, in: entry.displayText),
                     query: cleanQuery,
-                    note: note,
-                    plainContent: plainContent,
-                    fileName: fileName,
-                    titleMatches: titleMatches,
-                    fileNameMatches: fileNameMatches,
-                    matchingBlockText: matchingBlock?.text
-                ),
-                query: cleanQuery,
-                blockIndex: titleMatches ? 0 : matchingBlock?.index
-            )
-        }
+                    blockIndex: entry.blockIndex
+                )
+            }
     }
 
     func openSearchResult(_ result: NoteSearchResult) {
-        openNote(id: result.id)
+        openNote(id: result.noteID)
         if let blockIndex = result.blockIndex, !result.query.isEmpty {
             activeSearchHighlight = SearchHighlight(
-                noteID: result.id,
+                noteID: result.noteID,
                 query: result.query,
                 blockIndex: blockIndex
             )
@@ -980,6 +972,7 @@ final class BrainStore: ObservableObject {
             .map { NoteSummary(id: $0.id, title: $0.title, updatedAt: $0.updatedAt) }
             .sorted { $0.updatedAt > $1.updatedAt }
         graphLinks = buildGraphLinks(from: loadedNotes)
+        rebuildSearchIndex(from: loadedNotes, in: brain)
     }
 
     private func syncBrainMetadata() throws {
@@ -1726,6 +1719,68 @@ final class BrainStore: ObservableObject {
         return "Matching page"
     }
 
+    private func rebuildSearchIndex(from loadedNotes: [Note], in brain: BrainSummary) {
+        searchIndex = loadedNotes.flatMap { note in
+            let fileName = noteIdentityDatabase?.fileName(forNoteID: note.id)
+                ?? markdownFileName(for: note.title, id: note.id)
+            return searchIndexEntries(for: note, fileName: fileName)
+        }
+    }
+
+    private func searchIndexEntries(for note: Note, fileName: String) -> [NoteSearchIndexEntry] {
+        var entries: [NoteSearchIndexEntry] = [
+            NoteSearchIndexEntry(
+                noteID: note.id,
+                title: note.title,
+                displayText: "Title: \(note.title)",
+                normalizedText: normalizedSearchText("\(note.title) \(fileName)"),
+                blockIndex: 0,
+                kind: "title",
+                rank: 0,
+                updatedAt: note.updatedAt
+            )
+        ]
+
+        let blocks = markdownSearchBlocks(from: note.content)
+        entries.append(contentsOf: blocks.compactMap { block in
+            let normalizedText = normalizedSearchText(block.text)
+            guard !normalizedText.isEmpty else { return nil }
+            return NoteSearchIndexEntry(
+                noteID: note.id,
+                title: note.title,
+                displayText: block.text,
+                normalizedText: normalizedText,
+                blockIndex: block.index,
+                kind: "block",
+                rank: 1,
+                updatedAt: note.updatedAt
+            )
+        })
+
+        return entries
+    }
+
+    private func searchTokens(in query: String) -> [String] {
+        normalizedSearchText(query)
+            .split(separator: " ")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+    }
+
+    private func normalizedSearchText(_ text: String) -> String {
+        text
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .replacingOccurrences(of: #"[^a-z0-9_]+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func searchResultPreview(for query: String, tokens: [String], in text: String) -> String {
+        preview(for: query, in: text)
+            ?? tokens.compactMap { preview(for: $0, in: text) }.first
+            ?? String(text.prefix(180)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func plainText(fromMarkdown markdown: String) -> String {
         markdown
             .replacingOccurrences(of: #"(?m)^---[\s\S]*?^---"#, with: " ", options: .regularExpression)
@@ -2194,10 +2249,22 @@ struct NoteSummary: Identifiable, Equatable {
 
 struct NoteSearchResult: Identifiable, Equatable {
     let id: String
+    let noteID: String
     let title: String
     let preview: String
     let query: String
     let blockIndex: Int?
+}
+
+private struct NoteSearchIndexEntry {
+    let noteID: String
+    let title: String
+    let displayText: String
+    let normalizedText: String
+    let blockIndex: Int?
+    let kind: String
+    let rank: Int
+    let updatedAt: Date
 }
 
 struct SearchHighlight: Equatable {
