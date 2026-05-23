@@ -26,11 +26,6 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 1120, minHeight: 720)
-        .sheet(isPresented: $store.isShowingPageSearch) {
-            PageSearchView(store: store)
-                .frame(width: 520, height: 286)
-                .presentationBackground(.clear)
-        }
         .sheet(isPresented: $store.isShowingModelConfiguration) {
             ModelConfigurationView(store: store)
                 .frame(width: 500)
@@ -241,6 +236,21 @@ private struct WorkspaceView: View {
     @State private var isGraphExpanded = false
     @State private var promptPillHeight: CGFloat = 38
     @State private var isDocumentDropTargeted = false
+    @State private var sidebarSearchQuery = ""
+    @FocusState private var isSidebarSearchFocused: Bool
+
+    private var cleanSidebarSearchQuery: String {
+        sidebarSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isSearchingSidebar: Bool {
+        !cleanSidebarSearchQuery.isEmpty
+    }
+
+    private var sidebarSearchResults: [NoteSearchResult] {
+        guard isSearchingSidebar else { return [] }
+        return store.searchNotes(matching: sidebarSearchQuery)
+    }
 
     var body: some View {
         ZStack {
@@ -251,33 +261,54 @@ private struct WorkspaceView: View {
                         isEditingMarkdown = false
                     }
 
+                    SidebarSearchField(
+                        query: $sidebarSearchQuery,
+                        isFocused: $isSidebarSearchFocused
+                    )
+
                     ScrollView {
                         LazyVStack(spacing: 6) {
-                            ForEach(store.notes) { note in
-                                NoteSidebarRow(
-                                    note: note,
-                                    isSelected: store.selectedNoteID == note.id || store.currentNoteID == note.id,
-                                    open: {
-                                        withAnimation(.easeInOut(duration: 0.18)) {
-                                            isEditingMarkdown = false
-                                            store.openNote(id: note.id)
-                                        }
-                                    },
-                                    rename: {
-                                        isEditingMarkdown = false
-                                        store.renameNoteFromUser(id: note.id)
-                                    },
-                                    nutshell: {
-                                        isEditingMarkdown = false
-                                        store.showNoteNutshell(id: note.id)
-                                    },
-                                    delete: {
-                                        withAnimation(.easeInOut(duration: 0.2)) {
-                                            isEditingMarkdown = false
-                                            store.deleteNote(id: note.id)
+                            if isSearchingSidebar {
+                                if sidebarSearchResults.isEmpty {
+                                    SidebarSearchEmptyView()
+                                        .padding(.top, 22)
+                                } else {
+                                    ForEach(sidebarSearchResults) { result in
+                                        PageSearchResultRow(result: result, query: cleanSidebarSearchQuery) {
+                                            withAnimation(.easeInOut(duration: 0.18)) {
+                                                isEditingMarkdown = false
+                                                store.openSearchResult(result)
+                                            }
                                         }
                                     }
-                                )
+                                }
+                            } else {
+                                ForEach(store.notes) { note in
+                                    NoteSidebarRow(
+                                        note: note,
+                                        isSelected: store.selectedNoteID == note.id || store.currentNoteID == note.id,
+                                        open: {
+                                            withAnimation(.easeInOut(duration: 0.18)) {
+                                                isEditingMarkdown = false
+                                                store.openNote(id: note.id)
+                                            }
+                                        },
+                                        rename: {
+                                            isEditingMarkdown = false
+                                            store.renameNoteFromUser(id: note.id)
+                                        },
+                                        nutshell: {
+                                            isEditingMarkdown = false
+                                            store.showNoteNutshell(id: note.id)
+                                        },
+                                        delete: {
+                                            withAnimation(.easeInOut(duration: 0.2)) {
+                                                isEditingMarkdown = false
+                                                store.deleteNote(id: note.id)
+                                            }
+                                        }
+                                    )
+                                }
                             }
                         }
                         .padding(.top, 8)
@@ -288,6 +319,8 @@ private struct WorkspaceView: View {
                     }
 
                     ContextUsageBar(store: store)
+
+                    OCRUploadCounterView(store: store)
 
                     NoteGraphView(
                         notes: store.notes,
@@ -336,11 +369,12 @@ private struct WorkspaceView: View {
 
             if isDocumentDropTargeted {
                 DocumentDropSplash()
-                    .transition(.scale(scale: 0.96).combined(with: .opacity))
+                    .ignoresSafeArea()
+                    .transition(.opacity)
                     .zIndex(5)
             }
         }
-        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDocumentDropTargeted) { providers in
+        .onDrop(of: Self.supportedDocumentDropTypes, isTargeted: $isDocumentDropTargeted) { providers in
             handleDocumentDrop(providers)
         }
         .animation(.easeInOut(duration: 0.22), value: isReadingMode)
@@ -349,6 +383,12 @@ private struct WorkspaceView: View {
         .animation(.easeInOut(duration: 0.22), value: store.notes)
         .animation(.easeInOut(duration: 0.18), value: store.status)
         .animation(.easeInOut(duration: 0.2), value: store.isGeneratingAssistantResponse)
+        .animation(.easeInOut(duration: 0.16), value: isSearchingSidebar)
+        .onChange(of: store.isShowingPageSearch) { _, shouldFocusSearch in
+            guard shouldFocusSearch else { return }
+            isSidebarSearchFocused = true
+            store.isShowingPageSearch = false
+        }
         .sheet(isPresented: $isShowingMarkdownHelp) {
             MarkdownHelpView()
                 .frame(width: 620, height: 680)
@@ -425,6 +465,10 @@ private struct WorkspaceView: View {
 
                 HStack(alignment: .bottom, spacing: 10) {
                     if !isReadingMode {
+                        ReadingModeToggle(isOn: $isReadingMode, size: readingToggleSize)
+                            .opacity(0)
+                            .allowsHitTesting(false)
+
                         AssistantFloatingPill(store: store)
                             .transition(.scale(scale: 0.96).combined(with: .opacity))
                             .onPreferenceChange(PillHeightPreferenceKey.self) { height in
@@ -432,7 +476,7 @@ private struct WorkspaceView: View {
                             }
                     }
 
-                    ReadingModeToggle(isOn: $isReadingMode, size: promptPillHeight)
+                    ReadingModeToggle(isOn: $isReadingMode, size: readingToggleSize)
                 }
                 .padding(.bottom, 54)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -451,48 +495,130 @@ private struct WorkspaceView: View {
         )
     }
 
+    private var readingToggleSize: CGFloat {
+        min(44, max(38, promptPillHeight))
+    }
+
     private func handleDocumentDrop(_ providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) else {
+        if let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) {
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+                if let error {
+                    Task { @MainActor in
+                        store.status = error.localizedDescription
+                    }
+                    return
+                }
+
+                let url: URL?
+                if let data = item as? Data {
+                    url = URL(dataRepresentation: data, relativeTo: nil)
+                } else if let nsURL = item as? NSURL {
+                    url = nsURL as URL
+                } else {
+                    url = item as? URL
+                }
+
+                guard let url else {
+                    Task { @MainActor in
+                        store.status = "Only PDFs and Word documents are supported"
+                    }
+                    return
+                }
+
+                Task { @MainActor in
+                    store.attachPromptDocument(from: url)
+                }
+            }
+            return true
+        }
+
+        guard let directProvider = providers.first(where: { provider in
+            Self.directDocumentDropTypes.contains { provider.hasItemConformingToTypeIdentifier($0) }
+        }) else {
             store.status = "Only PDFs and Word documents are supported"
             return false
         }
 
-        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-            let url: URL?
-            if let data = item as? Data {
-                url = URL(dataRepresentation: data, relativeTo: nil)
-            } else {
-                url = item as? URL
+        let typeIdentifier = Self.directDocumentDropTypes.first {
+            directProvider.hasItemConformingToTypeIdentifier($0)
+        } ?? UTType.pdf.identifier
+        directProvider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { url, error in
+            if let error {
+                Task { @MainActor in
+                    store.status = error.localizedDescription
+                }
+                return
             }
 
-            guard let url else { return }
+            guard let url,
+                  let copiedURL = copyDroppedDocumentToTemporaryURL(url, suggestedName: directProvider.suggestedName)
+            else {
+                Task { @MainActor in
+                    store.status = "Only PDFs and Word documents are supported"
+                }
+                return
+            }
+
             Task { @MainActor in
-                store.attachPromptDocument(from: url)
+                store.attachPromptDocument(from: copiedURL)
             }
         }
         return true
     }
+
+    private func copyDroppedDocumentToTemporaryURL(_ url: URL, suggestedName: String?) -> URL? {
+        let fallbackName = suggestedName?.isEmpty == false ? suggestedName! : url.lastPathComponent
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("zirn-drop-\(UUID().uuidString)-\(fallbackName)")
+
+        do {
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.copyItem(at: url, to: destination)
+            return destination
+        } catch {
+            Task { @MainActor in
+                store.status = error.localizedDescription
+            }
+            return nil
+        }
+    }
+
+    private static let directDocumentDropTypes = [
+        UTType.pdf.identifier,
+        "com.microsoft.word.doc",
+        "org.openxmlformats.wordprocessingml.document"
+    ]
+
+    private static let supportedDocumentDropTypes = [UTType.fileURL.identifier] + directDocumentDropTypes
 }
 
 private struct DocumentDropSplash: View {
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "doc.badge.plus")
-                .font(.system(size: 32, weight: .semibold))
-                .foregroundStyle(.blue.opacity(0.88))
+        ZStack {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .background(Color.black.opacity(0.16))
 
-            Text("Only PDFs and Word documents supported")
-                .font(.system(size: 18, weight: .semibold))
+            VStack(spacing: 12) {
+                Image(systemName: "doc.badge.plus")
+                    .font(.system(size: 38, weight: .semibold))
+                    .foregroundStyle(.blue.opacity(0.88))
+
+                Text("Only PDFs and Word documents supported")
+                    .font(.system(size: 20, weight: .semibold))
+            }
+            .padding(.horizontal, 38)
+            .padding(.vertical, 30)
+            .background(.regularMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(.white.opacity(0.24), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.28), radius: 34, y: 18)
         }
-        .padding(.horizontal, 34)
-        .padding(.vertical, 28)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(.white.opacity(0.22), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.24), radius: 30, y: 16)
     }
 }
 
@@ -737,6 +863,7 @@ private struct NoteGraphView: View {
     var expand: (() -> Void)?
     @State private var nodeOffsets: [String: CGSize] = [:]
     @State private var activeDragOffsets: [String: CGSize] = [:]
+    @State private var droppingNodeID: String?
 
     var body: some View {
         GeometryReader { proxy in
@@ -763,6 +890,9 @@ private struct NoteGraphView: View {
 
                 ForEach(visibleNotes) { note in
                     if let point = positions[note.id] {
+                        let isDragging = activeDragOffsets[note.id] != nil
+                        let isDropping = droppingNodeID == note.id
+
                         GraphNodeButton(
                             note: note,
                             isSelected: note.id == selectedNoteID
@@ -770,22 +900,42 @@ private struct NoteGraphView: View {
                             openNote(note.id)
                         }
                         .position(point)
+                        .scaleEffect(isDragging ? 1.1 : (isDropping ? 0.97 : 1))
+                        .rotationEffect(.degrees(isDragging ? Double((activeDragOffsets[note.id]?.width ?? 0) / 34) : 0))
+                        .zIndex(isDragging || isDropping ? 2 : 1)
                         .gesture(
                             DragGesture(minimumDistance: 2)
                                 .onChanged { value in
+                                    droppingNodeID = nil
                                     activeDragOffsets[note.id] = value.translation
                                 }
                                 .onEnded { value in
                                     let existing = nodeOffsets[note.id] ?? .zero
-                                    nodeOffsets[note.id] = CGSize(
+                                    let restingOffset = CGSize(
                                         width: existing.width + value.translation.width,
                                         height: existing.height + value.translation.height
                                     )
-                                    activeDragOffsets[note.id] = .zero
+                                    withAnimation(.spring(response: 0.24, dampingFraction: 0.58)) {
+                                        nodeOffsets[note.id] = CGSize(
+                                            width: restingOffset.width,
+                                            height: restingOffset.height + 16
+                                        )
+                                        activeDragOffsets[note.id] = nil
+                                        droppingNodeID = note.id
+                                    }
+
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                                        withAnimation(.spring(response: 0.42, dampingFraction: 0.48)) {
+                                            nodeOffsets[note.id] = restingOffset
+                                            droppingNodeID = nil
+                                        }
+                                    }
                                 }
                         )
                         .animation(.interactiveSpring(response: 0.24, dampingFraction: 0.76), value: activeDragOffsets[note.id])
                         .animation(.spring(response: 0.34, dampingFraction: 0.72), value: nodeOffsets[note.id])
+                        .animation(.spring(response: 0.22, dampingFraction: 0.62), value: isDragging)
+                        .animation(.spring(response: 0.36, dampingFraction: 0.52), value: isDropping)
                     }
                 }
             }
@@ -861,13 +1011,13 @@ private struct ContextUsageBar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
-                Label("Context", systemImage: "gauge.with.dots.needle.50percent")
+                Label("Usage", systemImage: "gauge.with.dots.needle.50percent")
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(.secondary)
 
                 Spacer()
 
-                Text("\(store.contextUsagePercent)%")
+                Text("\(store.contextUsageLabel) · \(store.contextUsagePercent)%")
                     .font(.system(size: 11.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
                     .contentTransition(.numericText())
@@ -884,6 +1034,10 @@ private struct ContextUsageBar: View {
                 }
             }
             .frame(height: 7)
+
+            Text(store.contextUsageDetail)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 2)
         .padding(.top, 2)
@@ -894,6 +1048,55 @@ private struct ContextUsageBar: View {
             colors: [
                 Color(red: 0.28, green: 0.72, blue: 0.95),
                 Color(red: 0.66, green: 0.84, blue: 0.28)
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
+}
+
+private struct OCRUploadCounterView: View {
+    @ObservedObject var store: BrainStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Label("Uploads", systemImage: "doc.viewfinder")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Text(store.ocrUploadCounterLabel)
+                    .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .contentTransition(.numericText())
+            }
+
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.10))
+
+                    Capsule()
+                        .fill(uploadGradient)
+                        .frame(width: max(8, proxy.size.width * (1 - store.ocrUploadUsageFraction)))
+                }
+            }
+            .frame(height: 7)
+
+            Text(store.ocrUploadCounterDetail)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 2)
+    }
+
+    private var uploadGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color(red: 0.95, green: 0.62, blue: 0.28),
+                Color(red: 0.42, green: 0.78, blue: 0.56)
             ],
             startPoint: .leading,
             endPoint: .trailing
@@ -1244,22 +1447,11 @@ private struct AssistantFloatingPill: View {
     @ObservedObject var store: BrainStore
     @FocusState private var isPromptFocused: Bool
     @State private var isExpandedComposerPresented = false
+    @FocusState private var isExpandedPromptFocused: Bool
+    @State private var isSendHovered = false
 
     var body: some View {
         VStack(alignment: .center, spacing: 8) {
-            if isExpandedComposerPresented {
-                ExpandedPromptComposer(
-                    prompt: $store.assistantPrompt,
-                    submit: submitOrPreviewThinking,
-                    close: {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            isExpandedComposerPresented = false
-                        }
-                    }
-                )
-                .transition(.scale(scale: 0.96).combined(with: .opacity))
-            }
-
             if store.isUsingWebSearch {
                 WebSearchStatusPill()
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -1267,109 +1459,61 @@ private struct AssistantFloatingPill: View {
 
             if isThinking {
                 ThinkingStatusPill()
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            HStack(spacing: 7) {
-                Menu {
-                    ForEach(AssistantModel.allCases) { model in
-                        Button {
-                            store.selectedAssistantModel = model
-                        } label: {
-                            if model == store.selectedAssistantModel {
-                                Label(model.title, systemImage: "checkmark")
-                            } else {
-                                Text(model.title)
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(store.selectedAssistantModel.title)
-                            .font(.system(size: 12.2, weight: .semibold))
-                            .lineLimit(1)
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 8.5, weight: .bold))
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(width: 104, alignment: .leading)
+            VStack(spacing: isExpandedComposerPresented ? 10 : 0) {
+                if isExpandedComposerPresented {
+                    expandedPromptEditor
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .buttonStyle(.plain)
 
-                Rectangle()
-                    .fill(Color.primary.opacity(0.12))
-                    .frame(width: 1, height: 18)
+                if isExpandedComposerPresented {
+                    ZStack {
+                        HStack {
+                            modelMenu
 
-                TextField("Material?", text: $store.assistantPrompt, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12.5))
-                    .lineLimit(1...4)
-                    .frame(width: textFieldWidth, alignment: .leading)
-                    .focused($isPromptFocused)
-                    .onSubmit {
-                        submitOrPreviewThinking()
-                    }
+                            Spacer()
 
-                if let attachment = store.assistantAttachment {
-                    HStack(spacing: 4) {
-                        Image(systemName: "paperclip")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text(attachment.fileName)
-                            .font(.system(size: 10.5, weight: .medium))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: 92)
-                        Button {
-                            store.removePromptAttachment()
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 9, weight: .bold))
+                            attachmentControl
+                            expandToggle
                         }
-                        .buttonStyle(.plain)
-                        .help("Remove attachment")
+
+                        sendButton
                     }
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    .frame(height: 24)
-                    .background(Color.primary.opacity(0.06))
-                    .clipShape(Capsule())
+                    .padding(.horizontal, 5)
+                    .padding(.bottom, 2)
+                    .frame(width: pillWidth)
                 } else {
-                    Image(systemName: "paperclip")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.secondary.opacity(0.58))
-                        .frame(width: 24, height: 24)
-                        .help("Drag a PDF or Word document anywhere into the app")
-                }
+                    HStack(spacing: 5) {
+                        modelMenu
 
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        isExpandedComposerPresented.toggle()
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.12))
+                            .frame(width: 1, height: 18)
+
+                        TextField("Material?", text: $store.assistantPrompt, axis: .vertical)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12.5))
+                            .lineLimit(1...4)
+                            .frame(width: textFieldWidth, alignment: .leading)
+                            .focused($isPromptFocused)
+                            .onSubmit {
+                                submitOrPreviewThinking()
+                            }
+
+                        attachmentControl
+                        expandToggle
+                        sendButton
                     }
-                } label: {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(width: 24, height: 24)
+                    .padding(.leading, 5)
+                    .padding(.trailing, 4)
+                    .padding(.vertical, 6)
+                    .frame(width: pillWidth)
+                    .frame(minHeight: 34)
                 }
-                .buttonStyle(.plain)
-                .help("Expand prompt")
-
-                Button {
-                    submitOrPreviewThinking()
-                } label: {
-                    Image(systemName: isThinking ? "stop.circle.fill" : "arrow.up.circle.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .symbolRenderingMode(.hierarchical)
-                }
-                .buttonStyle(.plain)
-                .disabled(!hasPromptInput && !isThinking)
             }
-            .padding(.leading, 11)
-            .padding(.trailing, 7)
-            .padding(.vertical, 7)
-            .frame(width: pillWidth)
-            .frame(minHeight: 34)
+            .padding(isExpandedComposerPresented ? 5 : 0)
             .background(.ultraThinMaterial)
             .background {
                 GeometryReader { proxy in
@@ -1387,11 +1531,181 @@ private struct AssistantFloatingPill: View {
                 }
             }
             .shadow(color: glowColor, radius: isPromptFocused ? 7 : 13, y: isPromptFocused ? 0 : 7)
+            .onExitCommand {
+                if isExpandedComposerPresented {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        isExpandedComposerPresented = false
+                    }
+                }
+            }
         }
         .animation(.easeOut(duration: 0.18), value: pillWidth)
         .animation(.easeInOut(duration: 0.18), value: pillCornerRadius)
         .animation(.easeOut(duration: 0.18), value: isThinking)
         .animation(.easeInOut(duration: 0.18), value: store.assistantAttachment)
+        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isExpandedComposerPresented)
+    }
+
+    private var modelMenu: some View {
+        Menu {
+            ForEach(AssistantModel.allCases) { model in
+                Button {
+                    store.selectAssistantModel(model)
+                } label: {
+                    if model == store.selectedAssistantModel {
+                        Label(model.title, systemImage: "checkmark")
+                    } else {
+                        Text(model.title)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(store.selectedAssistantModel.title)
+                    .font(.system(size: 12.2, weight: .semibold))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8.5, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: modelMenuWidth, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
+    }
+
+    private var attachmentControl: some View {
+        Group {
+            if let attachment = store.assistantAttachment {
+                HStack(spacing: 4) {
+                    Image(systemName: "paperclip")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(attachment.fileName)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: isExpandedComposerPresented ? 118 : 92)
+                    Button {
+                        store.removePromptAttachment()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .frame(width: 18, height: 18)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Remove attachment")
+                }
+                .foregroundStyle(.secondary)
+                .padding(.leading, 7)
+                .padding(.trailing, 3)
+                .frame(height: 24)
+                .background(Color.primary.opacity(0.06))
+                .clipShape(Capsule())
+            } else {
+                Image(systemName: "paperclip")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary.opacity(0.58))
+                    .frame(width: 22, height: 24)
+                    .help("Drag a PDF or Word document anywhere into the app")
+            }
+        }
+    }
+
+    private var expandToggle: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isExpandedComposerPresented.toggle()
+            }
+            if !isExpandedComposerPresented {
+                isPromptFocused = true
+            } else {
+                DispatchQueue.main.async {
+                    isExpandedPromptFocused = true
+                }
+            }
+        } label: {
+            Image(systemName: isExpandedComposerPresented ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 22, height: 24)
+        }
+        .buttonStyle(.plain)
+        .help(isExpandedComposerPresented ? "Minimize prompt" : "Expand prompt")
+    }
+
+    private var sendButton: some View {
+        Button {
+            submitOrPreviewThinking()
+            if isExpandedComposerPresented {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isExpandedComposerPresented = false
+                }
+            }
+        } label: {
+            if isExpandedComposerPresented {
+                HStack(spacing: 7) {
+                    Image(systemName: isThinking ? "stop.circle.fill" : "arrow.up.circle.fill")
+                        .font(.system(size: 15.5, weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+
+                    Text(isThinking ? "Stop" : "Send")
+                        .font(.system(size: 12.5, weight: .semibold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 13)
+                .frame(height: 30)
+                .background {
+                    Capsule()
+                        .fill(isSendHovered ? .white.opacity(0.16) : .white.opacity(0.06))
+                }
+                .overlay {
+                    if isSendHovered {
+                        AnimatedThinkingBorder(lineWidth: 0.7)
+                    }
+                }
+            } else {
+                Image(systemName: isThinking ? "stop.circle.fill" : "arrow.up.circle.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(isSendHovered ? .white : .primary.opacity(0.78))
+                    .frame(width: 24, height: 28)
+                    .background {
+                        if isSendHovered {
+                            Circle()
+                                .fill(.white.opacity(0.16))
+                        }
+                    }
+                    .overlay {
+                        if isSendHovered {
+                            AnimatedThinkingBorder(lineWidth: 0.7)
+                                .clipShape(Circle())
+                        }
+                    }
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(!hasPromptInput && !isThinking)
+        .opacity(!hasPromptInput && !isThinking && !isExpandedComposerPresented ? 0.42 : 1)
+        .onHover { hovering in
+            isSendHovered = hovering && hasPromptInput
+        }
+    }
+
+    private var expandedPromptEditor: some View {
+        TextEditor(text: $store.assistantPrompt)
+            .font(.system(size: 14.5))
+            .scrollContentBackground(.hidden)
+            .focused($isExpandedPromptFocused)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .frame(width: expandedPillWidth - 10, height: 206)
+            .background(Color.primary.opacity(0.045))
+            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .onAppear {
+                isExpandedPromptFocused = true
+            }
     }
 
     private var isThinking: Bool {
@@ -1399,15 +1713,15 @@ private struct AssistantFloatingPill: View {
     }
 
     private var pillWidth: CGFloat {
-        min(760, max(430, 230 + estimatedPromptWidth + attachmentWidth))
+        isExpandedComposerPresented ? expandedPillWidth : min(730, compactPillWidth)
     }
 
     private var textFieldWidth: CGFloat {
-        max(158, pillWidth - 272 - attachmentWidth)
+        min(430, max(96, estimatedPromptWidth))
     }
 
     private var pillCornerRadius: CGFloat {
-        measuredPromptText.count > 54 ? 18 : 17
+        isExpandedComposerPresented ? 20 : (measuredPromptText.count > 54 ? 18 : 17)
     }
 
     private var measuredPromptText: String {
@@ -1421,7 +1735,19 @@ private struct AssistantFloatingPill: View {
     }
 
     private var attachmentWidth: CGFloat {
-        store.assistantAttachment == nil ? 24 : 128
+        store.assistantAttachment == nil ? 22 : (isExpandedComposerPresented ? 154 : 134)
+    }
+
+    private var expandedPillWidth: CGFloat {
+        640
+    }
+
+    private var compactPillWidth: CGFloat {
+        modelMenuWidth + 1 + textFieldWidth + attachmentWidth + 22 + 24 + 25 + 9
+    }
+
+    private var modelMenuWidth: CGFloat {
+        store.selectedAssistantModel == .groq ? 45 : 62
     }
 
     private var hasPromptInput: Bool {
@@ -1456,66 +1782,6 @@ private struct AssistantFloatingPill: View {
 
         withAnimation(.easeInOut(duration: 0.2)) {
             store.submitAssistantPrompt()
-        }
-    }
-}
-
-private struct ExpandedPromptComposer: View {
-    @Binding var prompt: String
-    let submit: () -> Void
-    let close: () -> Void
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        VStack(spacing: 10) {
-            HStack {
-                Text("Prompt")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-
-                Button(action: close) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .bold))
-                        .frame(width: 24, height: 24)
-                }
-                .buttonStyle(.plain)
-                .help("Close")
-            }
-
-            TextEditor(text: $prompt)
-                .font(.system(size: 14))
-                .scrollContentBackground(.hidden)
-                .focused($isFocused)
-                .padding(8)
-                .background(Color.primary.opacity(0.055))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-
-            HStack {
-                Spacer()
-                Button {
-                    submit()
-                    close()
-                } label: {
-                    Label("Send", systemImage: "arrow.up.circle.fill")
-                        .labelStyle(.titleAndIcon)
-                }
-                .buttonStyle(.borderless)
-                .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }
-        .padding(14)
-        .frame(width: 620, height: 246)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(.white.opacity(0.18), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.22), radius: 26, y: 14)
-        .onAppear {
-            isFocused = true
         }
     }
 }
@@ -1957,22 +2223,87 @@ private struct BrainSidebarHeader: View {
     }
 }
 
+private struct SidebarSearchField: View {
+    @Binding var query: String
+    var isFocused: FocusState<Bool>.Binding
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 16, height: 16)
+
+            TextField("Search pages", text: $query)
+                .font(.system(size: 13, weight: .medium))
+                .textFieldStyle(.plain)
+                .focused(isFocused)
+
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                    isFocused.wrappedValue = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.plain)
+                .help("Clear search")
+                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 32)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.055))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(isFocused.wrappedValue ? Color.accentColor.opacity(0.52) : Color.primary.opacity(0.095), lineWidth: 1)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onTapGesture {
+            isFocused.wrappedValue = true
+        }
+    }
+}
+
+private struct SidebarSearchEmptyView: View {
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 20))
+                .foregroundStyle(.tertiary)
+
+            Text("No matching pages")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
 private struct ModelConfigurationView: View {
     @ObservedObject var store: BrainStore
     @Environment(\.dismiss) private var dismiss
 
-    @State private var openRouterAPIKey: String
-    @State private var openRouterModel: String
+    @State private var mistralAPIKey: String
+    @State private var mistralModel: String
     @State private var groqAPIKey: String
     @State private var groqModel: String
+    @State private var selectedModel: AssistantModel
 
     init(store: BrainStore) {
         self.store = store
         let configuration = store.assistantConfigurationSnapshot
-        _openRouterAPIKey = State(initialValue: configuration.openRouterAPIKey)
-        _openRouterModel = State(initialValue: configuration.openRouterModel)
+        _mistralAPIKey = State(initialValue: configuration.mistralAPIKey)
+        _mistralModel = State(initialValue: configuration.mistralModel)
         _groqAPIKey = State(initialValue: configuration.groqAPIKey)
         _groqModel = State(initialValue: configuration.groqModel)
+        _selectedModel = State(initialValue: store.selectedAssistantModel)
     }
 
     var body: some View {
@@ -1987,7 +2318,7 @@ private struct ModelConfigurationView: View {
                     Text("Configure Model")
                         .font(.system(size: 24, weight: .bold))
 
-                    Text("Add the credentials Zirn should use for OpenRouter and Groq.")
+                    Text("Choose whether Zirn writes with Mistral or Groq.")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1995,20 +2326,32 @@ private struct ModelConfigurationView: View {
             }
 
             VStack(alignment: .leading, spacing: 14) {
-                ConfigurationField(title: "OpenRouter API Key") {
-                    SecureField("sk-or-...", text: $openRouterAPIKey)
+                ConfigurationField(title: "Provider") {
+                    Picker("Provider", selection: $selectedModel) {
+                        ForEach(AssistantModel.allCases) { model in
+                            Text(model.title).tag(model)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
                 }
 
-                ConfigurationField(title: "OpenRouter Model") {
-                    TextField("openai/gpt-5", text: $openRouterModel)
-                }
+                if selectedModel == .mistral {
+                    ConfigurationField(title: "Mistral API Key") {
+                        SecureField("MISTRAL_API_KEY", text: $mistralAPIKey)
+                    }
 
-                ConfigurationField(title: "Groq API Key") {
-                    SecureField("gsk-...", text: $groqAPIKey)
-                }
+                    ConfigurationField(title: "Mistral Model") {
+                        TextField("mistral-large-latest", text: $mistralModel)
+                    }
+                } else {
+                    ConfigurationField(title: "Groq API Key") {
+                        SecureField("gsk-...", text: $groqAPIKey)
+                    }
 
-                ConfigurationField(title: "Groq Model") {
-                    TextField("llama-3.3-70b-versatile", text: $groqModel)
+                    ConfigurationField(title: "Groq Model") {
+                        TextField("llama-3.3-70b-versatile", text: $groqModel)
+                    }
                 }
             }
 
@@ -2023,9 +2366,10 @@ private struct ModelConfigurationView: View {
                 .controlSize(.large)
 
                 Button {
+                    store.selectAssistantModel(selectedModel)
                     store.saveModelConfiguration(
-                        openRouterAPIKey: openRouterAPIKey,
-                        openRouterModel: openRouterModel,
+                        mistralAPIKey: mistralAPIKey,
+                        mistralModel: mistralModel,
                         groqAPIKey: groqAPIKey,
                         groqModel: groqModel
                     )
@@ -2099,28 +2443,16 @@ private struct PageSearchView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(results) { result in
-                    Button {
-                        store.openSearchResult(result)
-                        store.isShowingPageSearch = false
-                    } label: {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(highlightedText(result.title, query: query))
-                                .font(.system(size: 13, weight: .semibold))
-                                .lineLimit(1)
-
-                            Text(highlightedText(result.preview, query: query))
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        ForEach(results) { result in
+                            PageSearchResultRow(result: result, query: query) {
+                                open(result)
+                            }
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 5)
                     }
-                    .buttonStyle(.plain)
-                    .listRowBackground(Color.clear)
+                    .padding(8)
                 }
-                .listStyle(.plain)
                 .scrollContentBackground(.hidden)
             }
         }
@@ -2134,6 +2466,67 @@ private struct PageSearchView: View {
         .task {
             isSearchFocused = true
         }
+    }
+
+    private func open(_ result: NoteSearchResult) {
+        isSearchFocused = false
+        store.openSearchResult(result)
+        store.isShowingPageSearch = false
+    }
+}
+
+private struct PageSearchResultRow: View {
+    let result: NoteSearchResult
+    let query: String
+    let open: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 10) {
+                Image(systemName: result.blockIndex == nil ? "doc.text" : "text.magnifyingglass")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(highlightedText(result.title, query: query))
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+
+                    Text(highlightedText(result.preview, query: query))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 8)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .opacity(isHovered ? 1 : 0.45)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isHovered ? Color.primary.opacity(0.09) : Color.clear)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(isHovered ? Color.primary.opacity(0.10) : Color.clear, lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
+        .help("Open \(result.title)")
     }
 
     private func highlightedText(_ text: String, query: String) -> AttributedString {

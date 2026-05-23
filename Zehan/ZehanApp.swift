@@ -12,7 +12,7 @@ struct ZirnApp: App {
     @StateObject private var store = BrainStore()
 
     var body: some Scene {
-        WindowGroup {
+        Window("Zirn", id: "main") {
             ContentView(store: store)
         }
         .windowStyle(.hiddenTitleBar)
@@ -33,8 +33,8 @@ struct ZirnApp: App {
             CommandGroup(after: .newItem) {
                 Divider()
 
-                Button("Open Page") {
-                    store.togglePageSearch()
+                Button("Search Pages") {
+                    store.showPageSearch()
                 }
                 .keyboardShortcut("o", modifiers: .command)
                 .disabled(store.activeBrain == nil)

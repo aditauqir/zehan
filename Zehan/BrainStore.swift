@@ -29,7 +29,7 @@ final class BrainStore: ObservableObject {
     @Published var isShowingPageSearch = false
     @Published var recentVaults: [RecentVault] = []
     @Published var graphLinks: [BrainLinkReference] = []
-    @Published var selectedAssistantModel: AssistantModel = .openRouter
+    @Published var selectedAssistantModel: AssistantModel = .mistral
     @Published var assistantPrompt = ""
     @Published var isGeneratingAssistantResponse = false
     @Published var isUsingWebSearch = false
@@ -37,24 +37,40 @@ final class BrainStore: ObservableObject {
     @Published var pendingAssistantPreview: AssistantPreview?
     @Published var activeSearchHighlight: SearchHighlight?
     @Published var assistantAttachment: PromptAttachment?
+    @Published private(set) var mistralBudgetSpentUSD = 0.0
+    @Published private(set) var mistralOCRPagesUsed = 0
 
     private let encoder: JSONEncoder
     private let decoder = JSONDecoder()
     private let recentVaultsKey = "RecentVaults"
     private let openAIAPIKeyKey = "Assistant.OpenAIAPIKey"
     private let openAIModelKey = "Assistant.OpenAIModel"
-    private let openRouterAPIKeyKey = "Assistant.OpenRouterAPIKey"
-    private let openRouterModelKey = "Assistant.OpenRouterModel"
+    private let mistralAPIKeyKey = "Assistant.MistralAPIKey"
+    private let mistralModelKey = "Assistant.MistralModel"
+    private let mistralBudgetSpentUSDKey = "Assistant.MistralBudgetSpentUSD"
+    private let mistralOCRPagesUsedKey = "Assistant.MistralOCRPagesUsed"
     private let groqAPIKeyKey = "Assistant.GroqAPIKey"
     private let groqModelKey = "Assistant.GroqModel"
-    private var openRouterAPIKey = ""
-    private var openRouterModel = "openai/gpt-5"
+    private let selectedAssistantModelKey = "Assistant.SelectedModel"
+    private var mistralAPIKey = ""
+    private var mistralModel = "mistral-large-latest"
     private var groqAPIKey = ""
     private var groqModel = "llama-3.3-70b-versatile"
     private var autosaveTask: Task<Void, Never>?
     private var pendingAssistantInsertion: PendingAssistantInsertion?
     private var isApplyingAssistantOutput = false
     private var noteIdentityDatabase: NoteIdentityDatabase?
+
+    private static let mistralBudgetUSD = 10.0
+    private static let mistralInputPricePerMillionTokens = 0.50
+    private static let mistralOutputPricePerMillionTokens = 1.50
+    private static let maxAssistantOutputTokens = 4096
+    private static let estimatedCharactersPerToken = 4
+    private static let mistralOCRModel = "mistral-ocr-latest"
+    private static let mistralOCRPageLimit = 100
+    private static var mistralBudgetTokenEquivalent: Int {
+        Int((mistralBudgetUSD / ((mistralInputPricePerMillionTokens + mistralOutputPricePerMillionTokens) / 2)) * 1_000_000)
+    }
 
     init() {
         encoder = JSONEncoder()
@@ -73,13 +89,46 @@ final class BrainStore: ObservableObject {
     }
 
     var contextUsageFraction: Double {
-        let attachmentCount = assistantAttachment?.extractedText.count ?? 0
-        let estimatedCharacters = content.count + assistantPrompt.count + attachmentCount
-        return min(1, Double(estimatedCharacters) / 128_000)
+        min(1, estimatedMistralBudgetUSD / Self.mistralBudgetUSD)
     }
 
     var contextUsagePercent: Int {
         Int((contextUsageFraction * 100).rounded())
+    }
+
+    var contextUsageLabel: String {
+        "\(formatUSD(estimatedMistralBudgetUSD)) / \(formatUSD(Self.mistralBudgetUSD))"
+    }
+
+    var contextUsageDetail: String {
+        "~\(Self.mistralBudgetTokenEquivalent.formatted()) blended tokens"
+    }
+
+    var ocrUploadsRemaining: Int {
+        max(0, Self.mistralOCRPageLimit - mistralOCRPagesUsed)
+    }
+
+    var ocrUploadUsageFraction: Double {
+        min(1, Double(mistralOCRPagesUsed) / Double(Self.mistralOCRPageLimit))
+    }
+
+    var ocrUploadCounterLabel: String {
+        "\(ocrUploadsRemaining) left"
+    }
+
+    var ocrUploadCounterDetail: String {
+        "\(mistralOCRPagesUsed) of \(Self.mistralOCRPageLimit) OCR pages used"
+    }
+
+    private var estimatedMistralBudgetUSD: Double {
+        min(Self.mistralBudgetUSD, mistralBudgetSpentUSD + estimatedCurrentMistralRequestCostUSD)
+    }
+
+    private var estimatedCurrentMistralRequestCostUSD: Double {
+        let attachmentCount = assistantAttachment?.extractedText.count ?? 0
+        let inputTokens = estimatedTokenCount(forCharacterCount: content.count + assistantPrompt.count + attachmentCount)
+        let outputTokens = min(Self.maxAssistantOutputTokens, max(512, inputTokens / 5))
+        return Self.mistralCostUSD(inputTokens: inputTokens, outputTokens: outputTokens)
     }
 
     func createBrainVaultFromUser() {
@@ -147,8 +196,8 @@ final class BrainStore: ObservableObject {
                     graph: BrainGraph(notes: [], links: []),
                     sourceRegistry: SourceRegistryPointer(path: "sources.json"),
                     ai: BrainAIPreferences(
-                        provider: "openrouter",
-                        openaiModel: "openai/gpt-5",
+                        provider: "mistral",
+                        mistralModel: "mistral-large-latest",
                         groqModel: "llama-3.3-70b-versatile",
                         ollamaModel: nil,
                         ollamaURL: nil,
@@ -231,8 +280,8 @@ final class BrainStore: ObservableObject {
         pendingAssistantPreview = nil
         currentNoteID = nil
         selectedNoteID = nil
-        title = "Untitled"
-        content = Self.starterMarkdown
+        title = uniqueTitle(for: "Untitled")
+        content = contentBySettingDocumentTitle(title, in: Self.starterMarkdown)
         if activeBrain != nil {
             saveCurrentNote(statusText: "Page created")
         }
@@ -248,18 +297,23 @@ final class BrainStore: ObservableObject {
     }
 
     func updateTitleFromEditor(_ newTitle: String) {
-        title = newTitle
-        content = contentBySettingDocumentTitle(newTitle, in: content)
-        updateCurrentNoteSummaryTitle(to: displayTitle(for: newTitle))
+        let uniqueTitle = uniqueTitle(for: newTitle, excluding: currentNoteID)
+        title = uniqueTitle
+        content = contentBySettingDocumentTitle(uniqueTitle, in: content)
+        updateCurrentNoteSummaryTitle(to: uniqueTitle)
         scheduleAutosave()
     }
 
     func updateContentFromEditor(_ newContent: String) {
-        content = newContent
-        if let documentTitle = markdownDocumentTitle(in: newContent),
-           documentTitle != title {
-            title = documentTitle
-            updateCurrentNoteSummaryTitle(to: displayTitle(for: documentTitle))
+        if let documentTitle = markdownDocumentTitle(in: newContent) {
+            let uniqueTitle = uniqueTitle(for: documentTitle, excluding: currentNoteID)
+            content = contentBySettingDocumentTitle(uniqueTitle, in: newContent)
+            if uniqueTitle != title {
+                title = uniqueTitle
+                updateCurrentNoteSummaryTitle(to: uniqueTitle)
+            }
+        } else {
+            content = newContent
         }
         learnFromUserCorrectionIfNeeded(revisedContent: newContent)
         scheduleAutosave()
@@ -337,10 +391,11 @@ final class BrainStore: ObservableObject {
                 let now = Date()
                 let id = currentNoteID ?? UUID().uuidString
                 let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                let uniqueTitle = uniqueTitle(for: cleanTitle, excluding: id)
                 let note = Note(
                     id: id,
-                    title: cleanTitle.isEmpty ? "Untitled" : cleanTitle,
-                    content: content,
+                    title: uniqueTitle,
+                    content: contentBySettingDocumentTitle(uniqueTitle, in: content),
                     createdAt: existingCreatedAt(for: id) ?? now,
                     updatedAt: now
                 )
@@ -381,30 +436,36 @@ final class BrainStore: ObservableObject {
     }
 
     func configureModelFromUser() {
+        guard requestAndSaveMistralAPIKey(
+            title: mistralAPIKey.isEmpty ? "Mistral API Key" : "Update Mistral API Key",
+            message: mistralAPIKey.isEmpty
+                ? "Enter the API key Zirn should use for Mistral."
+                : "Enter a new Mistral API key, or leave blank to keep the saved key."
+        ) else { return }
         isShowingModelConfiguration = true
     }
 
     var assistantConfigurationSnapshot: AssistantConfiguration {
         AssistantConfiguration(
-            openRouterAPIKey: openRouterAPIKey,
-            openRouterModel: openRouterModel,
+            mistralAPIKey: mistralAPIKey,
+            mistralModel: mistralModel,
             groqAPIKey: groqAPIKey,
             groqModel: groqModel
         )
     }
 
     func saveModelConfiguration(
-        openRouterAPIKey: String,
-        openRouterModel: String,
+        mistralAPIKey: String,
+        mistralModel: String,
         groqAPIKey: String,
         groqModel: String
     ) {
-        self.openRouterAPIKey = openRouterAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.openRouterModel = openRouterModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.mistralAPIKey = mistralAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.mistralModel = mistralModel.trimmingCharacters(in: .whitespacesAndNewlines)
         self.groqAPIKey = groqAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         self.groqModel = groqModel.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if self.openRouterModel.isEmpty { self.openRouterModel = "openai/gpt-5" }
+        if self.mistralModel.isEmpty { self.mistralModel = "mistral-large-latest" }
         if self.groqModel.isEmpty { self.groqModel = "llama-3.3-70b-versatile" }
 
         do {
@@ -414,6 +475,11 @@ final class BrainStore: ObservableObject {
         } catch {
             status = error.localizedDescription
         }
+    }
+
+    func selectAssistantModel(_ model: AssistantModel) {
+        selectedAssistantModel = model
+        UserDefaults.standard.set(model.rawValue, forKey: selectedAssistantModelKey)
     }
 
     func submitAssistantPrompt() {
@@ -559,7 +625,7 @@ final class BrainStore: ObservableObject {
     }
 
     private func renameNote(id: Note.ID, to newTitle: String) {
-        let cleanTitle = displayTitle(for: newTitle)
+        let cleanTitle = uniqueTitle(for: newTitle, excluding: id)
 
         withActiveBrainAccess {
             do {
@@ -691,17 +757,25 @@ final class BrainStore: ObservableObject {
             }
         }
 
-        let extractedText = extractedPromptDocumentText(from: url)
-        assistantAttachment = PromptAttachment(
-            fileName: url.lastPathComponent,
-            fileExtension: url.pathExtension.lowercased(),
-            extractedText: extractedText
-        )
-        status = "\(url.lastPathComponent) attached"
+        switch url.pathExtension.lowercased() {
+        case "pdf":
+            attachPDFWithMistralOCR(from: url)
+        case "doc", "docx":
+            let extractedText = extractedPromptDocumentText(from: url)
+            assistantAttachment = PromptAttachment(
+                fileName: url.lastPathComponent,
+                fileExtension: url.pathExtension.lowercased(),
+                extractedText: extractedText
+            )
+            status = "\(url.lastPathComponent) attached"
+        default:
+            status = "Only PDFs and Word documents are supported"
+        }
     }
 
     func removePromptAttachment() {
         assistantAttachment = nil
+        status = "Attachment removed"
     }
 
     func openRecentVault(_ recentVault: RecentVault) {
@@ -859,9 +933,11 @@ final class BrainStore: ObservableObject {
         .filter { $0.pathExtension == "md" || $0.pathExtension == "json" }
 
         var seenIDs = Set<Note.ID>()
+        var reservedTitles = Set<String>()
         let loadedNotes = try noteURLs.map { url in
             var note = try readNote(from: url)
-            let fileName = url.lastPathComponent
+            var noteURL = url
+            var fileName = noteURL.lastPathComponent
             let metadataID = note.id.trimmingCharacters(in: .whitespacesAndNewlines)
             let indexedID = noteIdentityDatabase?.noteID(forFileName: fileName)
             let candidateID = indexedID ?? (metadataID.isEmpty ? nil : note.id)
@@ -873,15 +949,22 @@ final class BrainStore: ObservableObject {
                 finalID = UUID().uuidString
             }
 
-            if finalID != note.id {
+            let uniqueTitle = uniqueTitle(for: note.title, reserving: &reservedTitles)
+            if finalID != note.id || uniqueTitle != note.title {
                 note = Note(
                     id: finalID,
-                    title: note.title,
-                    content: note.content,
+                    title: uniqueTitle,
+                    content: contentBySettingDocumentTitle(uniqueTitle, in: note.content),
                     createdAt: note.createdAt,
                     updatedAt: Date()
                 )
-                try writeNote(note, to: url)
+                let updatedURL = markdownNoteURL(for: note, in: brain)
+                try writeMarkdownNote(note, to: updatedURL)
+                if updatedURL != noteURL, FileManager.default.fileExists(atPath: noteURL.path) {
+                    try? FileManager.default.removeItem(at: noteURL)
+                }
+                noteURL = updatedURL
+                fileName = noteURL.lastPathComponent
             }
 
             try noteIdentityDatabase?.upsert(
@@ -1249,6 +1332,45 @@ final class BrainStore: ObservableObject {
         return field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func requestSecureText(
+        title: String,
+        message: String,
+        placeholder: String
+    ) -> String? {
+        let field = NSSecureTextField(string: "")
+        field.placeholderString = placeholder
+        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Cancel")
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return nil }
+        return field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func requestAndSaveMistralAPIKey(title: String, message: String) -> Bool {
+        guard let apiKey = requestSecureText(
+            title: title,
+            message: message,
+            placeholder: "MISTRAL_API_KEY"
+        ) else {
+            return false
+        }
+
+        let cleanAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanAPIKey.isEmpty {
+            mistralAPIKey = cleanAPIKey
+            try? saveAssistantConfiguration()
+            status = "Mistral API key saved"
+        }
+        return true
+    }
+
     private func showAlert(title: String, message: String) {
         let alert = NSAlert()
         alert.messageText = title
@@ -1265,14 +1387,19 @@ final class BrainStore: ObservableObject {
         }
 
         do {
-            let output: String
+            let result: ChatCompletionResult
             let providerTitle = selectedAssistantModel.title
             switch selectedAssistantModel {
-            case .openRouter:
-                output = try await generateWithOpenRouter(prompt: prompt)
+            case .mistral:
+                result = try await generateWithMistral(prompt: prompt)
+                recordMistralUsage(
+                    inputTokens: result.inputTokens ?? estimatedTokenCount(for: assistantInput(for: prompt)),
+                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+                )
             case .groq:
-                output = try await generateWithGroq(prompt: prompt)
+                result = try await generateWithGroq(prompt: prompt)
             }
+            let output = result.content
 
             guard !cleanedAssistantMarkdown(output).isEmpty else {
                 throw AssistantError.requestFailed("The model returned no Markdown.")
@@ -1308,18 +1435,17 @@ final class BrainStore: ObservableObject {
         )
     }
 
-    private func generateWithOpenRouter(prompt: String) async throws -> String {
-        guard !openRouterAPIKey.isEmpty else {
-            throw AssistantError.missingConfiguration("Add an OpenRouter API key in Settings > Configure Model.")
+    private func generateWithMistral(prompt: String) async throws -> ChatCompletionResult {
+        guard !mistralAPIKey.isEmpty else {
+            throw AssistantError.missingConfiguration("Add a Mistral API key in Settings > Configure Model.")
         }
 
-        var request = URLRequest(url: URL(string: "https://openrouter.ai/api/v1/chat/completions")!)
+        var request = URLRequest(url: URL(string: "https://api.mistral.ai/v1/chat/completions")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(openRouterAPIKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("Zirn", forHTTPHeaderField: "X-Title")
-        var body: [String: Any] = [
-            "model": openRouterModel,
+        request.setValue("Bearer \(mistralAPIKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": mistralModel,
             "messages": [
                 [
                     "role": "system",
@@ -1331,22 +1457,16 @@ final class BrainStore: ObservableObject {
                 ]
             ],
             "temperature": 0.35,
-            "max_tokens": 4096,
+            "max_tokens": Self.maxAssistantOutputTokens,
             "stream": false
-        ]
-        if isUsingWebSearch {
-            body["plugins"] = [
-                ["id": "web"]
-            ]
-        }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        ])
 
         let (data, response) = try await URLSession.shared.data(for: request)
         try validateHTTPResponse(response, data: data)
-        return try extractChatCompletionOutputText(from: data)
+        return try extractChatCompletionResult(from: data)
     }
 
-    private func generateWithGroq(prompt: String) async throws -> String {
+    private func generateWithGroq(prompt: String) async throws -> ChatCompletionResult {
         guard !groqAPIKey.isEmpty else {
             throw AssistantError.missingConfiguration("Add a Groq API key in Settings > Configure Model.")
         }
@@ -1368,13 +1488,13 @@ final class BrainStore: ObservableObject {
                 ]
             ],
             "temperature": 0.35,
-            "max_completion_tokens": 4096,
+            "max_completion_tokens": Self.maxAssistantOutputTokens,
             "stream": false
         ])
 
         let (data, response) = try await URLSession.shared.data(for: request)
         try validateHTTPResponse(response, data: data)
-        return try extractChatCompletionOutputText(from: data)
+        return try extractChatCompletionResult(from: data)
     }
 
     private func assistantInstructions() -> String {
@@ -1478,27 +1598,85 @@ final class BrainStore: ObservableObject {
         }
     }
 
-    private func extractChatCompletionOutputText(from data: Data) throws -> String {
+    private func extractChatCompletionResult(from data: Data) throws -> ChatCompletionResult {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
               let firstChoice = choices.first,
-              let message = firstChoice["message"] as? [String: Any],
-              let content = message["content"] as? String
+              let message = firstChoice["message"] as? [String: Any]
         else {
             throw AssistantError.requestFailed("The model returned no Markdown.")
         }
 
-        return content
+        let content: String?
+        if let text = message["content"] as? String {
+            content = text
+        } else if let chunks = message["content"] as? [[String: Any]] {
+            content = chunks.compactMap { chunk in
+                chunk["text"] as? String ?? chunk["content"] as? String
+            }
+            .joined()
+        } else {
+            content = nil
+        }
+
+        guard let content else {
+            throw AssistantError.requestFailed("The model returned no Markdown.")
+        }
+
+        let usage = json["usage"] as? [String: Any]
+        return ChatCompletionResult(
+            content: content,
+            inputTokens: usage?["prompt_tokens"] as? Int
+                ?? usage?["input_tokens"] as? Int,
+            outputTokens: usage?["completion_tokens"] as? Int
+                ?? usage?["output_tokens"] as? Int
+        )
+    }
+
+    private func recordMistralUsage(inputTokens: Int, outputTokens: Int) {
+        let cost = Self.mistralCostUSD(inputTokens: inputTokens, outputTokens: outputTokens)
+        mistralBudgetSpentUSD += cost
+        UserDefaults.standard.set(mistralBudgetSpentUSD, forKey: mistralBudgetSpentUSDKey)
+    }
+
+    private func recordMistralOCRUpload(pageCount: Int) {
+        mistralOCRPagesUsed = min(Self.mistralOCRPageLimit, mistralOCRPagesUsed + pageCount)
+        UserDefaults.standard.set(mistralOCRPagesUsed, forKey: mistralOCRPagesUsedKey)
+    }
+
+    private func estimatedTokenCount(for text: String) -> Int {
+        estimatedTokenCount(forCharacterCount: text.count)
+    }
+
+    private func estimatedTokenCount(forCharacterCount characterCount: Int) -> Int {
+        max(1, Int(ceil(Double(characterCount) / Double(Self.estimatedCharactersPerToken))))
+    }
+
+    private static func mistralCostUSD(inputTokens: Int, outputTokens: Int) -> Double {
+        let inputCost = (Double(inputTokens) / 1_000_000) * mistralInputPricePerMillionTokens
+        let outputCost = (Double(outputTokens) / 1_000_000) * mistralOutputPricePerMillionTokens
+        return inputCost + outputCost
+    }
+
+    private func formatUSD(_ value: Double) -> String {
+        if value < 0.01 {
+            return String(format: "$%.4f", value)
+        }
+        return String(format: "$%.2f", value)
     }
 
     private func loadAssistantConfiguration() {
         let defaults = UserDefaults.standard
-        openRouterAPIKey = defaults.string(forKey: openRouterAPIKeyKey)
-            ?? defaults.string(forKey: openAIAPIKeyKey)
-            ?? ""
-        openRouterModel = defaults.string(forKey: openRouterModelKey)
-            ?? defaults.string(forKey: openAIModelKey)
-            ?? "openai/gpt-5"
+        if let rawModel = defaults.string(forKey: selectedAssistantModelKey),
+           let model = AssistantModel(rawValue: rawModel) {
+            selectedAssistantModel = model
+        } else {
+            selectedAssistantModel = .mistral
+        }
+        mistralAPIKey = defaults.string(forKey: mistralAPIKeyKey) ?? ""
+        mistralModel = defaults.string(forKey: mistralModelKey) ?? "mistral-large-latest"
+        mistralBudgetSpentUSD = defaults.double(forKey: mistralBudgetSpentUSDKey)
+        mistralOCRPagesUsed = min(Self.mistralOCRPageLimit, defaults.integer(forKey: mistralOCRPagesUsedKey))
         defaults.removeObject(forKey: openAIAPIKeyKey)
         defaults.removeObject(forKey: openAIModelKey)
         groqAPIKey = defaults.string(forKey: groqAPIKeyKey) ?? ""
@@ -1507,8 +1685,11 @@ final class BrainStore: ObservableObject {
 
     private func saveAssistantConfiguration() throws {
         let defaults = UserDefaults.standard
-        defaults.set(openRouterAPIKey, forKey: openRouterAPIKeyKey)
-        defaults.set(openRouterModel, forKey: openRouterModelKey)
+        defaults.set(selectedAssistantModel.rawValue, forKey: selectedAssistantModelKey)
+        defaults.set(mistralAPIKey, forKey: mistralAPIKeyKey)
+        defaults.set(mistralModel, forKey: mistralModelKey)
+        defaults.set(mistralBudgetSpentUSD, forKey: mistralBudgetSpentUSDKey)
+        defaults.set(mistralOCRPagesUsed, forKey: mistralOCRPagesUsedKey)
         defaults.set(groqAPIKey, forKey: groqAPIKeyKey)
         defaults.set(groqModel, forKey: groqModelKey)
         defaults.removeObject(forKey: openAIAPIKeyKey)
@@ -1631,6 +1812,98 @@ final class BrainStore: ObservableObject {
     private func isSupportedPromptDocument(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
         return ext == "pdf" || ext == "doc" || ext == "docx"
+    }
+
+    private func attachPDFWithMistralOCR(from url: URL) {
+        guard !mistralAPIKey.isEmpty || requestAndSaveMistralAPIKey(
+            title: "Mistral API Key",
+            message: "Mistral OCR needs your Mistral API key before reading this PDF."
+        ) else {
+            status = "Mistral API key required for OCR"
+            return
+        }
+
+        guard let data = try? Data(contentsOf: url) else {
+            status = "Could not read \(url.lastPathComponent)"
+            return
+        }
+
+        guard ocrUploadsRemaining > 0 else {
+            status = "No OCR uploads left"
+            return
+        }
+
+        let pageCount = PDFDocument(data: data)?.pageCount ?? 0
+        let pageLimit = pageCount == 0
+            ? ocrUploadsRemaining
+            : min(pageCount, ocrUploadsRemaining)
+        let pages = Array(0..<pageLimit)
+        status = "OCR reading \(pageLimit) page\(pageLimit == 1 ? "" : "s")"
+
+        Task {
+            do {
+                let extractedText = try await extractPDFTextWithMistralOCR(data: data, pages: pages)
+                assistantAttachment = PromptAttachment(
+                    fileName: url.lastPathComponent,
+                    fileExtension: url.pathExtension.lowercased(),
+                    extractedText: extractedText
+                )
+                recordMistralOCRUpload(pageCount: pageLimit)
+
+                if pageCount > pageLimit {
+                    status = "\(url.lastPathComponent) attached · first \(pageLimit) pages OCRed"
+                } else {
+                    status = "\(url.lastPathComponent) attached"
+                }
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    private func extractPDFTextWithMistralOCR(data: Data, pages: [Int]) async throws -> String {
+        var request = URLRequest(url: URL(string: "https://api.mistral.ai/v1/ocr")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(mistralAPIKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": Self.mistralOCRModel,
+            "document": [
+                "type": "document_url",
+                "document_url": "data:application/pdf;base64,\(data.base64EncodedString())"
+            ],
+            "pages": pages,
+            "include_image_base64": false,
+            "table_format": "markdown"
+        ])
+
+        let (responseData, response) = try await URLSession.shared.data(for: request)
+        try validateHTTPResponse(response, data: responseData)
+        return try extractOCRMarkdown(from: responseData)
+    }
+
+    private func extractOCRMarkdown(from data: Data) throws -> String {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let pages = json["pages"] as? [[String: Any]]
+        else {
+            throw AssistantError.requestFailed("Mistral OCR returned no pages.")
+        }
+
+        return pages
+            .sorted { lhs, rhs in
+                (lhs["index"] as? Int ?? 0) < (rhs["index"] as? Int ?? 0)
+            }
+            .compactMap { page in
+                let pageIndex = page["index"] as? Int
+                let markdown = (page["markdown"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let markdown, !markdown.isEmpty else { return nil }
+                if let pageIndex {
+                    return "<!-- OCR page \(pageIndex + 1) -->\n\(markdown)"
+                }
+                return markdown
+            }
+            .joined(separator: "\n\n")
     }
 
     private func extractedPromptDocumentText(from url: URL) -> String {
@@ -1771,6 +2044,38 @@ final class BrainStore: ObservableObject {
     private func displayTitle(for title: String) -> String {
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         return cleanTitle.isEmpty ? "Untitled" : cleanTitle
+    }
+
+    private func uniqueTitle(for proposedTitle: String, excluding excludedID: Note.ID? = nil) -> String {
+        let baseTitle = displayTitle(for: proposedTitle)
+        let takenTitles = Set(
+            notes
+                .filter { $0.id != excludedID }
+                .map { normalizedLinkTitle($0.title) }
+        )
+        return uniqueTitle(baseTitle, isTaken: { takenTitles.contains(normalizedLinkTitle($0)) })
+    }
+
+    private func uniqueTitle(for proposedTitle: String, reserving reservedTitles: inout Set<String>) -> String {
+        let baseTitle = displayTitle(for: proposedTitle)
+        let resolvedTitle = uniqueTitle(baseTitle) { candidate in
+            reservedTitles.contains(normalizedLinkTitle(candidate))
+        }
+        reservedTitles.insert(normalizedLinkTitle(resolvedTitle))
+        return resolvedTitle
+    }
+
+    private func uniqueTitle(_ baseTitle: String, isTaken: (String) -> Bool) -> String {
+        guard isTaken(baseTitle) else { return baseTitle }
+
+        var suffix = 1
+        while true {
+            let candidate = "\(baseTitle)_(\(suffix))"
+            if !isTaken(candidate) {
+                return candidate
+            }
+            suffix += 1
+        }
     }
 
     private func updateCurrentNoteSummaryTitle(to title: String) {
@@ -1919,8 +2224,8 @@ struct RecentVault: Identifiable, Codable, Equatable {
 }
 
 struct AssistantConfiguration: Equatable {
-    let openRouterAPIKey: String
-    let openRouterModel: String
+    let mistralAPIKey: String
+    let mistralModel: String
     let groqAPIKey: String
     let groqModel: String
 }
@@ -1933,23 +2238,29 @@ struct AssistantPreview: Identifiable, Equatable {
     let createdAt: Date
 }
 
+private struct ChatCompletionResult {
+    let content: String
+    let inputTokens: Int?
+    let outputTokens: Int?
+}
+
 enum AssistantModel: String, CaseIterable, Identifiable {
-    case openRouter
+    case mistral
     case groq
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .openRouter:
-            return "OpenRouter"
+        case .mistral:
+            return "Mistral"
         case .groq:
             return "Groq"
         }
     }
 
     var supportsWebSearch: Bool {
-        self == .openRouter
+        false
     }
 }
 
@@ -2039,11 +2350,12 @@ struct SourceRegistryPointer: Codable {
 
 struct BrainAIPreferences: Codable {
     var provider: String
-    var openaiModel: String
-    var groqModel: String?
-    var ollamaModel: String?
-    var ollamaURL: String?
-    var appleModel: String?
+    var mistralModel: String? = nil
+    var openaiModel: String? = nil
+    var groqModel: String? = nil
+    var ollamaModel: String? = nil
+    var ollamaURL: String? = nil
+    var appleModel: String? = nil
 }
 
 struct BrainAppCompatibility: Codable {
