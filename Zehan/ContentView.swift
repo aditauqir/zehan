@@ -855,78 +855,28 @@ private struct NoteGraphView: View {
     let links: [BrainLinkReference]
     let selectedNoteID: Note.ID?
     var maxVisibleNotes: Int? = 12
+    var allowsScrolling = false
     let openNote: (Note.ID) -> Void
     var expand: (() -> Void)?
-    @State private var nodeOffsets: [String: CGSize] = [:]
-    @State private var activeDragOffsets: [String: CGSize] = [:]
+    @State private var savedNodePositions: [String: CGPoint] = [:]
+    @State private var activeDragPosition: CGPoint?
+    @State private var activeDraggedNodeID: Note.ID?
 
     var body: some View {
         GeometryReader { proxy in
             let visibleNotes = maxVisibleNotes.map { Array(notes.prefix($0)) } ?? notes
-            let basePositions = nodePositions(for: visibleNotes, in: proxy.size)
-            let positions = adjustedPositions(from: basePositions)
+            let visibleNoteIDs = visibleNotes.map(\.id)
+            let canvasSize = allowsScrolling ? scrollCanvasSize(for: visibleNotes.count, viewport: proxy.size) : proxy.size
 
-            ZStack {
-                Canvas { context, _ in
-                    guard !visibleNotes.isEmpty else { return }
-
-                    for link in links {
-                        guard let start = positions[link.from],
-                              let end = positions[link.to]
-                        else { continue }
-
-                        var path = Path()
-                        path.move(to: start)
-                        path.addLine(to: end)
-                        context.stroke(path, with: .color(.primary.opacity(0.18)), lineWidth: 1)
-                    }
+            if allowsScrolling {
+                ScrollView([.horizontal, .vertical]) {
+                    graphCanvas(visibleNotes: visibleNotes, visibleNoteIDs: visibleNoteIDs, size: canvasSize)
+                        .frame(width: canvasSize.width, height: canvasSize.height)
                 }
-                .frame(width: proxy.size.width, height: proxy.size.height)
-
-                ForEach(visibleNotes) { note in
-                    if let point = positions[note.id] {
-                        let isDragging = activeDragOffsets[note.id] != nil
-
-                        GraphNodeView(
-                            note: note,
-                            isSelected: note.id == selectedNoteID
-                        )
-                        .position(point)
-                        .scaleEffect(isDragging ? 1.08 : 1)
-                        .zIndex(isDragging ? 2 : 1)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            openNote(note.id)
-                        }
-                        .highPriorityGesture(
-                            DragGesture(minimumDistance: 1)
-                                .onChanged { value in
-                                    activeDragOffsets[note.id] = value.translation
-                                }
-                                .onEnded { value in
-                                    guard let base = basePositions[note.id] else { return }
-                                    let existing = nodeOffsets[note.id] ?? .zero
-                                    let desiredPoint = CGPoint(
-                                        x: base.x + existing.width + value.translation.width,
-                                        y: base.y + existing.height + value.translation.height
-                                    )
-                                    let finalPoint = clampedNodePoint(desiredPoint, in: proxy.size)
-                                    withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.78)) {
-                                        nodeOffsets[note.id] = CGSize(
-                                            width: finalPoint.x - base.x,
-                                            height: finalPoint.y - base.y
-                                        )
-                                        activeDragOffsets[note.id] = nil
-                                    }
-                                }
-                        )
-                        .animation(.interactiveSpring(response: 0.06, dampingFraction: 1), value: activeDragOffsets[note.id])
-                        .animation(.spring(response: 0.34, dampingFraction: 0.72), value: nodeOffsets[note.id])
-                        .animation(.spring(response: 0.22, dampingFraction: 0.62), value: isDragging)
-                    }
-                }
+                .scrollIndicators(.visible)
+            } else {
+                graphCanvas(visibleNotes: visibleNotes, visibleNoteIDs: visibleNoteIDs, size: canvasSize)
             }
-            .coordinateSpace(name: "graphCanvas")
         }
         .padding(10)
         .background(.ultraThinMaterial)
@@ -958,6 +908,101 @@ private struct NoteGraphView: View {
         }
     }
 
+    private func graphCanvas(visibleNotes: [NoteSummary], visibleNoteIDs: [Note.ID], size: CGSize) -> some View {
+        let defaultPositions = nodePositions(for: visibleNotes, in: size)
+        let positions = adjustedPositions(from: defaultPositions, in: size)
+
+        return ZStack {
+            Canvas { context, _ in
+                guard !visibleNotes.isEmpty else { return }
+
+                for link in links {
+                    guard let start = positions[link.from],
+                          let end = positions[link.to],
+                          start.x.isFinite,
+                          start.y.isFinite,
+                          end.x.isFinite,
+                          end.y.isFinite
+                    else { continue }
+
+                    var path = Path()
+                    path.move(to: start)
+                    path.addLine(to: end)
+                    context.stroke(path, with: .color(.primary.opacity(0.18)), lineWidth: 1)
+                }
+            }
+            .frame(width: size.width, height: size.height)
+
+            ForEach(visibleNotes) { note in
+                if let point = positions[note.id] {
+                    let isDragging = activeDraggedNodeID == note.id
+
+                    GraphNodeView(
+                        note: note,
+                        isSelected: note.id == selectedNoteID
+                    )
+                    .frame(width: 74, height: 38)
+                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .scaleEffect(isDragging ? 1.08 : 1)
+                    .position(point)
+                    .zIndex(isDragging || note.id == selectedNoteID ? 3 : 1)
+                    .allowsHitTesting(activeDraggedNodeID == nil || activeDraggedNodeID == note.id)
+                    .onTapGesture {
+                        openNote(note.id)
+                    }
+                    .highPriorityGesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .named("graphCanvas"))
+                            .onChanged { value in
+                                if activeDraggedNodeID == nil {
+                                    activeDraggedNodeID = note.id
+                                }
+                                guard activeDraggedNodeID == note.id else { return }
+                                activeDragPosition = clampedNodePoint(value.location, in: size)
+                            }
+                            .onEnded { value in
+                                guard activeDraggedNodeID == note.id else {
+                                    activeDragPosition = nil
+                                    activeDraggedNodeID = nil
+                                    return
+                                }
+                                let finalPoint = clampedNodePoint(value.location, in: size)
+                                withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.78)) {
+                                    savedNodePositions[note.id] = finalPoint
+                                    activeDragPosition = nil
+                                    activeDraggedNodeID = nil
+                                }
+                            }
+                    )
+                    .animation(nil, value: activeDragPosition)
+                    .animation(.spring(response: 0.34, dampingFraction: 0.72), value: savedNodePositions[note.id])
+                    .animation(.spring(response: 0.22, dampingFraction: 0.62), value: isDragging)
+                }
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .coordinateSpace(name: "graphCanvas")
+        .onAppear {
+            syncNodePositions(defaultPositions: defaultPositions, noteIDs: visibleNoteIDs, size: size)
+        }
+        .onChange(of: visibleNoteIDs) { _, newIDs in
+            syncNodePositions(defaultPositions: defaultPositions, noteIDs: newIDs, size: size)
+        }
+        .onChange(of: size) { _, newSize in
+            let newDefaultPositions = nodePositions(for: visibleNotes, in: newSize)
+            syncNodePositions(defaultPositions: newDefaultPositions, noteIDs: visibleNoteIDs, size: newSize)
+        }
+    }
+
+    private func scrollCanvasSize(for noteCount: Int, viewport: CGSize) -> CGSize {
+        guard noteCount > 12 else { return viewport }
+
+        let multiplier = min(2.1, max(1, sqrt(CGFloat(noteCount) / 12)))
+        return CGSize(
+            width: max(viewport.width, viewport.width * multiplier),
+            height: max(viewport.height, viewport.height * multiplier)
+        )
+    }
+
     private func nodePositions(for notes: [NoteSummary], in size: CGSize) -> [String: CGPoint] {
         guard !notes.isEmpty else { return [:] }
 
@@ -979,23 +1024,36 @@ private struct NoteGraphView: View {
         return positions
     }
 
-    private func adjustedPositions(from basePositions: [String: CGPoint]) -> [String: CGPoint] {
-        basePositions.mapValues { point in point }
+    private func adjustedPositions(from defaultPositions: [String: CGPoint], in size: CGSize) -> [String: CGPoint] {
+        defaultPositions.mapValues { point in point }
             .reduce(into: [:]) { output, item in
                 let id = item.key
-                let offset = nodeOffsets[id] ?? .zero
-                let activeOffset = activeDragOffsets[id] ?? .zero
-                output[id] = CGPoint(
-                    x: item.value.x + offset.width + activeOffset.width,
-                    y: item.value.y + offset.height + activeOffset.height
-                )
+                if activeDraggedNodeID == id, let activeDragPosition {
+                    output[id] = clampedNodePoint(activeDragPosition, in: size)
+                } else if let savedPosition = savedNodePositions[id] {
+                    output[id] = clampedNodePoint(savedPosition, in: size)
+                } else {
+                    output[id] = clampedNodePoint(item.value, in: size)
+                }
             }
     }
 
+    private func syncNodePositions(defaultPositions: [String: CGPoint], noteIDs: [String], size: CGSize) {
+        let visibleIDs = Set(noteIDs)
+        savedNodePositions = savedNodePositions.filter { visibleIDs.contains($0.key) }
+
+        for id in noteIDs {
+            let fallback = defaultPositions[id] ?? CGPoint(x: size.width / 2, y: size.height / 2)
+            savedNodePositions[id] = clampedNodePoint(savedNodePositions[id] ?? fallback, in: size)
+        }
+    }
+
     private func clampedNodePoint(_ point: CGPoint, in size: CGSize) -> CGPoint {
-        CGPoint(
-            x: min(max(point.x, 18), max(18, size.width - 18)),
-            y: min(max(point.y, 18), max(18, size.height - 18))
+        let horizontalInset: CGFloat = 42
+        let verticalInset: CGFloat = 26
+        return CGPoint(
+            x: min(max(point.x, horizontalInset), max(horizontalInset, size.width - horizontalInset)),
+            y: min(max(point.y, verticalInset), max(verticalInset, size.height - verticalInset))
         )
     }
 }
@@ -1080,6 +1138,7 @@ private struct ExpandedGraphOverlay: View {
                     links: links,
                     selectedNoteID: selectedNoteID,
                     maxVisibleNotes: nil,
+                    allowsScrolling: true,
                     openNote: openNote,
                     expand: nil
                 )
@@ -1234,14 +1293,14 @@ private struct MarkdownEditingSurface: View {
     let clearSearchHighlight: () -> Void
 
     private var linkSuggestions: [String] {
-        guard let context = activeWikiLinkContext,
-              !context.query.isEmpty
-        else { return [] }
-
-        let normalizedQuery = normalizedLinkSuggestionText(context.query)
-        guard !normalizedQuery.isEmpty else { return [] }
-
+        guard let context = activeWikiLinkContext else { return [] }
         let uniqueTitles = Array(NSOrderedSet(array: noteTitles)).compactMap { $0 as? String }
+        let normalizedQuery = normalizedLinkSuggestionText(context.query)
+
+        guard !normalizedQuery.isEmpty else {
+            return Array(uniqueTitles.prefix(2))
+        }
+
         let prefixMatches = uniqueTitles.filter {
             normalizedLinkSuggestionText($0).hasPrefix(normalizedQuery)
         }
@@ -1276,6 +1335,9 @@ private struct MarkdownEditingSurface: View {
             TextEditor(text: $content)
                 .font(.system(size: 15, design: .monospaced))
                 .scrollContentBackground(.hidden)
+                .padding(.horizontal, 26)
+                .padding(.top, 2)
+                .padding(.bottom, 24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if !linkSuggestions.isEmpty {
@@ -1284,11 +1346,12 @@ private struct MarkdownEditingSurface: View {
                     suggestions: linkSuggestions,
                     select: completeWikiLink
                 )
-                .padding(.leading, 18)
-                .padding(.bottom, 18)
+                .padding(.leading, 26)
+                .padding(.bottom, 24)
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
         }
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.72))
         .animation(.easeInOut(duration: 0.14), value: linkSuggestions)
     }
 
@@ -1325,29 +1388,38 @@ private struct MarkdownEditingSurface: View {
     }
 
     private var activeWikiLinkContext: WikiLinkSuggestionContext? {
-        guard let openRange = content.range(of: "[[", options: .backwards) else { return nil }
-        let queryStart = openRange.upperBound
-        let queryRange = queryStart..<content.endIndex
-        let rawQuery = String(content[queryRange])
+        var searchEnd = content.endIndex
 
-        guard !rawQuery.contains("]]"),
-              !rawQuery.contains("\n"),
-              !rawQuery.contains("["),
-              !rawQuery.contains("]"),
-              rawQuery.count <= 80
-        else {
-            return nil
+        while let openRange = content.range(of: "[[", options: .backwards, range: content.startIndex..<searchEnd) {
+            let queryStart = openRange.upperBound
+            let lineEnd = content[queryStart...].firstIndex(of: "\n") ?? content.endIndex
+            let candidateRange = queryStart..<lineEnd
+            let candidate = String(content[candidateRange])
+
+            if candidate.contains("]]") {
+                searchEnd = openRange.lowerBound
+                continue
+            }
+
+            guard !candidate.contains("["),
+                  !candidate.contains("]"),
+                  candidate.count <= 80
+            else {
+                searchEnd = openRange.lowerBound
+                continue
+            }
+
+            let replacementEnd = content[queryStart..<lineEnd].firstIndex(where: { $0 == "|" }) ?? lineEnd
+            let queryEnd = candidate.firstIndex(where: { $0 == "|" }) ?? candidate.endIndex
+            let query = String(candidate[..<queryEnd])
+
+            return WikiLinkSuggestionContext(
+                range: openRange.lowerBound..<replacementEnd,
+                query: query.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
         }
 
-        let query = rawQuery
-            .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
-            .first
-            .map(String.init) ?? rawQuery
-
-        return WikiLinkSuggestionContext(
-            range: openRange.lowerBound..<content.endIndex,
-            query: query.trimmingCharacters(in: .whitespacesAndNewlines)
-        )
+        return nil
     }
 
     private func completeWikiLink(with title: String) {
