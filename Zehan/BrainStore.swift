@@ -34,6 +34,7 @@ final class BrainStore: ObservableObject {
     @Published var isGeneratingAssistantResponse = false
     @Published var isUsingWebSearch = false
     @Published var isShowingModelConfiguration = false
+    @Published var isShowingMarkdownHelp = false
     @Published var pendingAssistantPreview: AssistantPreview?
     @Published var activeSearchHighlight: SearchHighlight?
     @Published var assistantAttachment: PromptAttachment?
@@ -53,14 +54,17 @@ final class BrainStore: ObservableObject {
     private let groqModelKey = "Assistant.GroqModel"
     private let selectedAssistantModelKey = "Assistant.SelectedModel"
     private var mistralAPIKey = ""
-    private var mistralModel = "mistral-large-latest"
+    private var mistralModel = BrainStore.defaultMistralModel
     private var groqAPIKey = ""
-    private var groqModel = "llama-3.3-70b-versatile"
+    private var groqModel = BrainStore.defaultGroqModel
     private var autosaveTask: Task<Void, Never>?
     private var pendingAssistantInsertion: PendingAssistantInsertion?
     private var isApplyingAssistantOutput = false
     private var noteIdentityDatabase: NoteIdentityDatabase?
     private var searchIndex: [NoteSearchIndexEntry] = []
+
+    static let defaultMistralModel = "mistral-large-latest"
+    static let defaultGroqModel = "llama-3.3-70b-versatile"
 
     private static let mistralBudgetUSD = 10.0
     private static let mistralInputPricePerMillionTokens = 0.50
@@ -119,6 +123,15 @@ final class BrainStore: ObservableObject {
 
     var ocrUploadCounterDetail: String {
         "\(mistralOCRPagesUsed) of \(Self.mistralOCRPageLimit) OCR pages used"
+    }
+
+    var assistantConnectionStatus: AssistantConnectionStatus {
+        switch selectedAssistantModel {
+        case .mistral:
+            return mistralAPIKey.isEmpty ? .offline : .online
+        case .groq:
+            return groqAPIKey.isEmpty ? .offline : .online
+        }
     }
 
     private var estimatedMistralBudgetUSD: Double {
@@ -198,8 +211,8 @@ final class BrainStore: ObservableObject {
                     sourceRegistry: SourceRegistryPointer(path: "sources.json"),
                     ai: BrainAIPreferences(
                         provider: "mistral",
-                        mistralModel: "mistral-large-latest",
-                        groqModel: "llama-3.3-70b-versatile",
+                        mistralModel: Self.defaultMistralModel,
+                        groqModel: Self.defaultGroqModel,
                         ollamaModel: nil,
                         ollamaURL: nil,
                         appleModel: nil
@@ -339,6 +352,10 @@ final class BrainStore: ObservableObject {
         isShowingPageSearch.toggle()
     }
 
+    func showHelp() {
+        isShowingMarkdownHelp = true
+    }
+
     func openNote(id: Note.ID) {
         activeSearchHighlight = nil
         if let currentNoteID, currentNoteID != id {
@@ -438,12 +455,6 @@ final class BrainStore: ObservableObject {
     }
 
     func configureModelFromUser() {
-        guard requestAndSaveMistralAPIKey(
-            title: mistralAPIKey.isEmpty ? "Mistral API Key" : "Update Mistral API Key",
-            message: mistralAPIKey.isEmpty
-                ? "Enter the API key Zirn should use for Mistral."
-                : "Enter a new Mistral API key, or leave blank to keep the saved key."
-        ) else { return }
         isShowingModelConfiguration = true
     }
 
@@ -467,8 +478,8 @@ final class BrainStore: ObservableObject {
         self.groqAPIKey = groqAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         self.groqModel = groqModel.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if self.mistralModel.isEmpty { self.mistralModel = "mistral-large-latest" }
-        if self.groqModel.isEmpty { self.groqModel = "llama-3.3-70b-versatile" }
+        if self.mistralModel.isEmpty { self.mistralModel = Self.defaultMistralModel }
+        if self.groqModel.isEmpty { self.groqModel = Self.defaultGroqModel }
 
         do {
             try saveAssistantConfiguration()
@@ -477,6 +488,20 @@ final class BrainStore: ObservableObject {
         } catch {
             status = error.localizedDescription
         }
+    }
+
+    func verifyAndSaveMistralAPIKey(_ apiKey: String) async throws {
+        let cleanAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanAPIKey.isEmpty else {
+            throw AssistantError.missingConfiguration("Paste a Mistral API key.")
+        }
+
+        try await verifyMistralAPIKey(cleanAPIKey)
+        mistralAPIKey = cleanAPIKey
+        mistralModel = Self.defaultMistralModel
+        selectedAssistantModel = .mistral
+        try saveAssistantConfiguration()
+        status = "Mistral API key verified"
     }
 
     func selectAssistantModel(_ model: AssistantModel) {
@@ -738,7 +763,7 @@ final class BrainStore: ObservableObject {
 
     func attachPromptDocument(from url: URL) {
         guard isSupportedPromptDocument(url) else {
-            status = "Only PDFs and Word documents are supported"
+            status = "Only PDFs, Word documents, and images are supported"
             return
         }
 
@@ -760,9 +785,95 @@ final class BrainStore: ObservableObject {
                 extractedText: extractedText
             )
             status = "\(url.lastPathComponent) attached"
+        case "png", "jpg", "jpeg", "gif", "heic", "tiff", "webp":
+            assistantAttachment = PromptAttachment(
+                fileName: url.lastPathComponent,
+                fileExtension: url.pathExtension.lowercased(),
+                extractedText: "Image attached. Visual content is available in the source file, but no text was extracted."
+            )
+            status = "\(url.lastPathComponent) attached"
         default:
-            status = "Only PDFs and Word documents are supported"
+            status = "Only PDFs, Word documents, and images are supported"
         }
+    }
+
+    func choosePromptAttachmentFromUser() {
+        let panel = NSOpenPanel()
+        panel.title = "Attach File"
+        panel.message = "Choose a PDF, Word document, or image."
+        panel.prompt = "Attach"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [
+            .pdf,
+            UTType(filenameExtension: "doc") ?? .data,
+            UTType(filenameExtension: "docx") ?? .data,
+            .image
+        ]
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        attachPromptDocument(from: url)
+    }
+
+    func insertMarkdownImage(from url: URL) {
+        guard isSupportedImageFile(url) else {
+            status = "Only image files can be inserted into the page"
+            return
+        }
+
+        let didStart = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStart {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        guard let data = try? Data(contentsOf: url) else {
+            status = "Could not read \(url.lastPathComponent)"
+            return
+        }
+
+        insertMarkdownImage(data: data, suggestedFileName: url.lastPathComponent)
+    }
+
+    func insertMarkdownImage(data: Data, suggestedFileName: String? = nil) {
+        guard let activeBrain else {
+            status = "Open or create a brain first"
+            return
+        }
+
+        withSecurityScopedAccess(to: activeBrain.folderURL) {
+            do {
+                let imagesFolder = imagesFolderURL(for: activeBrain)
+                try FileManager.default.createDirectory(at: imagesFolder, withIntermediateDirectories: true)
+
+                let fileName = uniqueImageFileName(suggestedFileName: suggestedFileName, in: imagesFolder)
+                let imageURL = imagesFolder.appendingPathComponent(fileName)
+                try data.write(to: imageURL, options: .atomic)
+
+                let imageMarkdown = "![\(imageAltText(from: fileName))](../Images/\(fileName))"
+                appendMarkdownBlock(imageMarkdown)
+                status = "\(fileName) inserted"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    func markdownImageURL(for path: String) -> URL? {
+        if let url = URL(string: path), url.scheme?.hasPrefix("http") == true {
+            return url
+        }
+
+        guard let activeBrain else { return nil }
+        if path.hasPrefix("/") {
+            return URL(fileURLWithPath: path)
+        }
+
+        return notesFolderURL(for: activeBrain)
+            .appendingPathComponent(path)
+            .standardizedFileURL
     }
 
     func removePromptAttachment() {
@@ -1459,6 +1570,15 @@ final class BrainStore: ObservableObject {
         return try extractChatCompletionResult(from: data)
     }
 
+    private func verifyMistralAPIKey(_ apiKey: String) async throws {
+        var request = URLRequest(url: URL(string: "https://api.mistral.ai/v1/models")!)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validateHTTPResponse(response, data: data)
+    }
+
     private func generateWithGroq(prompt: String) async throws -> ChatCompletionResult {
         guard !groqAPIKey.isEmpty else {
             throw AssistantError.missingConfiguration("Add a Groq API key in Settings > Configure Model.")
@@ -1667,13 +1787,13 @@ final class BrainStore: ObservableObject {
             selectedAssistantModel = .mistral
         }
         mistralAPIKey = defaults.string(forKey: mistralAPIKeyKey) ?? ""
-        mistralModel = defaults.string(forKey: mistralModelKey) ?? "mistral-large-latest"
+        mistralModel = defaults.string(forKey: mistralModelKey) ?? Self.defaultMistralModel
         mistralBudgetSpentUSD = defaults.double(forKey: mistralBudgetSpentUSDKey)
         mistralOCRPagesUsed = min(Self.mistralOCRPageLimit, defaults.integer(forKey: mistralOCRPagesUsedKey))
         defaults.removeObject(forKey: openAIAPIKeyKey)
         defaults.removeObject(forKey: openAIModelKey)
         groqAPIKey = defaults.string(forKey: groqAPIKeyKey) ?? ""
-        groqModel = defaults.string(forKey: groqModelKey) ?? "llama-3.3-70b-versatile"
+        groqModel = defaults.string(forKey: groqModelKey) ?? Self.defaultGroqModel
     }
 
     private func saveAssistantConfiguration() throws {
@@ -1866,7 +1986,14 @@ final class BrainStore: ObservableObject {
 
     private func isSupportedPromptDocument(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
-        return ext == "pdf" || ext == "doc" || ext == "docx"
+        return ext == "pdf"
+            || ext == "doc"
+            || ext == "docx"
+            || ["png", "jpg", "jpeg", "gif", "heic", "tiff", "webp"].contains(ext)
+    }
+
+    private func isSupportedImageFile(_ url: URL) -> Bool {
+        ["png", "jpg", "jpeg", "gif", "heic", "tiff", "webp"].contains(url.pathExtension.lowercased())
     }
 
     private func attachPDFWithMistralOCR(from url: URL) {
@@ -1986,6 +2113,55 @@ final class BrainStore: ObservableObject {
 
     private func notesFolderURL(for brain: BrainSummary) -> URL {
         brain.folderURL.appendingPathComponent("Notes", isDirectory: true)
+    }
+
+    private func imagesFolderURL(for brain: BrainSummary) -> URL {
+        brain.folderURL.appendingPathComponent("Images", isDirectory: true)
+    }
+
+    private func appendMarkdownBlock(_ markdown: String) {
+        let separator = content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
+        updateContentFromEditor(content + separator + markdown + "\n")
+    }
+
+    private func uniqueImageFileName(suggestedFileName: String?, in folder: URL) -> String {
+        let cleanBase = (suggestedFileName as NSString?)?.deletingPathExtension
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let fallbackBase = "image-\(formatter.string(from: Date()))"
+        let base = imageSafeFileName(cleanBase?.isEmpty == false ? cleanBase! : fallbackBase)
+        let rawExtension = (suggestedFileName as NSString?)?.pathExtension.lowercased()
+        let fileExtension = rawExtension?.isEmpty == false ? rawExtension! : "png"
+
+        var candidate = "\(base).\(fileExtension)"
+        var counter = 2
+        while FileManager.default.fileExists(atPath: folder.appendingPathComponent(candidate).path) {
+            candidate = "\(base)-\(counter).\(fileExtension)"
+            counter += 1
+        }
+        return candidate
+    }
+
+    private func imageSafeFileName(_ name: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let output = name
+            .lowercased()
+            .map { character -> Character in
+                let scalar = character.unicodeScalars.first
+                return scalar.map { allowed.contains($0) } == true ? character : "-"
+            }
+        let cleanName = String(output)
+            .replacingOccurrences(of: "-+", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        return cleanName.isEmpty ? "image" : cleanName
+    }
+
+    private func imageAltText(from fileName: String) -> String {
+        let base = (fileName as NSString).deletingPathExtension
+        return base
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
     }
 
     private func noteURL(for id: Note.ID) -> URL? {
@@ -2328,6 +2504,23 @@ enum AssistantModel: String, CaseIterable, Identifiable {
 
     var supportsWebSearch: Bool {
         false
+    }
+}
+
+enum AssistantConnectionStatus {
+    case online
+    case offline
+    case local
+
+    var helpText: String {
+        switch self {
+        case .online:
+            return "API status is good and online"
+        case .offline:
+            return "API status is offline. Add or verify an API key."
+        case .local:
+            return "Using a local model"
+        }
     }
 }
 

@@ -5,6 +5,7 @@
 //  Created by Adi Tauqir on 5/15/26.
 //
 
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -29,6 +30,11 @@ struct ContentView: View {
         .sheet(isPresented: $store.isShowingModelConfiguration) {
             ModelConfigurationView(store: store)
                 .frame(width: 500)
+                .presentationBackground(.regularMaterial)
+        }
+        .sheet(isPresented: $store.isShowingMarkdownHelp) {
+            MarkdownHelpView()
+                .frame(width: 620, height: 680)
                 .presentationBackground(.regularMaterial)
         }
     }
@@ -231,7 +237,6 @@ private struct SplashActionButton: View {
 private struct WorkspaceView: View {
     @ObservedObject var store: BrainStore
     @State private var isEditingMarkdown = false
-    @State private var isShowingMarkdownHelp = false
     @State private var isReadingMode = false
     @State private var isGraphExpanded = false
     @State private var promptPillHeight: CGFloat = 38
@@ -389,11 +394,6 @@ private struct WorkspaceView: View {
             isSidebarSearchFocused = true
             store.isShowingPageSearch = false
         }
-        .sheet(isPresented: $isShowingMarkdownHelp) {
-            MarkdownHelpView()
-                .frame(width: 620, height: 680)
-                .presentationBackground(.regularMaterial)
-        }
     }
 
     private var workspaceDetail: some View {
@@ -409,10 +409,6 @@ private struct WorkspaceView: View {
                             delete: {
                                 isEditingMarkdown = false
                                 store.deleteSelectedNote()
-                            },
-                            help: {
-                                isEditingMarkdown = false
-                                isShowingMarkdownHelp = true
                             }
                         )
 
@@ -431,7 +427,10 @@ private struct WorkspaceView: View {
                         searchHighlight: store.activeSearchHighlight,
                         noteTitles: store.notes.map(\.title),
                         openLinkedNote: { store.openLinkedNote(named: $0) },
-                        clearSearchHighlight: store.clearSearchHighlight
+                        clearSearchHighlight: store.clearSearchHighlight,
+                        imageURL: store.markdownImageURL,
+                        insertImageFile: store.insertMarkdownImage,
+                        insertImageData: store.insertMarkdownImage
                     )
                         .padding(.horizontal, 38)
                         .padding(.top, 18)
@@ -452,6 +451,7 @@ private struct WorkspaceView: View {
                         Spacer()
                         Text(store.status)
                             .contentTransition(.opacity)
+                        AssistantConnectionStatusDot(status: store.assistantConnectionStatus)
                     }
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
@@ -516,7 +516,7 @@ private struct WorkspaceView: View {
 
                 guard let url else {
                     Task { @MainActor in
-                        store.status = "Only PDFs and Word documents are supported"
+                        store.status = "Only PDFs, Word documents, and images are supported"
                     }
                     return
                 }
@@ -531,7 +531,7 @@ private struct WorkspaceView: View {
         guard let directProvider = providers.first(where: { provider in
             Self.directDocumentDropTypes.contains { provider.hasItemConformingToTypeIdentifier($0) }
         }) else {
-            store.status = "Only PDFs and Word documents are supported"
+            store.status = "Only PDFs, Word documents, and images are supported"
             return false
         }
 
@@ -550,7 +550,7 @@ private struct WorkspaceView: View {
                   let copiedURL = copyDroppedDocumentToTemporaryURL(url, suggestedName: directProvider.suggestedName)
             else {
                 Task { @MainActor in
-                    store.status = "Only PDFs and Word documents are supported"
+                    store.status = "Only PDFs, Word documents, and images are supported"
                 }
                 return
             }
@@ -584,10 +584,63 @@ private struct WorkspaceView: View {
     private static let directDocumentDropTypes = [
         UTType.pdf.identifier,
         "com.microsoft.word.doc",
-        "org.openxmlformats.wordprocessingml.document"
+        "org.openxmlformats.wordprocessingml.document",
+        UTType.image.identifier
     ]
 
     private static let supportedDocumentDropTypes = [UTType.fileURL.identifier] + directDocumentDropTypes
+}
+
+private struct AssistantConnectionStatusDot: View {
+    let status: AssistantConnectionStatus
+    @State private var isHovered = false
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .frame(width: 8, height: 8)
+            .shadow(color: color.opacity(status == .offline ? 0.18 : 0.42), radius: 5)
+            .contentShape(Rectangle())
+            .overlay(alignment: .bottom) {
+                if isHovered {
+                    Text(status.helpText)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .background(.regularMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+                        }
+                        .shadow(color: .black.opacity(0.18), radius: 10, y: 5)
+                        .fixedSize()
+                        .offset(y: -18)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                        .zIndex(1)
+                }
+            }
+        .padding(.leading, 2)
+        .zIndex(isHovered ? 1 : 0)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
+    }
+
+    private var color: Color {
+        switch status {
+        case .online:
+            return .green.opacity(0.88)
+        case .offline:
+            return .red.opacity(0.86)
+        case .local:
+            return .yellow.opacity(0.9)
+        }
+    }
 }
 
 private struct DocumentDropSplash: View {
@@ -602,7 +655,7 @@ private struct DocumentDropSplash: View {
                     .font(.system(size: 38, weight: .semibold))
                     .foregroundStyle(.blue.opacity(0.88))
 
-                Text("Only PDFs and Word documents supported")
+                Text("Drop to attach PDFs, Word documents, or images")
                     .font(.system(size: 20, weight: .semibold))
             }
             .padding(.horizontal, 38)
@@ -622,7 +675,6 @@ private struct DocumentChromeControls: View {
     let canDelete: Bool
     let newPage: () -> Void
     let delete: () -> Void
-    let help: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -641,20 +693,17 @@ private struct DocumentChromeControls: View {
                 action: delete
             )
             .disabled(!canDelete)
-
-            GlassChromeIconButton(
-                systemImage: "questionmark.circle.fill",
-                help: "Commands and Markdown Help",
-                action: help
-            )
         }
     }
 }
 
 private struct MarkdownHelpView: View {
+    @Environment(\.dismiss) private var dismiss
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
+        ZStack(alignment: .topTrailing) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
                 HStack(spacing: 14) {
                     Image(systemName: "questionmark.circle.fill")
                         .font(.system(size: 34, weight: .semibold))
@@ -715,6 +764,20 @@ private struct MarkdownHelpView: View {
             }
             .padding(28)
             .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .frame(width: 28, height: 28)
+                    .background(.ultraThinMaterial)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Close Help")
+            .padding(16)
         }
     }
 }
@@ -1291,6 +1354,11 @@ private struct MarkdownEditingSurface: View {
     let noteTitles: [String]
     let openLinkedNote: (String) -> Void
     let clearSearchHighlight: () -> Void
+    let imageURL: (String) -> URL?
+    let insertImageFile: (URL) -> Void
+    let insertImageData: (Data, String?) -> Void
+    @State private var suggestionAnchor: CGPoint?
+    @State private var editorSelectionRange = NSRange(location: 0, length: 0)
 
     private var linkSuggestions: [String] {
         guard let context = activeWikiLinkContext else { return [] }
@@ -1331,28 +1399,54 @@ private struct MarkdownEditingSurface: View {
     }
 
     private var editor: some View {
-        ZStack(alignment: .bottomLeading) {
-            TextEditor(text: $content)
-                .font(.system(size: 15, design: .monospaced))
-                .scrollContentBackground(.hidden)
-                .padding(.horizontal, 26)
-                .padding(.top, 2)
-                .padding(.bottom, 24)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            if !linkSuggestions.isEmpty {
-                LinkSuggestionMenu(
-                    query: activeWikiLinkContext?.query ?? "",
-                    suggestions: linkSuggestions,
-                    select: completeWikiLink
+        GeometryReader { proxy in
+            ZStack(alignment: .topLeading) {
+                InlineMarkdownEditor(
+                    text: $content,
+                    selectionRange: $editorSelectionRange,
+                    suggestionRange: activeSuggestionNSRange,
+                    suggestionAnchor: $suggestionAnchor
                 )
-                .padding(.leading, 26)
-                .padding(.bottom, 24)
-                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if let context = activeWikiLinkContext,
+                   !linkSuggestions.isEmpty,
+                   let suggestionAnchor {
+                    let menuHeight = linkSuggestionMenuHeight
+                    LinkSuggestionMenu(
+                        query: context.query,
+                        suggestions: linkSuggestions,
+                        select: { completeWikiLink(with: $0, context: context) }
+                    )
+                    .position(
+                        x: min(max(116, suggestionAnchor.x + 110), max(116, proxy.size.width - 116)),
+                        y: max(menuHeight / 2 + 8, suggestionAnchor.y - menuHeight / 2 - 8)
+                    )
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .zIndex(2)
+                }
             }
         }
         .background(Color(nsColor: .textBackgroundColor).opacity(0.72))
         .animation(.easeInOut(duration: 0.14), value: linkSuggestions)
+        .onPasteCommand(of: [UTType.image]) { providers in
+            insertImages(from: providers)
+        }
+        .onDrop(of: Self.supportedImageDropTypes, isTargeted: nil) { providers in
+            insertDroppedImages(from: providers)
+            return true
+        }
+    }
+
+    private var activeSuggestionNSRange: NSRange? {
+        guard let context = activeWikiLinkContext else { return nil }
+        return NSRange(context.range, in: content)
+    }
+
+    private var linkSuggestionMenuHeight: CGFloat {
+        CGFloat(linkSuggestions.count) * 30
+            + CGFloat(max(0, linkSuggestions.count - 1)) * 4
+            + 12
     }
 
     private var renderedPreview: some View {
@@ -1361,7 +1455,8 @@ private struct MarkdownEditingSurface: View {
                 MarkdownPreview(
                     content: content,
                     searchHighlight: searchHighlight,
-                    openLinkedNote: openLinkedNote
+                    openLinkedNote: openLinkedNote,
+                    imageURL: imageURL
                 )
                     .padding(.horizontal, 26)
                     .padding(.top, 2)
@@ -1388,49 +1483,597 @@ private struct MarkdownEditingSurface: View {
     }
 
     private var activeWikiLinkContext: WikiLinkSuggestionContext? {
-        var searchEnd = content.endIndex
+        guard !content.isEmpty else { return nil }
 
-        while let openRange = content.range(of: "[[", options: .backwards, range: content.startIndex..<searchEnd) {
-            let queryStart = openRange.upperBound
-            let lineEnd = content[queryStart...].firstIndex(of: "\n") ?? content.endIndex
-            let candidateRange = queryStart..<lineEnd
-            let candidate = String(content[candidateRange])
+        let utf16Length = (content as NSString).length
+        let caretOffset = min(max(0, editorSelectionRange.location + editorSelectionRange.length), utf16Length)
+        let caretIndex = String.Index(utf16Offset: caretOffset, in: content)
+        let lineStart = content[..<caretIndex].lastIndex(of: "\n").map { content.index(after: $0) } ?? content.startIndex
+        let lineEnd = content[caretIndex...].firstIndex(of: "\n") ?? content.endIndex
 
-            if candidate.contains("]]") {
-                searchEnd = openRange.lowerBound
-                continue
-            }
-
-            guard !candidate.contains("["),
-                  !candidate.contains("]"),
-                  candidate.count <= 80
-            else {
-                searchEnd = openRange.lowerBound
-                continue
-            }
-
-            let replacementEnd = content[queryStart..<lineEnd].firstIndex(where: { $0 == "|" }) ?? lineEnd
-            let queryEnd = candidate.firstIndex(where: { $0 == "|" }) ?? candidate.endIndex
-            let query = String(candidate[..<queryEnd])
-
-            return WikiLinkSuggestionContext(
-                range: openRange.lowerBound..<replacementEnd,
-                query: query.trimmingCharacters(in: .whitespacesAndNewlines)
-            )
+        guard let openRange = content.range(of: "[[", options: .backwards, range: lineStart..<caretIndex) else {
+            return nil
         }
 
-        return nil
+        let queryRange = openRange.upperBound..<caretIndex
+        let queryCandidate = content[queryRange]
+
+        guard !queryCandidate.contains("["),
+              !queryCandidate.contains("]"),
+              queryCandidate.count <= 80
+        else { return nil }
+
+        let closingRange = content.range(of: "]]", range: caretIndex..<lineEnd)
+        let replacementEnd = closingRange?.upperBound ?? caretIndex
+        let queryEnd = queryCandidate.firstIndex(of: "|") ?? queryCandidate.endIndex
+        let query = String(queryCandidate[..<queryEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return WikiLinkSuggestionContext(
+            range: openRange.lowerBound..<replacementEnd,
+            query: query
+        )
     }
 
-    private func completeWikiLink(with title: String) {
-        guard let context = activeWikiLinkContext else { return }
+    private func completeWikiLink(with title: String, context: WikiLinkSuggestionContext) {
+        guard context.range.lowerBound >= content.startIndex,
+              context.range.upperBound <= content.endIndex
+        else { return }
+
+        let replacementLocation = NSRange(context.range, in: content).location
         content.replaceSubrange(context.range, with: "[[\(title)]]")
+        editorSelectionRange = NSRange(location: replacementLocation + (title as NSString).length + 4, length: 0)
+        suggestionAnchor = nil
+    }
+
+    private func insertImages(from providers: [NSItemProvider]) {
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.png.identifier) {
+                loadImageData(from: provider, typeIdentifier: UTType.png.identifier, suggestedName: provider.suggestedName)
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.tiff.identifier) {
+                loadImageData(from: provider, typeIdentifier: UTType.tiff.identifier, suggestedName: provider.suggestedName)
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                loadImageData(from: provider, typeIdentifier: UTType.image.identifier, suggestedName: provider.suggestedName)
+            }
+        }
+    }
+
+    private func insertDroppedImages(from providers: [NSItemProvider]) {
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                    let url: URL?
+                    if let data = item as? Data {
+                        url = URL(dataRepresentation: data, relativeTo: nil)
+                    } else if let nsURL = item as? NSURL {
+                        url = nsURL as URL
+                    } else {
+                        url = item as? URL
+                    }
+
+                    guard let url else { return }
+                    Task { @MainActor in
+                        insertImageFile(url)
+                    }
+                }
+            } else {
+                insertImages(from: [provider])
+            }
+        }
+    }
+
+    private func loadImageData(from provider: NSItemProvider, typeIdentifier: String, suggestedName: String?) {
+        provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, _ in
+            guard let data else { return }
+            Task { @MainActor in
+                insertImageData(data, suggestedName)
+            }
+        }
     }
 
     private func normalizedLinkSuggestionText(_ text: String) -> String {
         text
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static let supportedImageDropTypes = [UTType.fileURL.identifier, UTType.image.identifier]
+}
+
+private struct InlineMarkdownEditor: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var selectionRange: NSRange
+    let suggestionRange: NSRange?
+    @Binding var suggestionAnchor: CGPoint?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, selectionRange: $selectionRange, suggestionAnchor: $suggestionAnchor)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+
+        let textView = MarkdownNSTextView()
+        textView.commandHandler = context.coordinator
+        textView.delegate = context.coordinator
+        textView.string = text
+        textView.drawsBackground = false
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.allowsUndo = true
+        textView.isRichText = true
+        textView.importsGraphics = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.textContainerInset = NSSize(width: 26, height: 14)
+        textView.minSize = NSSize(width: 0, height: scrollView.contentSize.height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        context.coordinator.applyMarkdownStyling()
+
+        DispatchQueue.main.async {
+            textView.window?.makeFirstResponder(textView)
+        }
+
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.text = $text
+        context.coordinator.selectionRange = $selectionRange
+        context.coordinator.suggestionAnchor = $suggestionAnchor
+        context.coordinator.suggestionRange = suggestionRange
+
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        context.coordinator.textView = textView
+
+        if textView.string != text {
+            textView.string = text
+            textView.setSelectedRange(Self.clamped(selectionRange, in: text))
+        }
+
+        context.coordinator.applyMarkdownStyling()
+        context.coordinator.updateSuggestionAnchor()
+
+        if textView.window?.firstResponder !== textView {
+            DispatchQueue.main.async {
+                textView.window?.makeFirstResponder(textView)
+            }
+        }
+    }
+
+    private static func clamped(_ range: NSRange, in text: String) -> NSRange {
+        let length = (text as NSString).length
+        let location = min(max(0, range.location), length)
+        return NSRange(
+            location: location,
+            length: min(max(0, range.length), max(0, length - location))
+        )
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var text: Binding<String>
+        var selectionRange: Binding<NSRange>
+        var suggestionAnchor: Binding<CGPoint?>
+        var suggestionRange: NSRange?
+        weak var textView: NSTextView?
+        private var isApplyingMarkdownStyling = false
+
+        init(text: Binding<String>, selectionRange: Binding<NSRange>, suggestionAnchor: Binding<CGPoint?>) {
+            self.text = text
+            self.selectionRange = selectionRange
+            self.suggestionAnchor = suggestionAnchor
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            text.wrappedValue = textView.string
+            publishSelection(from: textView)
+            applyMarkdownStyling()
+            updateSuggestionAnchor()
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            if let textView = notification.object as? NSTextView {
+                publishSelection(from: textView)
+            }
+            updateSuggestionAnchor()
+        }
+
+        private func publishSelection(from textView: NSTextView) {
+            let range = textView.selectedRange()
+            DispatchQueue.main.async {
+                self.selectionRange.wrappedValue = range
+            }
+        }
+
+        func toggleInlineCommand(_ command: MarkdownInlineCommand, in textView: NSTextView) {
+            let selectedRange = textView.selectedRange()
+            guard selectedRange.length > 0 else { return }
+
+            let rawText = textView.string as NSString
+            guard selectedRange.upperBound <= rawText.length else { return }
+
+            let selectedText = rawText.substring(with: selectedRange)
+            let replacement = "\(command.openMarker)\(selectedText)\(command.closeMarker)"
+            textView.replaceCharacters(in: selectedRange, with: replacement)
+
+            let newSelection = NSRange(
+                location: selectedRange.location + (command.openMarker as NSString).length,
+                length: (selectedText as NSString).length
+            )
+            textView.setSelectedRange(newSelection)
+            text.wrappedValue = textView.string
+            selectionRange.wrappedValue = newSelection
+            applyMarkdownStyling()
+            updateSuggestionAnchor()
+        }
+
+        func applyMarkdownStyling() {
+            guard !isApplyingMarkdownStyling, let textView else { return }
+            guard let textStorage = textView.textStorage else { return }
+
+            isApplyingMarkdownStyling = true
+            defer { isApplyingMarkdownStyling = false }
+
+            let rawText = textView.string as NSString
+            let fullRange = NSRange(location: 0, length: rawText.length)
+            let selectedRanges = textView.selectedRanges
+            let baseAttributes = Self.baseAttributes()
+
+            textView.typingAttributes = baseAttributes
+
+            guard fullRange.length > 0 else {
+                return
+            }
+
+            textStorage.beginEditing()
+            textStorage.setAttributes(baseAttributes, range: fullRange)
+
+            var isInCodeBlock = false
+            rawText.enumerateSubstrings(in: fullRange, options: [.byLines, .substringNotRequired]) { _, lineRange, enclosingRange, _ in
+                let rawLine = rawText.substring(with: lineRange)
+                let trimmedLine = rawLine.trimmingCharacters(in: .whitespaces)
+
+                textStorage.addAttributes([
+                    .paragraphStyle: Self.paragraphStyle(for: trimmedLine, isCode: isInCodeBlock)
+                ], range: enclosingRange)
+
+                if trimmedLine.hasPrefix("```") {
+                    Self.styleCodeLine(in: textStorage, range: lineRange)
+                    isInCodeBlock.toggle()
+                    return
+                }
+
+                if isInCodeBlock {
+                    Self.styleCodeLine(in: textStorage, range: lineRange)
+                    return
+                }
+
+                if Self.applyHeadingStyle(to: rawLine, in: lineRange, textStorage: textStorage) {
+                    Self.applyInlineStyles(in: lineRange, rawText: rawText, textStorage: textStorage, baseFontSize: 20)
+                    return
+                }
+
+                if trimmedLine.hasPrefix(">") {
+                    textStorage.addAttributes([
+                        .font: Self.italicFont(size: 15),
+                        .foregroundColor: NSColor.secondaryLabelColor
+                    ], range: lineRange)
+                    Self.tintLeadingMarker(">", in: rawLine, lineRange: lineRange, textStorage: textStorage)
+                } else if Self.isListLine(trimmedLine) {
+                    textStorage.addAttributes([
+                        .font: NSFont.systemFont(ofSize: 15, weight: .regular)
+                    ], range: lineRange)
+                    Self.tintListMarker(in: rawLine, lineRange: lineRange, textStorage: textStorage)
+                } else if trimmedLine == "---" || trimmedLine == "***" {
+                    textStorage.addAttributes([
+                        .foregroundColor: NSColor.tertiaryLabelColor,
+                        .font: NSFont.systemFont(ofSize: 15, weight: .semibold)
+                    ], range: lineRange)
+                }
+
+                Self.applyInlineStyles(in: lineRange, rawText: rawText, textStorage: textStorage, baseFontSize: 15)
+            }
+
+            textStorage.endEditing()
+            textView.selectedRanges = selectedRanges.compactMap { value in
+                let range = value.rangeValue
+                guard range.location <= rawText.length else { return nil }
+                return NSValue(range: NSRange(
+                    location: range.location,
+                    length: min(range.length, max(0, rawText.length - range.location))
+                ))
+            }
+        }
+
+        func updateSuggestionAnchor() {
+            guard let textView,
+                  let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer,
+                  let suggestionRange,
+                  suggestionRange.location <= textView.string.count
+            else {
+                if suggestionAnchor.wrappedValue != nil {
+                    DispatchQueue.main.async {
+                        self.suggestionAnchor.wrappedValue = nil
+                    }
+                }
+                return
+            }
+
+            let textLength = (textView.string as NSString).length
+            let location = min(suggestionRange.upperBound, textLength)
+            let characterRange = NSRange(location: max(0, location - 1), length: min(1, textLength))
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: characterRange, actualCharacterRange: nil)
+            let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            let visibleOrigin = textView.enclosingScrollView?.contentView.bounds.origin ?? .zero
+            let inset = textView.textContainerInset
+            let anchor = CGPoint(
+                x: rect.maxX + inset.width - visibleOrigin.x,
+                y: rect.minY + inset.height - visibleOrigin.y
+            )
+
+            DispatchQueue.main.async {
+                self.suggestionAnchor.wrappedValue = anchor
+            }
+        }
+
+        private static func baseAttributes() -> [NSAttributedString.Key: Any] {
+            [
+                .font: NSFont.systemFont(ofSize: 15, weight: .regular),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraphStyle(for: "", isCode: false)
+            ]
+        }
+
+        private static func paragraphStyle(for line: String, isCode: Bool) -> NSParagraphStyle {
+            let style = NSMutableParagraphStyle()
+            style.lineSpacing = isCode ? 2 : 5
+            style.paragraphSpacing = line.isEmpty ? 5 : 7
+            style.tabStops = []
+            style.defaultTabInterval = 24
+            return style
+        }
+
+        private static func applyHeadingStyle(to rawLine: String, in lineRange: NSRange, textStorage: NSTextStorage) -> Bool {
+            let leadingWhitespace = rawLine.prefix { $0 == " " || $0 == "\t" }.count
+            let candidate = rawLine.dropFirst(leadingWhitespace)
+            let headingLevel = candidate.prefix { $0 == "#" }.count
+
+            guard (1...6).contains(headingLevel),
+                  candidate.dropFirst(headingLevel).first?.isWhitespace == true
+            else { return false }
+
+            let fontSize: CGFloat
+            switch headingLevel {
+            case 1: fontSize = 30
+            case 2: fontSize = 24
+            case 3: fontSize = 20
+            case 4: fontSize = 17
+            default: fontSize = 15.5
+            }
+
+            textStorage.addAttributes([
+                .font: NSFont.systemFont(ofSize: fontSize, weight: .bold),
+                .foregroundColor: NSColor.labelColor
+            ], range: lineRange)
+
+            let markerLength = min(rawLine.count - leadingWhitespace, headingLevel + 1)
+            let markerRange = NSRange(location: lineRange.location + leadingWhitespace, length: markerLength)
+            hideSyntax(in: textStorage, range: markerRange)
+
+            return true
+        }
+
+        private static func styleCodeLine(in textStorage: NSTextStorage, range: NSRange) {
+            textStorage.addAttributes([
+                .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
+                .foregroundColor: NSColor.labelColor,
+                .backgroundColor: NSColor.controlBackgroundColor.withAlphaComponent(0.42)
+            ], range: range)
+        }
+
+        private static func applyInlineStyles(
+            in lineRange: NSRange,
+            rawText: NSString,
+            textStorage: NSTextStorage,
+            baseFontSize: CGFloat
+        ) {
+            applyRegex("`([^`]+)`", in: lineRange, rawText: rawText, textStorage: textStorage) { matchRange in
+                textStorage.addAttributes([
+                    .font: NSFont.monospacedSystemFont(ofSize: max(12.5, baseFontSize - 1), weight: .regular),
+                    .foregroundColor: NSColor.labelColor,
+                    .backgroundColor: NSColor.controlBackgroundColor.withAlphaComponent(0.55)
+                ], range: matchRange)
+                hideSyntax(in: textStorage, range: NSRange(location: matchRange.location, length: 1))
+                hideSyntax(in: textStorage, range: NSRange(location: matchRange.upperBound - 1, length: 1))
+            }
+
+            applyRegex("\\*\\*([^*]+)\\*\\*", in: lineRange, rawText: rawText, textStorage: textStorage) { matchRange in
+                textStorage.addAttributes([
+                    .font: NSFont.systemFont(ofSize: baseFontSize, weight: .bold)
+                ], range: matchRange)
+                hideSyntax(in: textStorage, range: NSRange(location: matchRange.location, length: 2))
+                hideSyntax(in: textStorage, range: NSRange(location: matchRange.upperBound - 2, length: 2))
+            }
+
+            applyRegex("(?<!\\*)\\*([^*]+)\\*(?!\\*)", in: lineRange, rawText: rawText, textStorage: textStorage) { matchRange in
+                textStorage.addAttributes([
+                    .font: italicFont(size: baseFontSize)
+                ], range: matchRange)
+                hideSyntax(in: textStorage, range: NSRange(location: matchRange.location, length: 1))
+                hideSyntax(in: textStorage, range: NSRange(location: matchRange.upperBound - 1, length: 1))
+            }
+
+            applyRegex("<u>(.*?)</u>", in: lineRange, rawText: rawText, textStorage: textStorage) { matchRange in
+                textStorage.addAttributes([
+                    .underlineStyle: NSUnderlineStyle.single.rawValue
+                ], range: matchRange)
+                hideSyntax(in: textStorage, range: NSRange(location: matchRange.location, length: 3))
+                hideSyntax(in: textStorage, range: NSRange(location: matchRange.upperBound - 4, length: 4))
+            }
+
+            applyRegex("\\[\\[([^\\]]+)\\]\\]", in: lineRange, rawText: rawText, textStorage: textStorage) { matchRange in
+                textStorage.addAttributes([
+                    .foregroundColor: NSColor.controlAccentColor,
+                    .underlineStyle: NSUnderlineStyle.single.rawValue
+                ], range: matchRange)
+                hideSyntax(in: textStorage, range: NSRange(location: matchRange.location, length: 2))
+                hideSyntax(in: textStorage, range: NSRange(location: matchRange.upperBound - 2, length: 2))
+            }
+
+            applyRegex("!\\[[^\\]]*\\]\\([^)]+\\)", in: lineRange, rawText: rawText, textStorage: textStorage) { matchRange in
+                textStorage.addAttributes([
+                    .foregroundColor: NSColor.systemTeal,
+                    .font: NSFont.systemFont(ofSize: baseFontSize, weight: .medium)
+                ], range: matchRange)
+            }
+        }
+
+        private static func applyRegex(
+            _ pattern: String,
+            in lineRange: NSRange,
+            rawText: NSString,
+            textStorage: NSTextStorage,
+            apply: (NSRange) -> Void
+        ) {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
+            regex.enumerateMatches(in: rawText as String, range: lineRange) { match, _, _ in
+                guard let match else { return }
+                apply(match.range)
+            }
+        }
+
+        private static func isListLine(_ line: String) -> Bool {
+            guard !line.isEmpty else { return false }
+            if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
+                return true
+            }
+
+            let parts = line.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+            return parts.count == 2
+                && parts[0].allSatisfy(\.isNumber)
+                && parts[1].hasPrefix(" ")
+        }
+
+        private static func tintLeadingMarker(
+            _ marker: Character,
+            in rawLine: String,
+            lineRange: NSRange,
+            textStorage: NSTextStorage
+        ) {
+            guard let markerIndex = rawLine.firstIndex(of: marker) else { return }
+            let offset = rawLine.distance(from: rawLine.startIndex, to: markerIndex)
+            textStorage.addAttributes([
+                .foregroundColor: NSColor.tertiaryLabelColor
+            ], range: NSRange(location: lineRange.location + offset, length: 1))
+        }
+
+        private static func tintListMarker(in rawLine: String, lineRange: NSRange, textStorage: NSTextStorage) {
+            let trimmedStart = rawLine.prefix { $0 == " " || $0 == "\t" }.count
+            let line = rawLine.dropFirst(trimmedStart)
+            let markerLength: Int
+
+            if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
+                markerLength = 1
+            } else if let dotIndex = line.firstIndex(of: "."),
+                      line[..<dotIndex].allSatisfy(\.isNumber) {
+                markerLength = line.distance(from: line.startIndex, to: dotIndex) + 1
+            } else {
+                return
+            }
+
+            textStorage.addAttributes([
+                .foregroundColor: NSColor.tertiaryLabelColor,
+                .font: NSFont.systemFont(ofSize: 15, weight: .semibold)
+            ], range: NSRange(location: lineRange.location + trimmedStart, length: markerLength))
+        }
+
+        private static func hideSyntax(in textStorage: NSTextStorage, range: NSRange) {
+            guard range.location >= 0,
+                  range.length > 0,
+                  range.upperBound <= textStorage.length
+            else { return }
+
+            textStorage.addAttributes([
+                .font: NSFont.systemFont(ofSize: 1),
+                .foregroundColor: NSColor.clear
+            ], range: range)
+        }
+
+        private static func italicFont(size: CGFloat) -> NSFont {
+            let font = NSFont.systemFont(ofSize: size, weight: .regular)
+            return NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+        }
+    }
+}
+
+private enum MarkdownInlineCommand {
+    case bold
+    case italic
+    case underline
+
+    var openMarker: String {
+        switch self {
+        case .bold:
+            return "**"
+        case .italic:
+            return "*"
+        case .underline:
+            return "<u>"
+        }
+    }
+
+    var closeMarker: String {
+        switch self {
+        case .bold:
+            return "**"
+        case .italic:
+            return "*"
+        case .underline:
+            return "</u>"
+        }
+    }
+}
+
+private final class MarkdownNSTextView: NSTextView {
+    weak var commandHandler: InlineMarkdownEditor.Coordinator?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
+              !event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.option),
+              !event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.control),
+              let characters = event.charactersIgnoringModifiers?.lowercased()
+        else {
+            return super.performKeyEquivalent(with: event)
+        }
+
+        switch characters {
+        case "b":
+            commandHandler?.toggleInlineCommand(.bold, in: self)
+            return true
+        case "i":
+            commandHandler?.toggleInlineCommand(.italic, in: self)
+            return true
+        case "u":
+            commandHandler?.toggleInlineCommand(.underline, in: self)
+            return true
+        default:
+            return super.performKeyEquivalent(with: event)
+        }
     }
 }
 
@@ -1588,12 +2231,26 @@ private struct PillHeightPreferenceKey: PreferenceKey {
     }
 }
 
+private struct PromptTextHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 16
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private func measuredTextWidth(_ text: String, font: NSFont) -> CGFloat {
+    ceil((text as NSString).size(withAttributes: [.font: font]).width)
+}
+
 private struct AssistantFloatingPill: View {
     @ObservedObject var store: BrainStore
     @FocusState private var isPromptFocused: Bool
     @State private var isExpandedComposerPresented = false
     @FocusState private var isExpandedPromptFocused: Bool
     @State private var isSendHovered = false
+    @State private var isAttachmentHovered = false
+    @State private var measuredPromptHeight: CGFloat = 16
 
     var body: some View {
         VStack(alignment: .center, spacing: 8) {
@@ -1641,7 +2298,8 @@ private struct AssistantFloatingPill: View {
                             .textFieldStyle(.plain)
                             .font(.system(size: 12.5))
                             .lineLimit(1...4)
-                            .frame(width: textFieldWidth, alignment: .leading)
+                            .frame(width: textFieldWidth, height: textFieldHeight, alignment: .leading)
+                            .background(promptHeightReader)
                             .focused($isPromptFocused)
                             .onSubmit {
                                 submitOrPreviewThinking()
@@ -1663,6 +2321,9 @@ private struct AssistantFloatingPill: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         isPromptFocused = true
+                    }
+                    .onPreferenceChange(PromptTextHeightPreferenceKey.self) { height in
+                        measuredPromptHeight = min(68, max(16, height))
                     }
                 }
             }
@@ -1767,11 +2428,29 @@ private struct AssistantFloatingPill: View {
                 .background(Color.primary.opacity(0.06))
                 .clipShape(Capsule())
             } else {
-                Image(systemName: "paperclip")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary.opacity(0.58))
-                    .frame(width: 22, height: 24)
-                    .help("Drag a PDF or Word document anywhere into the app")
+                Button {
+                    store.choosePromptAttachmentFromUser()
+                } label: {
+                    Image(systemName: "paperclip")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(isAttachmentHovered ? 0.96 : 0.82))
+                        .frame(width: 22, height: 24)
+                        .background {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(isAttachmentHovered ? Color.primary.opacity(0.18) : Color.clear)
+                        }
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .stroke(isAttachmentHovered ? Color.primary.opacity(0.10) : Color.clear, lineWidth: 1)
+                        }
+                }
+                .buttonStyle(.plain)
+                .help("Attach a PDF, Word document, or image")
+                .onHover { hovering in
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        isAttachmentHovered = hovering
+                    }
+                }
             }
         }
     }
@@ -1882,6 +2561,10 @@ private struct AssistantFloatingPill: View {
         min(430, max(180, estimatedPromptWidth))
     }
 
+    private var textFieldHeight: CGFloat {
+        measuredPromptHeight
+    }
+
     private var pillCornerRadius: CGFloat {
         isExpandedComposerPresented ? 20 : (measuredPromptText.count > 54 ? 18 : 17)
     }
@@ -1894,6 +2577,28 @@ private struct AssistantFloatingPill: View {
     private var estimatedPromptWidth: CGFloat {
         let characterWidth: CGFloat = 7.35
         return min(524, max(86, CGFloat(measuredPromptText.count) * characterWidth))
+    }
+
+    private var estimatedPromptLineCount: Int {
+        let lines = store.assistantPrompt.components(separatedBy: .newlines)
+        let visualLines = lines.reduce(0) { count, line in
+            count + max(1, Int(ceil(Double(max(1, line.count)) / 58.0)))
+        }
+        return min(4, max(1, visualLines))
+    }
+
+    private var promptHeightReader: some View {
+        Text(store.assistantPrompt.isEmpty ? "Material?" : store.assistantPrompt)
+            .font(.system(size: 12.5))
+            .lineLimit(1...4)
+            .frame(width: textFieldWidth, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .hidden()
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(key: PromptTextHeightPreferenceKey.self, value: proxy.size.height)
+                }
+            }
     }
 
     private var attachmentWidth: CGFloat {
@@ -2019,6 +2724,19 @@ private struct MarkdownPreview: View {
     let content: String
     let searchHighlight: SearchHighlight?
     let openLinkedNote: (String) -> Void
+    let imageURL: (String) -> URL?
+
+    init(
+        content: String,
+        searchHighlight: SearchHighlight?,
+        openLinkedNote: @escaping (String) -> Void,
+        imageURL: @escaping (String) -> URL? = { _ in nil }
+    ) {
+        self.content = content
+        self.searchHighlight = searchHighlight
+        self.openLinkedNote = openLinkedNote
+        self.imageURL = imageURL
+    }
 
     private var blocks: [MarkdownBlock] {
         MarkdownBlock.parse(content)
@@ -2116,6 +2834,10 @@ private struct MarkdownPreview: View {
                 .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                 .highlightedSearchBlock(isHighlighted)
 
+        case .image(let alt, let path):
+            MarkdownImageView(alt: alt, url: imageURL(path))
+                .highlightedSearchBlock(isHighlighted)
+
         case .divider:
             Rectangle()
                 .fill(.secondary.opacity(0.22))
@@ -2141,11 +2863,36 @@ private struct MarkdownPreview: View {
                 options: .regularExpression
             )
 
-        if let attributed = try? AttributedString(markdown: normalized) {
+        let underlineMatches = underlinedTextMatches(in: normalized)
+        let normalizedWithoutUnderlineTags = normalized
+            .replacingOccurrences(of: #"</?u>"#, with: "", options: .regularExpression)
+
+        if var attributed = try? AttributedString(markdown: normalizedWithoutUnderlineTags) {
+            applyUnderline(matches: underlineMatches, to: &attributed)
             return Text(attributed)
         }
 
-        return Text(normalized)
+        return Text(normalizedWithoutUnderlineTags)
+    }
+
+    private func underlinedTextMatches(in markdown: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: #"<u>(.*?)</u>"#) else { return [] }
+        let nsMarkdown = markdown as NSString
+        return regex.matches(in: markdown, range: NSRange(location: 0, length: nsMarkdown.length)).compactMap { match in
+            guard match.numberOfRanges > 1 else { return nil }
+            return nsMarkdown.substring(with: match.range(at: 1))
+        }
+    }
+
+    private func applyUnderline(matches: [String], to attributed: inout AttributedString) {
+        guard !matches.isEmpty else { return }
+
+        var searchStart = attributed.startIndex
+        for match in matches where !match.isEmpty {
+            guard let range = attributed[searchStart...].range(of: match) else { continue }
+            attributed[range].underlineStyle = .single
+            searchStart = range.upperBound
+        }
     }
 
     private func attributedSearchText(_ text: String, query: String) -> AttributedString {
@@ -2203,6 +2950,54 @@ private struct MarkdownPreview: View {
     }
 }
 
+private struct MarkdownImageView: View {
+    let alt: String
+    let url: URL?
+
+    var body: some View {
+        Group {
+            if let url, url.isFileURL, let image = NSImage(contentsOf: url) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else if let url {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFit()
+                    case .failure:
+                        missingImage
+                    case .empty:
+                        ProgressView()
+                            .frame(maxWidth: .infinity, minHeight: 90)
+                    @unknown default:
+                        missingImage
+                    }
+                }
+            } else {
+                missingImage
+            }
+        }
+        .frame(maxWidth: 520, maxHeight: 360, alignment: .leading)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private var missingImage: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "photo")
+            Text(alt.isEmpty ? "Image" : alt)
+                .lineLimit(1)
+        }
+        .font(.system(size: 13, weight: .medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, minHeight: 90, alignment: .leading)
+        .background(.quaternary.opacity(0.32))
+    }
+}
+
 private struct MarkdownBlock: Identifiable {
     enum Kind {
         case heading(level: Int, text: String)
@@ -2212,6 +3007,7 @@ private struct MarkdownBlock: Identifiable {
         case numbered(Int, String)
         case quote(String)
         case code(String)
+        case image(alt: String, path: String)
         case divider
     }
 
@@ -2262,6 +3058,9 @@ private struct MarkdownBlock: Identifiable {
             if let heading = parseHeading(trimmed) {
                 flushParagraph()
                 append(.heading(level: heading.level, text: heading.text))
+            } else if let image = parseImage(trimmed) {
+                flushParagraph()
+                append(.image(alt: image.alt, path: image.path))
             } else if isDivider(trimmed) {
                 flushParagraph()
                 append(.divider)
@@ -2302,6 +3101,19 @@ private struct MarkdownBlock: Identifiable {
     private static func parseBullet(_ line: String) -> String? {
         guard line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") else { return nil }
         return String(line.dropFirst(2))
+    }
+
+    private static func parseImage(_ line: String) -> (alt: String, path: String)? {
+        guard line.hasPrefix("!["),
+              let altEnd = line.range(of: "]("),
+              line.hasSuffix(")")
+        else { return nil }
+
+        let alt = String(line[line.index(line.startIndex, offsetBy: 2)..<altEnd.lowerBound])
+        let pathStart = altEnd.upperBound
+        let pathEnd = line.index(before: line.endIndex)
+        guard pathStart <= pathEnd else { return nil }
+        return (alt, String(line[pathStart..<pathEnd]))
     }
 
     private static func parseTask(_ line: String) -> (isDone: Bool, text: String)? {
@@ -2448,24 +3260,34 @@ private struct SidebarSearchEmptyView: View {
     }
 }
 
+private enum APIKeyVerificationState: Equatable {
+    case idle
+    case verifying
+    case verified
+    case failed(String)
+}
+
 private struct ModelConfigurationView: View {
     @ObservedObject var store: BrainStore
     @Environment(\.dismiss) private var dismiss
 
     @State private var mistralAPIKey: String
-    @State private var mistralModel: String
     @State private var groqAPIKey: String
     @State private var groqModel: String
     @State private var selectedModel: AssistantModel
+    @State private var mistralVerificationState: APIKeyVerificationState
+    @State private var verifiedMistralAPIKey: String
+    @State private var verificationTask: Task<Void, Never>?
 
     init(store: BrainStore) {
         self.store = store
         let configuration = store.assistantConfigurationSnapshot
         _mistralAPIKey = State(initialValue: configuration.mistralAPIKey)
-        _mistralModel = State(initialValue: configuration.mistralModel)
         _groqAPIKey = State(initialValue: configuration.groqAPIKey)
         _groqModel = State(initialValue: configuration.groqModel)
         _selectedModel = State(initialValue: store.selectedAssistantModel)
+        _mistralVerificationState = State(initialValue: configuration.mistralAPIKey.isEmpty ? .idle : .verified)
+        _verifiedMistralAPIKey = State(initialValue: configuration.mistralAPIKey)
     }
 
     var body: some View {
@@ -2500,11 +3322,24 @@ private struct ModelConfigurationView: View {
 
                 if selectedModel == .mistral {
                     ConfigurationField(title: "Mistral API Key") {
-                        SecureField("MISTRAL_API_KEY", text: $mistralAPIKey)
+                        MistralAPIKeyField(
+                            text: $mistralAPIKey,
+                            state: mistralVerificationState,
+                            width: mistralAPIKeyFieldWidth
+                        )
                     }
 
-                    ConfigurationField(title: "Mistral Model") {
-                        TextField("mistral-large-latest", text: $mistralModel)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Default model: \(BrainStore.defaultMistralModel)")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+
+                        if case .failed(let message) = mistralVerificationState {
+                            Text(message)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.red.opacity(0.88))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 } else {
                     ConfigurationField(title: "Groq API Key") {
@@ -2512,7 +3347,7 @@ private struct ModelConfigurationView: View {
                     }
 
                     ConfigurationField(title: "Groq Model") {
-                        TextField("llama-3.3-70b-versatile", text: $groqModel)
+                        TextField(BrainStore.defaultGroqModel, text: $groqModel)
                     }
                 }
             }
@@ -2528,24 +3363,126 @@ private struct ModelConfigurationView: View {
                 .controlSize(.large)
 
                 Button {
-                    store.selectAssistantModel(selectedModel)
-                    store.saveModelConfiguration(
-                        mistralAPIKey: mistralAPIKey,
-                        mistralModel: mistralModel,
-                        groqAPIKey: groqAPIKey,
-                        groqModel: groqModel
-                    )
+                    saveSelectedConfiguration()
                     dismiss()
                 } label: {
-                    Text("Save")
+                    Text(selectedModel == .mistral ? "Done" : "Save")
                         .frame(maxWidth: .infinity)
                 }
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
+                .disabled(selectedModel == .mistral && !isMistralKeyVerified)
             }
             .padding(.top, 4)
         }
         .padding(28)
+        .onChange(of: mistralAPIKey) { _, newValue in
+            scheduleMistralVerification(for: newValue)
+        }
+        .onChange(of: selectedModel) { _, newValue in
+            if newValue == .mistral {
+                scheduleMistralVerification(for: mistralAPIKey)
+            }
+        }
+        .onDisappear {
+            verificationTask?.cancel()
+        }
+    }
+
+    private var cleanMistralAPIKey: String {
+        mistralAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isMistralKeyVerified: Bool {
+        !cleanMistralAPIKey.isEmpty
+            && cleanMistralAPIKey == verifiedMistralAPIKey
+            && mistralVerificationState == .verified
+    }
+
+    private var mistralAPIKeyFieldWidth: CGFloat {
+        let text = cleanMistralAPIKey.isEmpty ? "MISTRAL_API_KEY" : cleanMistralAPIKey
+        return min(440, max(230, measuredTextWidth(text, font: .systemFont(ofSize: 14)) + 56))
+    }
+
+    private func scheduleMistralVerification(for apiKey: String) {
+        verificationTask?.cancel()
+
+        let cleanAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanAPIKey.isEmpty else {
+            mistralVerificationState = .idle
+            return
+        }
+
+        if cleanAPIKey == verifiedMistralAPIKey {
+            mistralVerificationState = .verified
+            return
+        }
+
+        mistralVerificationState = .verifying
+        verificationTask = Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled else { return }
+
+            do {
+                try await store.verifyAndSaveMistralAPIKey(cleanAPIKey)
+                guard !Task.isCancelled else { return }
+                verifiedMistralAPIKey = cleanAPIKey
+                mistralVerificationState = .verified
+            } catch {
+                guard !Task.isCancelled else { return }
+                mistralVerificationState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    private func saveSelectedConfiguration() {
+        store.selectAssistantModel(selectedModel)
+        store.saveModelConfiguration(
+            mistralAPIKey: mistralAPIKey,
+            mistralModel: BrainStore.defaultMistralModel,
+            groqAPIKey: groqAPIKey,
+            groqModel: groqModel
+        )
+    }
+}
+
+private struct MistralAPIKeyField: View {
+    @Binding var text: String
+    let state: APIKeyVerificationState
+    let width: CGFloat
+
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            SecureField("MISTRAL_API_KEY", text: $text)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 14))
+                .frame(width: width)
+
+            statusAccessory
+                .frame(width: 18, height: 18)
+                .padding(.trailing, 8)
+                .allowsHitTesting(false)
+        }
+        .animation(.easeOut(duration: 0.16), value: width)
+    }
+
+    @ViewBuilder
+    private var statusAccessory: some View {
+        switch state {
+        case .idle:
+            EmptyView()
+        case .verifying:
+            ProgressView()
+                .scaleEffect(0.45)
+        case .verified:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.green)
+        case .failed:
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.red.opacity(0.85))
+        }
     }
 }
 

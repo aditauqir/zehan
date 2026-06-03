@@ -68,6 +68,13 @@ struct ZirnApp: App {
                     store.configureModelFromUser()
                 }
             }
+
+            CommandGroup(replacing: .help) {
+                Button("Zirn Help") {
+                    store.showHelp()
+                }
+                .keyboardShortcut("/", modifiers: [.command, .shift])
+            }
         }
     }
 }
