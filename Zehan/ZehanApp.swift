@@ -56,11 +56,47 @@ struct ZirnApp: App {
             }
 
             CommandGroup(after: .pasteboard) {
+                Button("Bold") {
+                    NSApp.sendAction(NSSelectorFromString("toggleBoldface:"), to: nil, from: nil)
+                }
+                .keyboardShortcut("b", modifiers: .command)
+
+                Button("Italic") {
+                    NSApp.sendAction(NSSelectorFromString("toggleItalics:"), to: nil, from: nil)
+                }
+                .keyboardShortcut("i", modifiers: .command)
+
+                Button("Underline") {
+                    NSApp.sendAction(NSSelectorFromString("underline:"), to: nil, from: nil)
+                }
+                .keyboardShortcut("u", modifiers: .command)
+
+                Button("Highlight") {
+                    NSApp.sendAction(NSSelectorFromString("highlightSelection:"), to: nil, from: nil)
+                }
+                .keyboardShortcut("h", modifiers: [.command, .shift])
+
                 Button("Delete Page") {
                     store.deleteSelectedNote()
                 }
                 .keyboardShortcut(.delete, modifiers: .command)
                 .disabled(store.activeBrain == nil || (store.selectedNoteID == nil && store.currentNoteID == nil))
+            }
+
+            CommandGroup(replacing: .appVisibility) {
+                Button("Hide Zirn") {
+                    NSApp.hide(nil)
+                }
+                .keyboardShortcut("h", modifiers: [.command, .option])
+
+                Button("Hide Others") {
+                    NSApp.hideOtherApplications(nil)
+                }
+                .keyboardShortcut("h", modifiers: [.command, .option, .shift])
+
+                Button("Show All") {
+                    NSApp.unhideAllApplications(nil)
+                }
             }
 
             CommandMenu("Settings") {

@@ -287,7 +287,7 @@ private struct WorkspaceView: View {
                             }
                         },
                         activateSearch: {
-                            withAnimation(.easeInOut(duration: 0.16)) {
+                            withAnimation(.easeInOut(duration: 0.55)) {
                                 isSidebarSearchActive = true
                             }
                             isSidebarSearchFocused = true
@@ -451,6 +451,7 @@ private struct WorkspaceView: View {
                         if store.isShowingHomePage {
                             ReadOnlyHomePageView(
                                 markdown: store.homeMarkdown,
+                                isGenerating: store.isCompilingHighlightSummary,
                                 openLinkedNote: { store.openLinkedNote(named: $0) },
                                 imageURL: store.markdownImageURL
                             )
@@ -481,7 +482,7 @@ private struct WorkspaceView: View {
 
                     HStack {
                         if store.isShowingHomePage {
-                            HomeFooter(latestSummary: store.generatedSummaries.first)
+                            HomeFooter(latestSummary: store.latestHomeSummary)
                         } else if let summary = store.currentHighlightSummary {
                             HighlightSummaryFooter(summary: summary)
                         } else {
@@ -502,8 +503,7 @@ private struct WorkspaceView: View {
                             MarkdownTypingStatusIcons(status: typingStatus)
                         }
                         if !store.isShowingHomePage {
-                            Text(store.status)
-                                .contentTransition(.opacity)
+                            FooterStatusMessage(status: store.status)
                             AssistantConnectionStatusDot(status: store.assistantConnectionStatus)
                         }
                     }
@@ -645,6 +645,72 @@ private struct WorkspaceView: View {
     ]
 
     private static let supportedDocumentDropTypes = [UTType.fileURL.identifier] + directDocumentDropTypes
+}
+
+private struct FooterStatusMessage: View {
+    let status: String
+    @State private var isHovered = false
+
+    private var isWarning: Bool {
+        let lowercased = status.lowercased()
+        return status.count > 64
+            || lowercased.contains("permission")
+            || lowercased.contains("couldn")
+            || lowercased.contains("failed")
+            || lowercased.contains("error")
+            || lowercased.contains("cannot")
+    }
+
+    private var popupWidth: CGFloat {
+        min(460, max(260, CGFloat(status.count) * 5.2))
+    }
+
+    var body: some View {
+        Group {
+            if isWarning {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.yellow.opacity(0.92))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+                    .overlay(alignment: .bottomTrailing) {
+                        if isHovered {
+                            Text(status)
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(.primary)
+                                .lineLimit(4)
+                                .truncationMode(.tail)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .frame(width: popupWidth, alignment: .leading)
+                                .background(.regularMaterial)
+                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+                                }
+                                .shadow(color: .black.opacity(0.18), radius: 10, y: 5)
+                                .offset(y: -18)
+                                .allowsHitTesting(false)
+                                .transition(.opacity)
+                                .zIndex(2)
+                        }
+                    }
+                    .onHover { hovering in
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            isHovered = hovering
+                        }
+                    }
+                    .help(status)
+            } else {
+                Text(status)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .contentTransition(.opacity)
+            }
+        }
+    }
 }
 
 private struct MarkdownTypingStatus: Equatable {
@@ -942,7 +1008,7 @@ private struct GlassChromeIconButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "magnifyingglass")
+            Image(systemName: systemImage)
                 .font(.system(size: 14, weight: .semibold))
                 .symbolRenderingMode(isDestructive && isHovered ? .palette : .hierarchical)
                 .foregroundStyle(primaryStyle, secondaryStyle)
@@ -1497,7 +1563,7 @@ private struct SidebarHomeSearchControl: View {
             }
         }
         .frame(height: 32)
-        .animation(.easeInOut(duration: 0.28), value: isSearchActive)
+        .animation(.easeInOut(duration: 0.55), value: isSearchActive)
     }
 
     private var inactiveButtons: some View {
@@ -1597,7 +1663,7 @@ private struct SidebarHomeSearchControl: View {
     }
 
     private func dismissSearch() {
-        withAnimation(.easeInOut(duration: 0.28)) {
+        withAnimation(.easeInOut(duration: 0.55)) {
             query = ""
             isSearchActive = false
         }
@@ -1663,22 +1729,112 @@ private struct ReadOnlyHighlightSummaryView: View {
 
 private struct ReadOnlyHomePageView: View {
     let markdown: String
+    let isGenerating: Bool
     let openLinkedNote: (String) -> Void
     let imageURL: (String) -> URL?
 
     var body: some View {
         ScrollView {
-            MarkdownPreview(
-                content: markdown,
-                searchHighlight: nil,
-                openLinkedNote: openLinkedNote,
-                imageURL: imageURL
-            )
-            .padding(.vertical, 8)
-            .textSelection(.enabled)
+            if isGenerating {
+                HomeGenerationInlineBlocks()
+                    .padding(.vertical, 8)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            } else {
+                MarkdownPreview(
+                    content: markdown,
+                    searchHighlight: nil,
+                    openLinkedNote: openLinkedNote,
+                    imageURL: imageURL
+                )
+                .padding(.vertical, 8)
+                .textSelection(.enabled)
+                .transition(.opacity)
+            }
         }
         .scrollContentBackground(.hidden)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .animation(.easeInOut(duration: 0.24), value: isGenerating)
+    }
+}
+
+private struct HomeGenerationInlineBlocks: View {
+    @State private var visibleLineCount = 0
+
+    private let lineWidths: [CGFloat] = [
+        0.30, 0.78, 0.66, 0.88, 0.52,
+        0.24, 0.70, 0.83, 0.58, 0.76,
+        0.45, 0.68
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            ForEach(lineWidths.indices, id: \.self) { index in
+                HomeGenerationLineBlock(
+                    widthFraction: lineWidths[index],
+                    height: index == 0 || index == 5 ? 26 : 14,
+                    isHeading: index == 0 || index == 5,
+                    isVisible: index <= visibleLineCount
+                )
+                .padding(.top, index == 5 ? 12 : 0)
+            }
+        }
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .task {
+            visibleLineCount = 0
+            while !Task.isCancelled {
+                for index in lineWidths.indices {
+                    visibleLineCount = index
+                    try? await Task.sleep(for: .milliseconds(170))
+                }
+                try? await Task.sleep(for: .milliseconds(420))
+            }
+        }
+    }
+}
+
+private struct HomeGenerationLineBlock: View {
+    let widthFraction: CGFloat
+    let height: CGFloat
+    let isHeading: Bool
+    let isVisible: Bool
+    @State private var shimmerOffset: CGFloat = -1.2
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(80, proxy.size.width * widthFraction)
+            RoundedRectangle(cornerRadius: isHeading ? 5 : 4, style: .continuous)
+                .fill(Color(nsColor: .controlAccentColor))
+                .brightness(isHeading ? 0 : -0.08)
+                .frame(width: width, height: height)
+                .overlay(alignment: .leading) {
+                    LinearGradient(
+                        colors: [
+                            Color.clear,
+                            Color.white.opacity(0.40),
+                            Color.white.opacity(0.22),
+                            Color.clear
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(width: width * 0.48, height: height)
+                    .offset(x: shimmerOffset * width)
+                    .blur(radius: 1)
+                    .blendMode(.screen)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: isHeading ? 5 : 4, style: .continuous))
+                .opacity(isVisible ? 1 : 0)
+                .offset(y: isVisible ? 0 : 5)
+                .animation(.easeInOut(duration: 0.22), value: isVisible)
+                .task {
+                    shimmerOffset = -0.55
+                    withAnimation(.easeInOut(duration: 1.05).repeatForever(autoreverses: false)) {
+                        shimmerOffset = 1.55
+                    }
+                }
+        }
+        .frame(height: height)
     }
 }
 
@@ -1686,7 +1842,7 @@ private struct HomeFooter: View {
     let latestSummary: HighlightSummary?
 
     private var compiledAtText: String {
-        guard let latestSummary else { return "No highlight summaries compiled" }
+        guard let latestSummary else { return "No Home page generated" }
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
@@ -2028,11 +2184,8 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
 
         scrollView.documentView = textView
         context.coordinator.textView = textView
+        textView.setSelectedRange(Self.clamped(selectionRange, in: text))
         context.coordinator.applyMarkdownStyling()
-
-        DispatchQueue.main.async {
-            textView.window?.makeFirstResponder(textView)
-        }
 
         return scrollView
     }
@@ -2137,6 +2290,10 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             let selectedText = rawText.substring(with: selectedRange)
             guard let coreRange = selectedText.rangeOfNonWhitespace(in: selectedRange) else { return }
 
+            if unwrapInlineCommandInsideSelection(command, in: coreRange, textView: textView) {
+                return
+            }
+
             if unwrapInlineCommand(command, in: coreRange, textView: textView) {
                 return
             }
@@ -2197,6 +2354,10 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             else { return true }
 
             if replacementString.rangeOfCharacter(from: .whitespacesAndNewlines) != nil {
+                guard !activeInlineCommands.contains(.highlight) else {
+                    return true
+                }
+
                 let closeLength = activeCommandCloseMarkersLength(at: affectedCharRange.location, in: textView)
                 activeInlineCommands.removeAll()
 
@@ -2287,6 +2448,34 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             textView.replaceCharacters(in: openRange, with: "")
 
             let newSelection = NSRange(location: openRange.location, length: coreRange.length)
+            textView.setSelectedRange(newSelection)
+            text.wrappedValue = textView.string
+            selectionRange.wrappedValue = newSelection
+            typingStatus.wrappedValue = typingStatus(in: textView, selectedRange: newSelection)
+            applyMarkdownStyling()
+            updateSuggestionAnchor()
+            return true
+        }
+
+        private func unwrapInlineCommandInsideSelection(_ command: MarkdownInlineCommand, in coreRange: NSRange, textView: NSTextView) -> Bool {
+            let rawText = textView.string as NSString
+            let openLength = (command.openMarker as NSString).length
+            let closeLength = (command.closeMarker as NSString).length
+            guard coreRange.length >= openLength + closeLength else { return false }
+
+            let openRange = NSRange(location: coreRange.location, length: openLength)
+            let closeRange = NSRange(location: coreRange.upperBound - closeLength, length: closeLength)
+            guard rawText.substring(with: openRange) == command.openMarker,
+                  rawText.substring(with: closeRange) == command.closeMarker
+            else { return false }
+
+            textView.replaceCharacters(in: closeRange, with: "")
+            textView.replaceCharacters(in: openRange, with: "")
+
+            let newSelection = NSRange(
+                location: coreRange.location,
+                length: coreRange.length - openLength - closeLength
+            )
             textView.setSelectedRange(newSelection)
             text.wrappedValue = textView.string
             selectionRange.wrappedValue = newSelection
@@ -2728,8 +2917,8 @@ private extension String {
 
     func rangeOfNonWhitespace(in selectedRange: NSRange) -> NSRange? {
         let nsString = self as NSString
-        var location = selectedRange.location
-        var upperBound = selectedRange.upperBound
+        var location = 0
+        var upperBound = nsString.length
         let whitespace = CharacterSet.whitespacesAndNewlines
 
         while location < upperBound,
@@ -2745,7 +2934,7 @@ private extension String {
         }
 
         guard upperBound > location else { return nil }
-        return NSRange(location: location, length: upperBound - location)
+        return NSRange(location: selectedRange.location + location, length: upperBound - location)
     }
 }
 
@@ -2766,7 +2955,7 @@ private final class MarkdownNSTextView: NSTextView {
         commandHandler?.toggleInlineCommand(.underline, in: self)
     }
 
-    @objc
+    @objc(highlightSelection:)
     func highlightSelection(_ sender: Any?) {
         commandHandler?.toggleInlineCommand(.highlight, in: self)
     }
@@ -2814,7 +3003,7 @@ private final class MarkdownNSTextView: NSTextView {
                     action: #selector(highlightSelection(_:)),
                     keyEquivalent: "h"
                 )
-                item.keyEquivalentModifierMask = [.command]
+                item.keyEquivalentModifierMask = [.command, .shift]
                 item.target = self
                 menu.insertItem(item, at: 0)
             }
@@ -2841,7 +3030,7 @@ private final class MarkdownNSTextView: NSTextView {
         case "u":
             commandHandler?.toggleInlineCommand(.underline, in: self)
             return true
-        case "h":
+        case "h" where event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift):
             commandHandler?.toggleInlineCommand(.highlight, in: self)
             return true
         default:
@@ -3149,6 +3338,12 @@ private struct AssistantFloatingPill: View {
         .animation(.easeOut(duration: 0.18), value: isThinking)
         .animation(.easeInOut(duration: 0.18), value: store.assistantAttachment)
         .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isExpandedComposerPresented)
+        .onChange(of: store.assistantPrompt) { _, _ in
+            expandComposerIfPromptNeedsRoom()
+        }
+        .onChange(of: measuredPromptHeight) { _, _ in
+            expandComposerIfPromptNeedsRoom()
+        }
     }
 
     private var modelMenu: some View {
@@ -3348,6 +3543,10 @@ private struct AssistantFloatingPill: View {
         measuredPromptHeight
     }
 
+    private var promptNeedsExpandedComposer: Bool {
+        estimatedPromptLineCount >= 2 || measuredPromptHeight > 24
+    }
+
     private var pillCornerRadius: CGFloat {
         isExpandedComposerPresented ? 20 : (measuredPromptText.count > 54 ? 18 : 17)
     }
@@ -3432,6 +3631,16 @@ private struct AssistantFloatingPill: View {
 
         withAnimation(.easeInOut(duration: 0.2)) {
             store.submitAssistantPrompt()
+        }
+    }
+
+    private func expandComposerIfPromptNeedsRoom() {
+        guard promptNeedsExpandedComposer, !isExpandedComposerPresented else { return }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+            isExpandedComposerPresented = true
+        }
+        DispatchQueue.main.async {
+            isExpandedPromptFocused = true
         }
     }
 }

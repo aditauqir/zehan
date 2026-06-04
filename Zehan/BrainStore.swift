@@ -63,6 +63,7 @@ final class BrainStore: ObservableObject {
     private let selectedHighlightSummaryModelKey = "Assistant.HighlightSummaryModel"
     private let ollamaModelKey = "Assistant.OllamaModel"
     private let ollamaURLKey = "Assistant.OllamaURL"
+    private let homeSummaryID = "home-summary"
     private var mistralAPIKey = ""
     private var mistralModel = BrainStore.defaultMistralModel
     private var groqAPIKey = ""
@@ -70,6 +71,8 @@ final class BrainStore: ObservableObject {
     private var ollamaModel = BrainStore.defaultOllamaModel
     private var ollamaURL = BrainStore.defaultOllamaURL
     private var autosaveTask: Task<Void, Never>?
+    private var homeCompilationTask: Task<Void, Never>?
+    private var needsHomeRegenerationAfterCurrentCompile = false
     private var pendingAssistantInsertion: PendingAssistantInsertion?
     private var isApplyingAssistantOutput = false
     private var noteIdentityDatabase: NoteIdentityDatabase?
@@ -84,6 +87,9 @@ final class BrainStore: ObservableObject {
     private static let mistralInputPricePerMillionTokens = 0.50
     private static let mistralOutputPricePerMillionTokens = 1.50
     private static let maxAssistantOutputTokens = 4096
+    private static let homeCompilationDebounceNanoseconds: UInt64 = 1_500_000_000
+    private static let homeDirectCharacterBudget = 18_000
+    private static let homeNoteCondenseCharacterLimit = 4_500
     private static let estimatedCharactersPerToken = 4
     private static let mistralOCRModel = "mistral-ocr-latest"
     private static let mistralOCRPageLimit = 100
@@ -161,26 +167,33 @@ final class BrainStore: ObservableObject {
     }
 
     var homeMarkdown: String {
-        guard !generatedSummaries.isEmpty else {
-            return """
-            # Home
-
-            No highlight summaries yet.
-
-            Highlight text in a page, then compile it to build this home page.
-            """
+        if let latestHomeSummary {
+            return latestHomeSummary.markdown
         }
 
-        let summaries = generatedSummaries.map { summary in
-            """
-            ## \(summary.title)
+        let pageList = notes.isEmpty
+            ? "No pages yet."
+            : notes.map { "- [[\($0.title)]]" }.joined(separator: "\n")
 
-            \(summary.markdown.removingFirstMarkdownHeading())
-            """
-        }
-        .joined(separator: "\n\n---\n\n")
+        return """
+        # Home
 
-        return "# Home\n\n\(summaries)"
+        ## Vault Summary
+
+        No Home summary generated yet.
+
+        ## Pages
+
+        \(pageList)
+
+        ## Highlighted Text Summary
+
+        No highlighted text has been compiled yet.
+        """
+    }
+
+    var latestHomeSummary: HighlightSummary? {
+        generatedSummaries.first { $0.id == homeSummaryID }
     }
 
     private var estimatedMistralBudgetUSD: Double {
@@ -329,6 +342,9 @@ final class BrainStore: ObservableObject {
     func closeBrain() {
         autosaveTask?.cancel()
         autosaveTask = nil
+        homeCompilationTask?.cancel()
+        homeCompilationTask = nil
+        needsHomeRegenerationAfterCurrentCompile = false
         pendingAssistantInsertion = nil
         pendingAssistantPreview = nil
         noteIdentityDatabase = nil
@@ -509,6 +525,7 @@ final class BrainStore: ObservableObject {
                     )
                 )
                 status = statusText
+                scheduleLiveHomePageCompilation()
             } catch {
                 status = error.localizedDescription
             }
@@ -528,6 +545,14 @@ final class BrainStore: ObservableObject {
     }
 
     func openHomePage() {
+        openHomePage(regenerate: true)
+    }
+
+    private func openHomePage(regenerate: Bool) {
+        if currentNoteID != nil, currentHighlightSummary == nil, !isShowingHomePage {
+            saveCurrentNote(statusText: "Autosaved")
+        }
+
         autosaveTask?.cancel()
         autosaveTask = nil
         pendingAssistantInsertion = nil
@@ -540,6 +565,10 @@ final class BrainStore: ObservableObject {
         title = "Home"
         content = homeMarkdown
         status = "Home opened"
+
+        if regenerate {
+            compileHomePageSummary()
+        }
     }
 
     func openHighlightSummary(id: HighlightSummary.ID) {
@@ -566,6 +595,70 @@ final class BrainStore: ObservableObject {
         compileCurrentHighlightSummary(using: selectedHighlightSummaryModel)
     }
 
+    private func compileHomePageSummary() {
+        guard !isCompilingHighlightSummary else {
+            needsHomeRegenerationAfterCurrentCompile = true
+            return
+        }
+        homeCompilationTask?.cancel()
+        homeCompilationTask = nil
+        guard let activeBrain else {
+            status = "Open or create a brain first"
+            return
+        }
+
+        do {
+            let sourceNotes = try loadHomePageSourceNotes()
+            guard !sourceNotes.isEmpty else {
+                status = "Create a page before generating Home"
+                return
+            }
+
+            let sourceFingerprint = homeSourceFingerprint(for: sourceNotes)
+            if latestHomeSummary?.sourceFingerprint == sourceFingerprint {
+                if isShowingHomePage {
+                    title = "Home"
+                    content = homeMarkdown
+                }
+                status = "Home is up to date"
+                return
+            }
+
+            let model = selectedHighlightSummaryModel
+            persistImmediateHomeSummary(
+                vaultName: activeBrain.name,
+                sourceNotes: sourceNotes,
+                modelTitle: "Local live summary",
+                sourceFingerprint: sourceFingerprint
+            )
+            isCompilingHighlightSummary = true
+            status = "\(model.title) is generating Home page"
+
+            Task {
+                await generateHomePageSummary(
+                    vaultName: activeBrain.name,
+                    sourceNotes: sourceNotes,
+                    sourceFingerprint: sourceFingerprint,
+                    model: model
+                )
+            }
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    private func scheduleLiveHomePageCompilation() {
+        guard activeBrain != nil else { return }
+        homeCompilationTask?.cancel()
+        homeCompilationTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.homeCompilationDebounceNanoseconds)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.compileHomePageSummary()
+            }
+        }
+    }
+
     private func compileCurrentHighlightSummary(using model: HighlightSummaryModel) {
         guard !isCompilingHighlightSummary else { return }
         guard let sourceNoteID = currentNoteID else {
@@ -584,8 +677,10 @@ final class BrainStore: ObservableObject {
         selectedHighlightSummaryModel = model
         isShowingHighlightSummaryCompiler = false
         isCompilingHighlightSummary = true
-        status = "\(model.title) is compiling highlights"
         saveCurrentNote(statusText: "Highlights saved")
+        openHomePage(regenerate: false)
+        isCompilingHighlightSummary = true
+        status = "\(model.title) is generating Home page"
 
         Task {
             await generateHighlightSummary(
@@ -1253,6 +1348,21 @@ final class BrainStore: ObservableObject {
         rebuildSearchIndex(from: loadedNotes, in: brain)
     }
 
+    private func loadHomePageSourceNotes() throws -> [HomePageSourceNote] {
+        guard activeBrain != nil else { return [] }
+
+        return try notes.compactMap { summary in
+            guard let url = noteURL(for: summary.id) else { return nil }
+            let note = try readNote(from: url)
+            return HomePageSourceNote(
+                id: note.id,
+                title: note.title,
+                content: note.content,
+                updatedAt: note.updatedAt
+            )
+        }
+    }
+
     private func syncBrainMetadata() throws {
         guard let activeBrain else { return }
         var brain = try readBrain(from: activeBrain.brainURL)
@@ -1694,6 +1804,10 @@ final class BrainStore: ObservableObject {
         let startedAt = Date()
         defer {
             isCompilingHighlightSummary = false
+            if needsHomeRegenerationAfterCurrentCompile {
+                needsHomeRegenerationAfterCurrentCompile = false
+                scheduleLiveHomePageCompilation()
+            }
         }
 
         do {
@@ -1736,13 +1850,80 @@ final class BrainStore: ObservableObject {
                 modelTitle: model.displayModelName(
                     mistralModel: mistralModel,
                     ollamaModel: ollamaModel
-                )
+                ),
+                sourceFingerprint: nil
             )
 
             try persistHighlightSummary(summary)
             upsertHighlightSummary(summary)
-            openHomePage()
+            openHomePage(regenerate: false)
             status = "Summary compiled"
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    private func generateHomePageSummary(
+        vaultName: String,
+        sourceNotes: [HomePageSourceNote],
+        sourceFingerprint: String,
+        model: HighlightSummaryModel
+    ) async {
+        let startedAt = Date()
+        defer {
+            isCompilingHighlightSummary = false
+            if needsHomeRegenerationAfterCurrentCompile {
+                needsHomeRegenerationAfterCurrentCompile = false
+                scheduleLiveHomePageCompilation()
+            }
+        }
+
+        do {
+            let preparedNotes = try await preparedHomePageNotes(from: sourceNotes, model: model)
+            let prompt = homePageSummaryPrompt(vaultName: vaultName, sourceNotes: preparedNotes)
+            let result: ChatCompletionResult
+            switch model {
+            case .mistral:
+                result = try await generateWithMistral(
+                    system: homePageSummaryInstructions(),
+                    user: prompt,
+                    maxTokens: Self.maxAssistantOutputTokens
+                )
+                recordMistralUsage(
+                    inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
+                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+                )
+            case .ollama:
+                result = try await generateWithOllama(
+                    system: homePageSummaryInstructions(),
+                    user: prompt
+                )
+            }
+
+            let duration = Date().timeIntervalSince(startedAt)
+            let markdown = normalizedHomePageMarkdown(result.content)
+            let summary = HighlightSummary(
+                id: homeSummaryID,
+                sourceNoteID: "vault",
+                sourceTitle: vaultName,
+                title: "Home",
+                markdown: markdown,
+                compiledAt: Date(),
+                compileDuration: duration,
+                modelTitle: model.displayModelName(
+                    mistralModel: mistralModel,
+                    ollamaModel: ollamaModel
+                ),
+                sourceFingerprint: sourceFingerprint
+            )
+
+            try persistHighlightSummary(summary)
+            upsertHighlightSummary(summary)
+            if isShowingHomePage {
+                title = "Home"
+                content = markdown
+            }
+            status = "Home page generated"
         } catch {
             status = error.localizedDescription
         }
@@ -1919,6 +2100,23 @@ final class BrainStore: ObservableObject {
         """
     }
 
+    private func homePageSummaryInstructions() -> String {
+        """
+        You are Zirn's Home page compiler. You synthesize every page in the user's vault into one read-only Markdown Home document.
+        Use the supplied page contents or condensed page notes for the vault summary, then use every supplied highlighted excerpt for the highlighted text summary.
+        Preserve the user's writing style, rhythm, density, and vocabulary when possible.
+        Return Markdown only. Do not include meta commentary, apologies, or code fences.
+        """
+    }
+
+    private func homePageCondenseInstructions() -> String {
+        """
+        You condense one Markdown page for a later whole-vault summary.
+        Preserve the page's concrete claims, important details, decisions, names, definitions, questions, and unresolved threads.
+        Keep the user's terminology. Return compact Markdown notes only.
+        """
+    }
+
     private func highlightSummaryPrompt(sourceTitle: String, highlights: [String]) -> String {
         let highlightBody = highlights.enumerated()
             .map { index, text in "\(index + 1). \(text)" }
@@ -1945,6 +2143,266 @@ final class BrainStore: ObservableObject {
         """
     }
 
+    private func homePageSummaryPrompt(vaultName: String, sourceNotes: [HomePagePreparedNote]) -> String {
+        let pageBody = sourceNotes.enumerated()
+            .map { index, note in
+                """
+                ### Page \(index + 1): \(note.title)
+                \(note.preparedMarkdown)
+                """
+            }
+            .joined(separator: "\n\n")
+
+        let highlights = sourceNotes.flatMap { note in
+            note.highlights.map { highlight in
+                "\(note.title): \(highlight)"
+            }
+        }
+
+        let highlightBody = highlights.isEmpty
+            ? "No highlighted text was found."
+            : highlights.enumerated().map { index, text in "\(index + 1). \(text)" }.joined(separator: "\n")
+
+        return """
+        Vault:
+        \(vaultName)
+
+        Required structure:
+        # Home
+
+        ## Vault Summary
+        Summarize all pages in the vault into a coherent, proper text overview. Combine related ideas across pages instead of summarizing page-by-page. Explain what is going on in the vault.
+
+        ## Highlighted Text Summary
+        Summarize all highlighted excerpts across the vault into a coherent section. Then add concise bullet points or flashcards for the most useful highlighted ideas. If there are no highlights, say that no highlights have been added yet.
+
+        Page contents or condensed page notes:
+        \(pageBody)
+
+        All highlighted excerpts in the vault:
+        \(highlightBody)
+
+        Learned user writing samples:
+        \(learnedStyleMemory())
+
+        Correction-derived preferences, strongest first:
+        \(learnedCorrectionMemory())
+        """
+    }
+
+    private func preparedHomePageNotes(
+        from sourceNotes: [HomePageSourceNote],
+        model: HighlightSummaryModel
+    ) async throws -> [HomePagePreparedNote] {
+        let totalCharacters = sourceNotes.reduce(0) { $0 + $1.content.count }
+        let shouldCondenseVault = totalCharacters > Self.homeDirectCharacterBudget
+
+        var prepared: [HomePagePreparedNote] = []
+        for note in sourceNotes {
+            let highlights = highlightedTextFragments(in: note.content)
+            let cleanContent = note.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            let shouldCondenseNote = shouldCondenseVault || cleanContent.count > Self.homeNoteCondenseCharacterLimit
+            let preparedMarkdown: String
+
+            if shouldCondenseNote {
+                preparedMarkdown = try await condensedHomePageNote(
+                    note: note,
+                    highlights: highlights,
+                    model: model
+                )
+            } else {
+                preparedMarkdown = cleanContent
+            }
+
+            prepared.append(
+                HomePagePreparedNote(
+                    id: note.id,
+                    title: note.title,
+                    preparedMarkdown: preparedMarkdown,
+                    highlights: highlights
+                )
+            )
+        }
+
+        return prepared
+    }
+
+    private func condensedHomePageNote(
+        note: HomePageSourceNote,
+        highlights: [String],
+        model: HighlightSummaryModel
+    ) async throws -> String {
+        let prompt = homePageCondensePrompt(note: note, highlights: highlights)
+        let result: ChatCompletionResult
+
+        switch model {
+        case .mistral:
+            result = try await generateWithMistral(
+                system: homePageCondenseInstructions(),
+                user: prompt,
+                maxTokens: 1_500
+            )
+            recordMistralUsage(
+                inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
+                outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+            )
+        case .ollama:
+            result = try await generateWithOllama(
+                system: homePageCondenseInstructions(),
+                user: prompt
+            )
+        }
+
+        let clean = cleanedAssistantMarkdown(result.content)
+        return clean.isEmpty ? promptExcerpt(note.content) : clean
+    }
+
+    private func homePageCondensePrompt(note: HomePageSourceNote, highlights: [String]) -> String {
+        let highlightBody = highlights.isEmpty
+            ? "No highlighted excerpts in this page."
+            : highlights.enumerated().map { index, text in "\(index + 1). \(text)" }.joined(separator: "\n")
+
+        return """
+        Page title:
+        \(note.title)
+
+        Highlighted excerpts to preserve:
+        \(highlightBody)
+
+        Full Markdown page:
+        \(note.content)
+
+        Task:
+        Condense this page into compact Markdown notes for a whole-vault Home summary. Preserve all important details and do not invent anything.
+        """
+    }
+
+    private func persistImmediateHomeSummary(
+        vaultName: String,
+        sourceNotes: [HomePageSourceNote],
+        modelTitle: String,
+        sourceFingerprint: String
+    ) {
+        let markdown = localHomePageMarkdown(vaultName: vaultName, sourceNotes: sourceNotes)
+        let summary = HighlightSummary(
+            id: homeSummaryID,
+            sourceNoteID: "vault",
+            sourceTitle: vaultName,
+            title: "Home",
+            markdown: markdown,
+            compiledAt: Date(),
+            compileDuration: 0,
+            modelTitle: modelTitle,
+            sourceFingerprint: sourceFingerprint
+        )
+
+        do {
+            try persistHighlightSummary(summary)
+            upsertHighlightSummary(summary)
+            if isShowingHomePage {
+                title = "Home"
+                content = markdown
+            }
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    private func localHomePageMarkdown(vaultName: String, sourceNotes: [HomePageSourceNote]) -> String {
+        let pageSummaries = sourceNotes.map { note -> String in
+            let summary = localPageSummary(for: note)
+            return """
+            ### \(note.title)
+
+            \(summary)
+            """
+        }
+        .joined(separator: "\n\n")
+
+        let highlights = sourceNotes.flatMap { note in
+            highlightedTextFragments(in: note.content).map { "- **\(note.title):** \($0)" }
+        }
+        let highlightedSummary = highlights.isEmpty
+            ? "No highlighted text has been compiled yet."
+            : highlights.joined(separator: "\n")
+
+        let vaultSummary = localVaultSummary(from: sourceNotes)
+
+        return """
+        # Home
+
+        ## Vault Summary
+
+        \(vaultSummary)
+
+        ## Page Summaries
+
+        \(pageSummaries)
+
+        ## Highlighted Text Summary
+
+        \(highlightedSummary)
+        """
+    }
+
+    private func localVaultSummary(from sourceNotes: [HomePageSourceNote]) -> String {
+        let pageCount = sourceNotes.count
+        let titles = sourceNotes.map(\.title).joined(separator: ", ")
+        let combinedPreview = sourceNotes
+            .map { localPageSummary(for: $0, sentenceLimit: 1) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+
+        if combinedPreview.isEmpty {
+            return "This vault has \(pageCount) page\(pageCount == 1 ? "" : "s"): \(titles). Add body text to the pages and Home will summarize them automatically."
+        }
+
+        return "This vault has \(pageCount) page\(pageCount == 1 ? "" : "s"): \(titles). \(combinedPreview)"
+    }
+
+    private func localPageSummary(for note: HomePageSourceNote, sentenceLimit: Int = 2) -> String {
+        let plain = plainText(fromMarkdown: note.content)
+        let withoutTitle = plain
+            .replacingOccurrences(of: note.title, with: "", options: [.caseInsensitive])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let source = withoutTitle.isEmpty ? plain : withoutTitle
+        guard !source.isEmpty else {
+            return "No body text yet."
+        }
+
+        let sentences = source
+            .components(separatedBy: CharacterSet(charactersIn: ".!?"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let selected = sentences.isEmpty
+            ? String(source.prefix(220))
+            : sentences.prefix(sentenceLimit).joined(separator: ". ")
+
+        let clean = selected.trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean.hasSuffix(".") ? clean : "\(clean)."
+    }
+
+    private func homeSourceFingerprint(for sourceNotes: [HomePageSourceNote]) -> String {
+        let source = sourceNotes
+            .sorted { $0.id < $1.id }
+            .map { note in
+                "\(note.id)\u{1F}\(note.title)\u{1F}\(note.content)"
+            }
+            .joined(separator: "\u{1E}")
+        return stableFingerprint(for: source)
+    }
+
+    private func stableFingerprint(for text: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
+    }
+
     private func normalizedHighlightSummaryMarkdown(_ markdown: String, sourceTitle: String) -> String {
         let clean = cleanedAssistantMarkdown(markdown)
         let requiredHeading = "# Summary of \(sourceTitle)"
@@ -1956,6 +2414,39 @@ final class BrainStore: ObservableObject {
             return ([requiredHeading] + lines.dropFirst().map(String.init)).joined(separator: "\n")
         }
         return "\(requiredHeading)\n\n\(clean)"
+    }
+
+    private func normalizedHomePageMarkdown(_ markdown: String) -> String {
+        let clean = cleanedAssistantMarkdown(markdown)
+        guard !clean.isEmpty else {
+            return """
+            # Home
+
+            ## Vault Summary
+
+            No Home summary generated yet.
+
+            ## Highlighted Text Summary
+
+            No highlighted text has been compiled yet.
+            """
+        }
+
+        let lines = clean.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let first = lines.first else { return "# Home" }
+        if first.trimmingCharacters(in: .whitespacesAndNewlines) == "# Home" {
+            return clean
+        }
+        if first.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("# ") {
+            return (["# Home"] + lines.dropFirst().map(String.init)).joined(separator: "\n")
+        }
+        return "# Home\n\n\(clean)"
+    }
+
+    private func promptExcerpt(_ markdown: String, characterLimit: Int = 3_500) -> String {
+        let clean = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clean.count > characterLimit else { return clean }
+        return "\(clean.prefix(characterLimit))\n..."
     }
 
     private func assistantInput(for prompt: String) -> String {
@@ -2527,7 +3018,8 @@ final class BrainStore: ObservableObject {
             title: summary.title,
             compiledAt: summary.compiledAt,
             compileDuration: summary.compileDuration,
-            modelTitle: summary.modelTitle
+            modelTitle: summary.modelTitle,
+            sourceFingerprint: summary.sourceFingerprint
         )
         let metadataData = try encoder.encode(metadata)
         guard let metadataText = String(data: metadataData, encoding: .utf8) else {
@@ -2568,7 +3060,8 @@ final class BrainStore: ObservableObject {
             markdown: body,
             compiledAt: metadata.compiledAt,
             compileDuration: metadata.compileDuration,
-            modelTitle: metadata.modelTitle
+            modelTitle: metadata.modelTitle,
+            sourceFingerprint: metadata.sourceFingerprint
         )
     }
 
@@ -2985,6 +3478,20 @@ private struct ChatCompletionResult {
     let outputTokens: Int?
 }
 
+private struct HomePageSourceNote {
+    let id: String
+    let title: String
+    let content: String
+    let updatedAt: Date
+}
+
+private struct HomePagePreparedNote {
+    let id: String
+    let title: String
+    let preparedMarkdown: String
+    let highlights: [String]
+}
+
 struct HighlightSummary: Identifiable, Equatable {
     let id: String
     let sourceNoteID: String
@@ -2994,6 +3501,7 @@ struct HighlightSummary: Identifiable, Equatable {
     let compiledAt: Date
     let compileDuration: TimeInterval
     let modelTitle: String
+    let sourceFingerprint: String?
 }
 
 private struct HighlightSummaryMetadata: Codable {
@@ -3004,6 +3512,7 @@ private struct HighlightSummaryMetadata: Codable {
     let compiledAt: Date
     let compileDuration: TimeInterval
     let modelTitle: String
+    let sourceFingerprint: String?
 }
 
 enum HighlightSummaryModel: String, CaseIterable, Identifiable {
