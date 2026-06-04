@@ -67,6 +67,17 @@ struct ZirnApp: App {
                 Button("Configure Model") {
                     store.configureModelFromUser()
                 }
+
+                Button("Models Used Where") {
+                    store.showUsedModelsConfiguration()
+                }
+
+                Divider()
+
+                Button("Compile Highlight Summary") {
+                    store.compileCurrentHighlightSummary()
+                }
+                .disabled(!store.canCompileCurrentHighlights)
             }
 
             CommandGroup(replacing: .help) {

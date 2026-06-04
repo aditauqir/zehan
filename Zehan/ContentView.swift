@@ -37,6 +37,11 @@ struct ContentView: View {
                 .frame(width: 620, height: 680)
                 .presentationBackground(.regularMaterial)
         }
+        .sheet(isPresented: $store.isShowingUsedModelsConfiguration) {
+            UsedModelsConfigurationView(store: store)
+                .frame(width: 500)
+                .presentationBackground(.regularMaterial)
+        }
     }
 }
 
@@ -242,6 +247,8 @@ private struct WorkspaceView: View {
     @State private var promptPillHeight: CGFloat = 38
     @State private var isDocumentDropTargeted = false
     @State private var sidebarSearchQuery = ""
+    @State private var isSidebarSearchActive = false
+    @State private var typingStatus = MarkdownTypingStatus()
     @FocusState private var isSidebarSearchFocused: Bool
 
     private var cleanSidebarSearchQuery: String {
@@ -266,9 +273,25 @@ private struct WorkspaceView: View {
                         isEditingMarkdown = false
                     }
 
-                    SidebarSearchField(
+                    SidebarHomeSearchControl(
+                        isSearchActive: $isSidebarSearchActive,
                         query: $sidebarSearchQuery,
-                        isFocused: $isSidebarSearchFocused
+                        isSearchFocused: $isSidebarSearchFocused,
+                        isHomeSelected: store.isShowingHomePage,
+                        openHome: {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                isEditingMarkdown = false
+                                isSidebarSearchActive = false
+                                sidebarSearchQuery = ""
+                                store.openHomePage()
+                            }
+                        },
+                        activateSearch: {
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                isSidebarSearchActive = true
+                            }
+                            isSidebarSearchFocused = true
+                        }
                     )
 
                     ScrollView {
@@ -291,7 +314,7 @@ private struct WorkspaceView: View {
                                 ForEach(store.notes) { note in
                                     NoteSidebarRow(
                                         note: note,
-                                        isSelected: store.selectedNoteID == note.id || store.currentNoteID == note.id,
+                                        isSelected: !store.isViewingGeneratedPage && (store.selectedNoteID == note.id || store.currentNoteID == note.id),
                                         open: {
                                             withAnimation(.easeInOut(duration: 0.18)) {
                                                 isEditingMarkdown = false
@@ -391,6 +414,7 @@ private struct WorkspaceView: View {
         .animation(.easeInOut(duration: 0.16), value: isSearchingSidebar)
         .onChange(of: store.isShowingPageSearch) { _, shouldFocusSearch in
             guard shouldFocusSearch else { return }
+            isSidebarSearchActive = true
             isSidebarSearchFocused = true
             store.isShowingPageSearch = false
         }
@@ -399,9 +423,10 @@ private struct WorkspaceView: View {
     private var workspaceDetail: some View {
         ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
+                if !store.isShowingHomePage {
                     HStack {
                         DocumentChromeControls(
-                            canDelete: store.selectedNoteID != nil || store.currentNoteID != nil,
+                            canDelete: !store.isViewingGeneratedPage && (store.selectedNoteID != nil || store.currentNoteID != nil),
                             newPage: {
                                 isEditingMarkdown = false
                                 store.newDraft()
@@ -420,25 +445,49 @@ private struct WorkspaceView: View {
                     .onTapGesture {
                         isEditingMarkdown = false
                     }
+                }
 
-                    MarkdownEditingSurface(
-                        content: contentBinding,
-                        isEditing: $isEditingMarkdown,
-                        searchHighlight: store.activeSearchHighlight,
-                        noteTitles: store.notes.map(\.title),
-                        openLinkedNote: { store.openLinkedNote(named: $0) },
-                        clearSearchHighlight: store.clearSearchHighlight,
-                        imageURL: store.markdownImageURL,
-                        insertImageFile: store.insertMarkdownImage,
-                        insertImageData: store.insertMarkdownImage
-                    )
-                        .padding(.horizontal, 38)
-                        .padding(.top, 18)
-                        .padding(.bottom, 18)
+                    Group {
+                        if store.isShowingHomePage {
+                            ReadOnlyHomePageView(
+                                markdown: store.homeMarkdown,
+                                openLinkedNote: { store.openLinkedNote(named: $0) },
+                                imageURL: store.markdownImageURL
+                            )
+                        } else if let summary = store.currentHighlightSummary {
+                            ReadOnlyHighlightSummaryView(
+                                summary: summary,
+                                openLinkedNote: { store.openLinkedNote(named: $0) },
+                                imageURL: store.markdownImageURL
+                            )
+                        } else {
+                            MarkdownEditingSurface(
+                                content: contentBinding,
+                                isEditing: $isEditingMarkdown,
+                                searchHighlight: store.activeSearchHighlight,
+                                noteTitles: store.notes.map(\.title),
+                                openLinkedNote: { store.openLinkedNote(named: $0) },
+                                clearSearchHighlight: store.clearSearchHighlight,
+                                imageURL: store.markdownImageURL,
+                                insertImageFile: store.insertMarkdownImage,
+                                insertImageData: store.insertMarkdownImage,
+                                typingStatus: $typingStatus
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 38)
+                    .padding(.top, 18)
+                    .padding(.bottom, 18)
 
                     HStack {
-                        Text(store.documentStats)
-                            .contentTransition(.numericText())
+                        if store.isShowingHomePage {
+                            HomeFooter(latestSummary: store.generatedSummaries.first)
+                        } else if let summary = store.currentHighlightSummary {
+                            HighlightSummaryFooter(summary: summary)
+                        } else {
+                            Text(store.documentStats)
+                                .contentTransition(.numericText())
+                        }
                         if isReadingMode {
                             HStack(spacing: 5) {
                                 Image(systemName: "eyeglasses")
@@ -449,9 +498,14 @@ private struct WorkspaceView: View {
                             .transition(.opacity.combined(with: .move(edge: .leading)))
                         }
                         Spacer()
-                        Text(store.status)
-                            .contentTransition(.opacity)
-                        AssistantConnectionStatusDot(status: store.assistantConnectionStatus)
+                        if !store.isViewingGeneratedPage {
+                            MarkdownTypingStatusIcons(status: typingStatus)
+                        }
+                        if !store.isShowingHomePage {
+                            Text(store.status)
+                                .contentTransition(.opacity)
+                            AssistantConnectionStatusDot(status: store.assistantConnectionStatus)
+                        }
                     }
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
@@ -465,7 +519,7 @@ private struct WorkspaceView: View {
                 .background(Color(nsColor: .textBackgroundColor))
 
                 HStack(alignment: .bottom, spacing: 10) {
-                    if !isReadingMode {
+                    if !isReadingMode && !store.isViewingGeneratedPage {
                         ReadingModeToggle(isOn: $isReadingMode, size: readingToggleSize)
                             .opacity(0)
                             .allowsHitTesting(false)
@@ -477,7 +531,9 @@ private struct WorkspaceView: View {
                             }
                     }
 
-                    ReadingModeToggle(isOn: $isReadingMode, size: readingToggleSize)
+                    if !store.isViewingGeneratedPage {
+                        ReadingModeToggle(isOn: $isReadingMode, size: readingToggleSize)
+                    }
                 }
                 .padding(.bottom, 54)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -589,6 +645,42 @@ private struct WorkspaceView: View {
     ]
 
     private static let supportedDocumentDropTypes = [UTType.fileURL.identifier] + directDocumentDropTypes
+}
+
+private struct MarkdownTypingStatus: Equatable {
+    var isCapsLockOn = NSEvent.modifierFlags.contains(.capsLock)
+    var isBold = false
+    var isItalic = false
+    var isUnderline = false
+    var isHighlight = false
+}
+
+private struct MarkdownTypingStatusIcons: View {
+    let status: MarkdownTypingStatus
+
+    var body: some View {
+        HStack(spacing: 7) {
+            statusIcon(status.isCapsLockOn ? "capslock.fill" : "capslock", isActive: status.isCapsLockOn, help: "Caps Lock")
+            statusIcon("bold", isActive: status.isBold, help: "Bold")
+            statusIcon("italic", isActive: status.isItalic, help: "Italic")
+            statusIcon("underline", isActive: status.isUnderline, help: "Underline")
+            statusIcon("paintbrush.pointed", isActive: status.isHighlight, help: "Highlight")
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .background(Color.primary.opacity(0.045))
+        .clipShape(Capsule())
+        .animation(.easeOut(duration: 0.12), value: status)
+    }
+
+    private func statusIcon(_ name: String, isActive: Bool, help: String) -> some View {
+        Image(systemName: name)
+            .font(.system(size: 11.5, weight: .semibold))
+            .symbolRenderingMode(.hierarchical)
+            .foregroundStyle(isActive ? Color.primary.opacity(0.92) : Color.secondary.opacity(0.34))
+            .frame(width: 13, height: 16)
+            .help(help)
+    }
 }
 
 private struct AssistantConnectionStatusDot: View {
@@ -850,7 +942,7 @@ private struct GlassChromeIconButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemImage)
+            Image(systemName: "magnifyingglass")
                 .font(.system(size: 14, weight: .semibold))
                 .symbolRenderingMode(isDestructive && isHovered ? .palette : .hierarchical)
                 .foregroundStyle(primaryStyle, secondaryStyle)
@@ -1347,6 +1439,311 @@ private struct NoteSidebarRow: View {
     }
 }
 
+private struct HomeSidebarRow: View {
+    let isSelected: Bool
+    let open: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 8) {
+                Image(systemName: "house.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16, height: 16)
+
+                Text("Home")
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .lineLimit(1)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isSelected ? Color.primary.opacity(0.14) : Color.primary.opacity(isHovered ? 0.07 : 0))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help("Open Home")
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+private struct SidebarHomeSearchControl: View {
+    @Binding var isSearchActive: Bool
+    @Binding var query: String
+    var isSearchFocused: FocusState<Bool>.Binding
+    let isHomeSelected: Bool
+    let openHome: () -> Void
+    let activateSearch: () -> Void
+    @Namespace private var liquidNamespace
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if isSearchActive {
+                liquidSearchField
+                    .transition(.identity)
+            } else {
+                inactiveButtons
+                    .transition(.identity)
+            }
+        }
+        .frame(height: 32)
+        .animation(.easeInOut(duration: 0.28), value: isSearchActive)
+    }
+
+    private var inactiveButtons: some View {
+        HStack(spacing: 8) {
+            Button(action: openHome) {
+                Image(systemName: "house.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(isHomeSelected ? 0.9 : 0.62))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 32)
+                    .background {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(isHomeSelected ? Color.primary.opacity(0.14) : Color.primary.opacity(0.045))
+                            }
+                    }
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .help("Home")
+            .offset(x: isSearchActive ? -18 : 0)
+            .opacity(isSearchActive ? 0 : 1)
+            .scaleEffect(isSearchActive ? 0.96 : 1, anchor: .leading)
+
+            Button(action: activateSearch) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.66))
+                    .matchedGeometryEffect(id: "searchIcon", in: liquidNamespace)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 32)
+                    .background(searchLiquidSurface)
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .help("Search Pages")
+        }
+    }
+
+    private var liquidSearchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .matchedGeometryEffect(id: "searchIcon", in: liquidNamespace)
+                .frame(width: 16, height: 16)
+
+            TextField("Search pages", text: $query)
+                .font(.system(size: 13, weight: .medium))
+                .textFieldStyle(.plain)
+                .focused(isSearchFocused)
+
+            Button {
+                if query.isEmpty {
+                    dismissSearch()
+                } else {
+                    query = ""
+                    isSearchFocused.wrappedValue = true
+                }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .help(query.isEmpty ? "Close search" : "Clear search")
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 32)
+        .frame(maxWidth: .infinity)
+        .background(searchLiquidSurface)
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onTapGesture {
+            isSearchFocused.wrappedValue = true
+        }
+        .onAppear {
+            isSearchFocused.wrappedValue = true
+        }
+    }
+
+    private var searchLiquidSurface: some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(.ultraThinMaterial)
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(isSearchActive ? 0.060 : 0.050))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isSearchActive || isSearchFocused.wrappedValue ? Color.accentColor.opacity(0.38) : Color.primary.opacity(0.095), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(isSearchActive ? 0.10 : 0.02), radius: isSearchActive ? 10 : 3, y: isSearchActive ? 4 : 1)
+            .matchedGeometryEffect(id: "searchSurface", in: liquidNamespace)
+    }
+
+    private func dismissSearch() {
+        withAnimation(.easeInOut(duration: 0.28)) {
+            query = ""
+            isSearchActive = false
+        }
+    }
+}
+
+private struct HighlightSummarySidebarRow: View {
+    let summary: HighlightSummary
+    let isSelected: Bool
+    let open: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 8) {
+                Image(systemName: "brain.head.profile")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Text(summary.sourceTitle)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .lineLimit(1)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .foregroundStyle(.primary.opacity(isHovered || isSelected ? 0.96 : 0.78))
+            .shadow(color: .yellow.opacity(isHovered ? 0.34 : 0), radius: isHovered ? 7 : 0)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(summary.title)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+private struct ReadOnlyHighlightSummaryView: View {
+    let summary: HighlightSummary
+    let openLinkedNote: (String) -> Void
+    let imageURL: (String) -> URL?
+
+    var body: some View {
+        ScrollView {
+            MarkdownPreview(
+                content: summary.markdown,
+                searchHighlight: nil,
+                openLinkedNote: openLinkedNote,
+                imageURL: imageURL
+            )
+            .padding(.vertical, 8)
+            .textSelection(.enabled)
+        }
+        .scrollContentBackground(.hidden)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+private struct ReadOnlyHomePageView: View {
+    let markdown: String
+    let openLinkedNote: (String) -> Void
+    let imageURL: (String) -> URL?
+
+    var body: some View {
+        ScrollView {
+            MarkdownPreview(
+                content: markdown,
+                searchHighlight: nil,
+                openLinkedNote: openLinkedNote,
+                imageURL: imageURL
+            )
+            .padding(.vertical, 8)
+            .textSelection(.enabled)
+        }
+        .scrollContentBackground(.hidden)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+private struct HomeFooter: View {
+    let latestSummary: HighlightSummary?
+
+    private var compiledAtText: String {
+        guard let latestSummary else { return "No highlight summaries compiled" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return "Compiled \(formatter.string(from: latestSummary.compiledAt))"
+    }
+
+    private var durationText: String? {
+        guard let latestSummary else { return nil }
+        if latestSummary.compileDuration < 1 {
+            return "\(Int((latestSummary.compileDuration * 1000).rounded())) ms"
+        }
+        return String(format: "%.1f sec", latestSummary.compileDuration)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(compiledAtText)
+            if let durationText, let latestSummary {
+                Text("·")
+                Text(durationText)
+                Text("·")
+                Text(latestSummary.modelTitle)
+            }
+        }
+            .lineLimit(1)
+    }
+}
+
+private struct HighlightSummaryFooter: View {
+    let summary: HighlightSummary
+
+    private var compiledAtText: String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: summary.compiledAt)
+    }
+
+    private var durationText: String {
+        if summary.compileDuration < 1 {
+            return "\(Int((summary.compileDuration * 1000).rounded())) ms"
+        }
+        return String(format: "%.1f sec", summary.compileDuration)
+    }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Label(compiledAtText, systemImage: "clock")
+            Label(durationText, systemImage: "timer")
+            Label(summary.modelTitle, systemImage: "cpu")
+        }
+        .labelStyle(.titleAndIcon)
+        .lineLimit(1)
+        .truncationMode(.tail)
+    }
+}
+
 private struct MarkdownEditingSurface: View {
     @Binding var content: String
     @Binding var isEditing: Bool
@@ -1357,6 +1754,7 @@ private struct MarkdownEditingSurface: View {
     let imageURL: (String) -> URL?
     let insertImageFile: (URL) -> Void
     let insertImageData: (Data, String?) -> Void
+    @Binding var typingStatus: MarkdownTypingStatus
     @State private var suggestionAnchor: CGPoint?
     @State private var editorSelectionRange = NSRange(location: 0, length: 0)
 
@@ -1404,6 +1802,8 @@ private struct MarkdownEditingSurface: View {
                 InlineMarkdownEditor(
                     text: $content,
                     selectionRange: $editorSelectionRange,
+                    typingStatus: $typingStatus,
+                    linkTabCompletionTitle: linkSuggestions.first,
                     suggestionRange: activeSuggestionNSRange,
                     suggestionAnchor: $suggestionAnchor
                 )
@@ -1446,7 +1846,7 @@ private struct MarkdownEditingSurface: View {
     private var linkSuggestionMenuHeight: CGFloat {
         CGFloat(linkSuggestions.count) * 30
             + CGFloat(max(0, linkSuggestions.count - 1)) * 4
-            + 12
+            + 38
     }
 
     private var renderedPreview: some View {
@@ -1582,11 +1982,18 @@ private struct MarkdownEditingSurface: View {
 private struct InlineMarkdownEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var selectionRange: NSRange
+    @Binding var typingStatus: MarkdownTypingStatus
+    let linkTabCompletionTitle: String?
     let suggestionRange: NSRange?
     @Binding var suggestionAnchor: CGPoint?
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, selectionRange: $selectionRange, suggestionAnchor: $suggestionAnchor)
+        Coordinator(
+            text: $text,
+            selectionRange: $selectionRange,
+            typingStatus: $typingStatus,
+            suggestionAnchor: $suggestionAnchor
+        )
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -1633,7 +2040,9 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.text = $text
         context.coordinator.selectionRange = $selectionRange
+        context.coordinator.typingStatus = $typingStatus
         context.coordinator.suggestionAnchor = $suggestionAnchor
+        context.coordinator.linkTabCompletionTitle = linkTabCompletionTitle
         context.coordinator.suggestionRange = suggestionRange
 
         guard let textView = scrollView.documentView as? NSTextView else { return }
@@ -1666,14 +2075,23 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
         var selectionRange: Binding<NSRange>
+        var typingStatus: Binding<MarkdownTypingStatus>
         var suggestionAnchor: Binding<CGPoint?>
+        var linkTabCompletionTitle: String?
         var suggestionRange: NSRange?
         weak var textView: NSTextView?
         private var isApplyingMarkdownStyling = false
+        private var activeInlineCommands: Set<MarkdownInlineCommand> = []
 
-        init(text: Binding<String>, selectionRange: Binding<NSRange>, suggestionAnchor: Binding<CGPoint?>) {
+        init(
+            text: Binding<String>,
+            selectionRange: Binding<NSRange>,
+            typingStatus: Binding<MarkdownTypingStatus>,
+            suggestionAnchor: Binding<CGPoint?>
+        ) {
             self.text = text
             self.selectionRange = selectionRange
+            self.typingStatus = typingStatus
             self.suggestionAnchor = suggestionAnchor
         }
 
@@ -1694,31 +2112,263 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
 
         private func publishSelection(from textView: NSTextView) {
             let range = textView.selectedRange()
+            let status = typingStatus(in: textView, selectedRange: range)
             DispatchQueue.main.async {
                 self.selectionRange.wrappedValue = range
+                self.typingStatus.wrappedValue = status
             }
         }
 
         func toggleInlineCommand(_ command: MarkdownInlineCommand, in textView: NSTextView) {
             let selectedRange = textView.selectedRange()
-            guard selectedRange.length > 0 else { return }
+            guard selectedRange.length > 0 else {
+                if activeInlineCommands.contains(command) {
+                    activeInlineCommands.remove(command)
+                } else {
+                    activeInlineCommands.insert(command)
+                }
+                publishSelection(from: textView)
+                return
+            }
 
             let rawText = textView.string as NSString
             guard selectedRange.upperBound <= rawText.length else { return }
 
             let selectedText = rawText.substring(with: selectedRange)
-            let replacement = "\(command.openMarker)\(selectedText)\(command.closeMarker)"
-            textView.replaceCharacters(in: selectedRange, with: replacement)
+            guard let coreRange = selectedText.rangeOfNonWhitespace(in: selectedRange) else { return }
+
+            if unwrapInlineCommand(command, in: coreRange, textView: textView) {
+                return
+            }
+
+            let coreText = rawText.substring(with: coreRange)
+            let replacement = "\(command.openMarker)\(coreText)\(command.closeMarker)"
+            textView.replaceCharacters(in: coreRange, with: replacement)
 
             let newSelection = NSRange(
-                location: selectedRange.location + (command.openMarker as NSString).length,
-                length: (selectedText as NSString).length
+                location: coreRange.location + (command.openMarker as NSString).length,
+                length: (coreText as NSString).length
             )
             textView.setSelectedRange(newSelection)
             text.wrappedValue = textView.string
             selectionRange.wrappedValue = newSelection
+            typingStatus.wrappedValue = typingStatus(in: textView, selectedRange: newSelection)
             applyMarkdownStyling()
             updateSuggestionAnchor()
+        }
+
+        func completeActiveLinkFromTab(in textView: NSTextView) -> Bool {
+            guard let suggestionRange else { return false }
+
+            let rawText = textView.string as NSString
+            guard suggestionRange.location >= 0,
+                  suggestionRange.upperBound <= rawText.length
+            else { return false }
+
+            let replacement: String
+            if let linkTabCompletionTitle, !linkTabCompletionTitle.isEmpty {
+                replacement = "[[\(linkTabCompletionTitle)]]"
+            } else {
+                let current = rawText.substring(with: suggestionRange)
+                replacement = current.hasSuffix("]]") ? current : "\(current)]]"
+            }
+
+            textView.replaceCharacters(in: suggestionRange, with: replacement)
+            let newSelection = NSRange(location: suggestionRange.location + (replacement as NSString).length, length: 0)
+            textView.setSelectedRange(newSelection)
+            text.wrappedValue = textView.string
+            selectionRange.wrappedValue = newSelection
+            suggestionAnchor.wrappedValue = nil
+            typingStatus.wrappedValue = typingStatus(in: textView, selectedRange: newSelection)
+            applyMarkdownStyling()
+            updateSuggestionAnchor()
+            return true
+        }
+
+        func textView(
+            _ textView: NSTextView,
+            shouldChangeTextIn affectedCharRange: NSRange,
+            replacementString: String?
+        ) -> Bool {
+            guard !activeInlineCommands.isEmpty,
+                  affectedCharRange.length == 0,
+                  let replacementString,
+                  !replacementString.isEmpty
+            else { return true }
+
+            if replacementString.rangeOfCharacter(from: .whitespacesAndNewlines) != nil {
+                let closeLength = activeCommandCloseMarkersLength(at: affectedCharRange.location, in: textView)
+                activeInlineCommands.removeAll()
+
+                if closeLength > 0 {
+                    textView.replaceCharacters(
+                        in: NSRange(location: affectedCharRange.location + closeLength, length: 0),
+                        with: replacementString
+                    )
+                    let newSelection = NSRange(location: affectedCharRange.location + closeLength + (replacementString as NSString).length, length: 0)
+                    textView.setSelectedRange(newSelection)
+                    text.wrappedValue = textView.string
+                    selectionRange.wrappedValue = newSelection
+                    typingStatus.wrappedValue = typingStatus(in: textView, selectedRange: newSelection)
+                    applyMarkdownStyling()
+                    updateSuggestionAnchor()
+                    return false
+                }
+
+                return true
+            }
+
+            if isCaretInsideActiveFormattedRun(affectedCharRange.location, in: textView) {
+                return true
+            }
+
+            let orderedCommands = activeCommandsInRenderOrder
+            let openMarkers = orderedCommands.map(\.openMarker).joined()
+            let closeMarkers = orderedCommands.reversed().map(\.closeMarker).joined()
+            let replacement = "\(openMarkers)\(replacementString)\(closeMarkers)"
+            textView.replaceCharacters(in: affectedCharRange, with: replacement)
+
+            let newSelection = NSRange(
+                location: affectedCharRange.location + (openMarkers as NSString).length + (replacementString as NSString).length,
+                length: 0
+            )
+            textView.setSelectedRange(newSelection)
+            text.wrappedValue = textView.string
+            selectionRange.wrappedValue = newSelection
+            typingStatus.wrappedValue = typingStatus(in: textView, selectedRange: newSelection)
+            applyMarkdownStyling()
+            updateSuggestionAnchor()
+            return false
+        }
+
+        private var activeCommandsInRenderOrder: [MarkdownInlineCommand] {
+            [.bold, .italic, .underline, .highlight].filter { activeInlineCommands.contains($0) }
+        }
+
+        private func isCaretInsideActiveFormattedRun(_ location: Int, in textView: NSTextView) -> Bool {
+            if activeCommandCloseMarkersLength(at: location, in: textView) > 0 {
+                return true
+            }
+
+            let rawText = textView.string as NSString
+            let activeRange = Self.activeWordRange(around: NSRange(location: location, length: 0), in: rawText)
+            return activeCommandsInRenderOrder.allSatisfy { command in
+                Self.isRange(activeRange, wrappedBy: command.openMarker, close: command.closeMarker, in: rawText)
+            }
+        }
+
+        private func activeCommandCloseMarkersLength(at location: Int, in textView: NSTextView) -> Int {
+            let rawText = textView.string as NSString
+            guard location < rawText.length else { return 0 }
+
+            let closeMarkers = activeCommandsInRenderOrder.reversed().map(\.closeMarker).joined()
+            let closeLength = (closeMarkers as NSString).length
+            guard closeLength > 0,
+                  location + closeLength <= rawText.length
+            else { return 0 }
+
+            return rawText.substring(with: NSRange(location: location, length: closeLength)) == closeMarkers ? closeLength : 0
+        }
+
+        private func unwrapInlineCommand(_ command: MarkdownInlineCommand, in coreRange: NSRange, textView: NSTextView) -> Bool {
+            let rawText = textView.string as NSString
+            let openLength = (command.openMarker as NSString).length
+            let closeLength = (command.closeMarker as NSString).length
+            let openRange = NSRange(location: coreRange.location - openLength, length: openLength)
+            let closeRange = NSRange(location: coreRange.upperBound, length: closeLength)
+
+            guard openRange.location >= 0,
+                  closeRange.upperBound <= rawText.length,
+                  rawText.substring(with: openRange) == command.openMarker,
+                  rawText.substring(with: closeRange) == command.closeMarker
+            else { return false }
+
+            textView.replaceCharacters(in: closeRange, with: "")
+            textView.replaceCharacters(in: openRange, with: "")
+
+            let newSelection = NSRange(location: openRange.location, length: coreRange.length)
+            textView.setSelectedRange(newSelection)
+            text.wrappedValue = textView.string
+            selectionRange.wrappedValue = newSelection
+            typingStatus.wrappedValue = typingStatus(in: textView, selectedRange: newSelection)
+            applyMarkdownStyling()
+            updateSuggestionAnchor()
+            return true
+        }
+
+        func updateKeyboardFlags(_ flags: NSEvent.ModifierFlags, in textView: NSTextView) {
+            var status = typingStatus(in: textView, selectedRange: textView.selectedRange())
+            status.isCapsLockOn = flags.contains(.capsLock)
+            DispatchQueue.main.async {
+                self.typingStatus.wrappedValue = status
+            }
+        }
+
+        private func typingStatus(in textView: NSTextView, selectedRange: NSRange) -> MarkdownTypingStatus {
+            let rawText = textView.string as NSString
+            let activeRange = Self.activeWordRange(around: selectedRange, in: rawText)
+            return MarkdownTypingStatus(
+                isCapsLockOn: NSEvent.modifierFlags.contains(.capsLock),
+                isBold: activeInlineCommands.contains(.bold) || Self.isRange(activeRange, wrappedBy: "**", close: "**", in: rawText),
+                isItalic: activeInlineCommands.contains(.italic) || Self.isItalicRange(activeRange, in: rawText),
+                isUnderline: activeInlineCommands.contains(.underline) || Self.isRange(activeRange, wrappedBy: "<u>", close: "</u>", in: rawText),
+                isHighlight: activeInlineCommands.contains(.highlight) || Self.isRange(activeRange, wrappedBy: "==", close: "==", in: rawText)
+            )
+        }
+
+        private static func activeWordRange(around selectedRange: NSRange, in rawText: NSString) -> NSRange {
+            guard rawText.length > 0 else { return NSRange(location: 0, length: 0) }
+            if selectedRange.length > 0 {
+                return selectedRange
+            }
+
+            var start = min(selectedRange.location, rawText.length)
+            var end = start
+            let whitespace = CharacterSet.whitespacesAndNewlines
+
+            while start > 0 {
+                let range = NSRange(location: start - 1, length: 1)
+                guard let scalar = UnicodeScalar(rawText.character(at: start - 1)),
+                      !whitespace.contains(scalar)
+                else { break }
+                if rawText.substring(with: range) == "*" || rawText.substring(with: range) == ">" {
+                    break
+                }
+                start -= 1
+            }
+
+            while end < rawText.length {
+                guard let scalar = UnicodeScalar(rawText.character(at: end)),
+                      !whitespace.contains(scalar)
+                else { break }
+                if rawText.substring(with: NSRange(location: end, length: 1)) == "*" || rawText.substring(with: NSRange(location: end, length: 1)) == "<" {
+                    break
+                }
+                end += 1
+            }
+
+            return NSRange(location: start, length: max(0, end - start))
+        }
+
+        private static func isRange(_ range: NSRange, wrappedBy open: String, close: String, in rawText: NSString) -> Bool {
+            guard range.length > 0 else { return false }
+            let openLength = (open as NSString).length
+            let closeLength = (close as NSString).length
+            let openLocation = range.location - openLength
+            let closeLocation = range.upperBound
+            guard openLocation >= 0,
+                  closeLocation + closeLength <= rawText.length
+            else { return false }
+
+            return rawText.substring(with: NSRange(location: openLocation, length: openLength)) == open
+                && rawText.substring(with: NSRange(location: closeLocation, length: closeLength)) == close
+        }
+
+        private static func isItalicRange(_ range: NSRange, in rawText: NSString) -> Bool {
+            guard isRange(range, wrappedBy: "*", close: "*", in: rawText) else { return false }
+            let beforeBefore = range.location >= 2 ? rawText.substring(with: NSRange(location: range.location - 2, length: 2)) : ""
+            let afterAfter = range.upperBound + 2 <= rawText.length ? rawText.substring(with: NSRange(location: range.upperBound, length: 2)) : ""
+            return beforeBefore != "**" && afterAfter != "**"
         }
 
         func applyMarkdownStyling() {
@@ -1926,6 +2576,15 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
                 hideSyntax(in: textStorage, range: NSRange(location: matchRange.upperBound - 4, length: 4))
             }
 
+            applyRegex("==([^=]+)==", in: lineRange, rawText: rawText, textStorage: textStorage) { matchRange in
+                textStorage.addAttributes([
+                    .backgroundColor: NSColor.systemYellow.withAlphaComponent(0.32),
+                    .foregroundColor: NSColor.labelColor
+                ], range: matchRange)
+                hideSyntax(in: textStorage, range: NSRange(location: matchRange.location, length: 2))
+                hideSyntax(in: textStorage, range: NSRange(location: matchRange.upperBound - 2, length: 2))
+            }
+
             applyRegex("\\[\\[([^\\]]+)\\]\\]", in: lineRange, rawText: rawText, textStorage: textStorage) { matchRange in
                 textStorage.addAttributes([
                     .foregroundColor: NSColor.controlAccentColor,
@@ -2021,10 +2680,11 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
     }
 }
 
-private enum MarkdownInlineCommand {
+private enum MarkdownInlineCommand: Hashable {
     case bold
     case italic
     case underline
+    case highlight
 
     var openMarker: String {
         switch self {
@@ -2034,6 +2694,8 @@ private enum MarkdownInlineCommand {
             return "*"
         case .underline:
             return "<u>"
+        case .highlight:
+            return "=="
         }
     }
 
@@ -2045,20 +2707,128 @@ private enum MarkdownInlineCommand {
             return "*"
         case .underline:
             return "</u>"
+        case .highlight:
+            return "=="
         }
+    }
+}
+
+private extension String {
+    func removingFirstMarkdownHeading() -> String {
+        var lines = split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if let firstLine = lines.first,
+           firstLine.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("# ") {
+            lines.removeFirst()
+            while lines.first?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+                lines.removeFirst()
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    func rangeOfNonWhitespace(in selectedRange: NSRange) -> NSRange? {
+        let nsString = self as NSString
+        var location = selectedRange.location
+        var upperBound = selectedRange.upperBound
+        let whitespace = CharacterSet.whitespacesAndNewlines
+
+        while location < upperBound,
+              let scalar = UnicodeScalar(nsString.character(at: location)),
+              whitespace.contains(scalar) {
+            location += 1
+        }
+
+        while upperBound > location,
+              let scalar = UnicodeScalar(nsString.character(at: upperBound - 1)),
+              whitespace.contains(scalar) {
+            upperBound -= 1
+        }
+
+        guard upperBound > location else { return nil }
+        return NSRange(location: location, length: upperBound - location)
     }
 }
 
 private final class MarkdownNSTextView: NSTextView {
     weak var commandHandler: InlineMarkdownEditor.Coordinator?
 
+    @objc(toggleBoldface:)
+    func handleToggleBoldface(_ sender: Any?) {
+        commandHandler?.toggleInlineCommand(.bold, in: self)
+    }
+
+    @objc(toggleItalics:)
+    func handleToggleItalics(_ sender: Any?) {
+        commandHandler?.toggleInlineCommand(.italic, in: self)
+    }
+
+    override func underline(_ sender: Any?) {
+        commandHandler?.toggleInlineCommand(.underline, in: self)
+    }
+
+    @objc
+    func highlightSelection(_ sender: Any?) {
+        commandHandler?.toggleInlineCommand(.highlight, in: self)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.charactersIgnoringModifiers == "\t",
+           commandHandler?.completeActiveLinkFromTab(in: self) == true {
+            return
+        }
+
+        if handleFormattingKeyEquivalent(event) {
+            return
+        }
+
+        commandHandler?.updateKeyboardFlags(event.modifierFlags, in: self)
+        super.keyDown(with: event)
+        commandHandler?.updateKeyboardFlags(event.modifierFlags, in: self)
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        commandHandler?.updateKeyboardFlags(event.modifierFlags, in: self)
+        super.flagsChanged(with: event)
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.charactersIgnoringModifiers == "\t",
+           commandHandler?.completeActiveLinkFromTab(in: self) == true {
+            return true
+        }
+
+        if handleFormattingKeyEquivalent(event) {
+            return true
+        }
+
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event) ?? NSMenu()
+        if selectedRange().length > 0 {
+            if menu.items.contains(where: { $0.action == #selector(highlightSelection(_:)) }) == false {
+                menu.insertItem(.separator(), at: 0)
+                let item = NSMenuItem(
+                    title: "Highlight",
+                    action: #selector(highlightSelection(_:)),
+                    keyEquivalent: "h"
+                )
+                item.keyEquivalentModifierMask = [.command]
+                item.target = self
+                menu.insertItem(item, at: 0)
+            }
+        }
+        return menu
+    }
+
+    private func handleFormattingKeyEquivalent(_ event: NSEvent) -> Bool {
         guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
               !event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.option),
               !event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.control),
               let characters = event.charactersIgnoringModifiers?.lowercased()
         else {
-            return super.performKeyEquivalent(with: event)
+            return false
         }
 
         switch characters {
@@ -2071,8 +2841,11 @@ private final class MarkdownNSTextView: NSTextView {
         case "u":
             commandHandler?.toggleInlineCommand(.underline, in: self)
             return true
+        case "h":
+            commandHandler?.toggleInlineCommand(.highlight, in: self)
+            return true
         default:
-            return super.performKeyEquivalent(with: event)
+            return false
         }
     }
 }
@@ -2111,6 +2884,16 @@ private struct LinkSuggestionMenu: View {
                 }
                 .buttonStyle(.plain)
             }
+
+            HStack(spacing: 6) {
+                Text("Tab")
+                    .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                Image(systemName: "arrow.right.to.line")
+                    .font(.system(size: 9.5, weight: .bold))
+            }
+            .foregroundStyle(.secondary.opacity(0.72))
+            .padding(.horizontal, 10)
+            .frame(width: 220, height: 22, alignment: .trailing)
         }
         .padding(6)
         .background(.ultraThinMaterial)
@@ -2853,22 +3636,20 @@ private struct MarkdownPreview: View {
 
         let normalized = markdownByHighlightingWikiLinks(markdown)
             .replacingOccurrences(
-                of: #"==([^=]+)=="#,
-                with: "**$1**",
-                options: .regularExpression
-            )
-            .replacingOccurrences(
                 of: #"%%.*?%%"#,
                 with: "",
                 options: .regularExpression
             )
 
         let underlineMatches = underlinedTextMatches(in: normalized)
+        let highlightMatches = highlightedTextMatches(in: normalized)
         let normalizedWithoutUnderlineTags = normalized
             .replacingOccurrences(of: #"</?u>"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"==([^=]+)=="#, with: "$1", options: .regularExpression)
 
         if var attributed = try? AttributedString(markdown: normalizedWithoutUnderlineTags) {
             applyUnderline(matches: underlineMatches, to: &attributed)
+            applyHighlight(matches: highlightMatches, to: &attributed)
             return Text(attributed)
         }
 
@@ -2884,6 +3665,15 @@ private struct MarkdownPreview: View {
         }
     }
 
+    private func highlightedTextMatches(in markdown: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: #"==([^=]+)=="#) else { return [] }
+        let nsMarkdown = markdown as NSString
+        return regex.matches(in: markdown, range: NSRange(location: 0, length: nsMarkdown.length)).compactMap { match in
+            guard match.numberOfRanges > 1 else { return nil }
+            return nsMarkdown.substring(with: match.range(at: 1))
+        }
+    }
+
     private func applyUnderline(matches: [String], to attributed: inout AttributedString) {
         guard !matches.isEmpty else { return }
 
@@ -2891,6 +3681,17 @@ private struct MarkdownPreview: View {
         for match in matches where !match.isEmpty {
             guard let range = attributed[searchStart...].range(of: match) else { continue }
             attributed[range].underlineStyle = .single
+            searchStart = range.upperBound
+        }
+    }
+
+    private func applyHighlight(matches: [String], to attributed: inout AttributedString) {
+        guard !matches.isEmpty else { return }
+
+        var searchStart = attributed.startIndex
+        for match in matches where !match.isEmpty {
+            guard let range = attributed[searchStart...].range(of: match) else { continue }
+            attributed[range].backgroundColor = .yellow.opacity(0.42)
             searchStart = range.upperBound
         }
     }
@@ -3156,12 +3957,27 @@ private extension View {
 
 private struct BrainSidebarHeader: View {
     @ObservedObject var store: BrainStore
+    @State private var isTitleHovered = false
 
     var body: some View {
         HStack {
-            Label(store.activeBrain?.name ?? "Brain", systemImage: "brain.head.profile")
-                .font(.system(size: 14, weight: .semibold))
-                .lineLimit(1)
+            Button {
+                store.openLatestHighlightSummaryOrCompiler()
+            } label: {
+                Label(store.activeBrain?.name ?? "Brain", systemImage: "brain.head.profile")
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+                    .foregroundStyle(.primary.opacity(isTitleHovered ? 0.96 : 0.86))
+                    .shadow(color: .yellow.opacity(isTitleHovered ? 0.28 : 0), radius: isTitleHovered ? 7 : 0)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Open highlighted summary")
+            .onHover { hovering in
+                withAnimation(.easeOut(duration: 0.12)) {
+                    isTitleHovered = hovering
+                }
+            }
                 .contextMenu {
                     Button {
                         store.renameBrainFromUser()
@@ -3200,6 +4016,7 @@ private struct BrainSidebarHeader: View {
 private struct SidebarSearchField: View {
     @Binding var query: String
     var isFocused: FocusState<Bool>.Binding
+    var onDismiss: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 8) {
@@ -3213,10 +4030,14 @@ private struct SidebarSearchField: View {
                 .textFieldStyle(.plain)
                 .focused(isFocused)
 
-            if !query.isEmpty {
+            if !query.isEmpty || onDismiss != nil {
                 Button {
-                    query = ""
-                    isFocused.wrappedValue = true
+                    if query.isEmpty {
+                        onDismiss?()
+                    } else {
+                        query = ""
+                        isFocused.wrappedValue = true
+                    }
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 13, weight: .semibold))
@@ -3500,6 +4321,164 @@ private struct ConfigurationField<Field: View>: View {
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 14))
         }
+    }
+}
+
+private struct UsedModelsConfigurationView: View {
+    @ObservedObject var store: BrainStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var promptModel: AssistantModel
+    @State private var summaryModel: HighlightSummaryModel
+    @State private var ollamaBaseURL: String
+    @State private var ollamaModel: String
+
+    init(store: BrainStore) {
+        self.store = store
+        let ollama = store.ollamaConfigurationSnapshot
+        _promptModel = State(initialValue: store.selectedAssistantModel)
+        _summaryModel = State(initialValue: store.selectedHighlightSummaryModel)
+        _ollamaBaseURL = State(initialValue: ollama.baseURL)
+        _ollamaModel = State(initialValue: ollama.model)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 14) {
+                Image(systemName: "cpu")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.74))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Models Used Where")
+                        .font(.system(size: 24, weight: .bold))
+                    Text("Choose the model used for editing prompts and highlight summaries.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 14) {
+                ConfigurationField(title: "Prompt Editing Model") {
+                    Picker("Prompt Editing Model", selection: $promptModel) {
+                        ForEach(AssistantModel.allCases) { model in
+                            Text(model.title).tag(model)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
+
+                ConfigurationField(title: "Highlight Compile Model") {
+                    Picker("Highlight Compile Model", selection: $summaryModel) {
+                        ForEach(HighlightSummaryModel.allCases) { model in
+                            Text(model.title).tag(model)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
+
+                ConfigurationField(title: "Ollama URL") {
+                    TextField(BrainStore.defaultOllamaURL, text: $ollamaBaseURL)
+                }
+
+                ConfigurationField(title: "Ollama Model") {
+                    TextField(BrainStore.defaultOllamaModel, text: $ollamaModel)
+                }
+            }
+
+            HStack(spacing: 12) {
+                Button {
+                    store.isShowingUsedModelsConfiguration = false
+                    dismiss()
+                } label: {
+                    Text("Cancel")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+
+                Button {
+                    store.saveUsedModelConfiguration(
+                        promptModel: promptModel,
+                        summaryModel: summaryModel,
+                        ollamaBaseURL: ollamaBaseURL,
+                        ollamaModel: ollamaModel
+                    )
+                    dismiss()
+                } label: {
+                    Text("Save")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(.top, 4)
+        }
+        .padding(28)
+    }
+}
+
+private struct HighlightSummaryCompilerView: View {
+    @ObservedObject var store: BrainStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedModel: HighlightSummaryModel
+
+    init(store: BrainStore) {
+        self.store = store
+        _selectedModel = State(initialValue: store.selectedHighlightSummaryModel)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 14) {
+                Image(systemName: "text.badge.checkmark")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.76))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Compile Highlights")
+                        .font(.system(size: 24, weight: .bold))
+                    Text("Choose the model before generating the read-only summary.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            ConfigurationField(title: "Model") {
+                Picker("Model", selection: $selectedModel) {
+                    ForEach(HighlightSummaryModel.allCases) { model in
+                        Text(model.title).tag(model)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+            }
+
+            HStack(spacing: 12) {
+                Button {
+                    store.isShowingHighlightSummaryCompiler = false
+                    dismiss()
+                } label: {
+                    Text("Cancel")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+
+                Button {
+                    store.compileCurrentHighlightSummary()
+                    dismiss()
+                } label: {
+                    Text("Compile")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+                .disabled(store.isCompilingHighlightSummary)
+            }
+        }
+        .padding(28)
     }
 }
 

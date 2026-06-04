@@ -35,9 +35,16 @@ final class BrainStore: ObservableObject {
     @Published var isUsingWebSearch = false
     @Published var isShowingModelConfiguration = false
     @Published var isShowingMarkdownHelp = false
+    @Published var isShowingUsedModelsConfiguration = false
+    @Published var isShowingHighlightSummaryCompiler = false
     @Published var pendingAssistantPreview: AssistantPreview?
     @Published var activeSearchHighlight: SearchHighlight?
     @Published var assistantAttachment: PromptAttachment?
+    @Published var generatedSummaries: [HighlightSummary] = []
+    @Published var currentHighlightSummary: HighlightSummary?
+    @Published var isShowingHomePage = false
+    @Published var selectedHighlightSummaryModel: HighlightSummaryModel = .mistral
+    @Published var isCompilingHighlightSummary = false
     @Published private(set) var mistralBudgetSpentUSD = 0.0
     @Published private(set) var mistralOCRPagesUsed = 0
 
@@ -53,10 +60,15 @@ final class BrainStore: ObservableObject {
     private let groqAPIKeyKey = "Assistant.GroqAPIKey"
     private let groqModelKey = "Assistant.GroqModel"
     private let selectedAssistantModelKey = "Assistant.SelectedModel"
+    private let selectedHighlightSummaryModelKey = "Assistant.HighlightSummaryModel"
+    private let ollamaModelKey = "Assistant.OllamaModel"
+    private let ollamaURLKey = "Assistant.OllamaURL"
     private var mistralAPIKey = ""
     private var mistralModel = BrainStore.defaultMistralModel
     private var groqAPIKey = ""
     private var groqModel = BrainStore.defaultGroqModel
+    private var ollamaModel = BrainStore.defaultOllamaModel
+    private var ollamaURL = BrainStore.defaultOllamaURL
     private var autosaveTask: Task<Void, Never>?
     private var pendingAssistantInsertion: PendingAssistantInsertion?
     private var isApplyingAssistantOutput = false
@@ -65,6 +77,8 @@ final class BrainStore: ObservableObject {
 
     static let defaultMistralModel = "mistral-large-latest"
     static let defaultGroqModel = "llama-3.3-70b-versatile"
+    static let defaultOllamaModel = "llama3.1"
+    static let defaultOllamaURL = "http://localhost:11434"
 
     private static let mistralBudgetUSD = 10.0
     private static let mistralInputPricePerMillionTokens = 0.50
@@ -132,6 +146,41 @@ final class BrainStore: ObservableObject {
         case .groq:
             return groqAPIKey.isEmpty ? .offline : .online
         }
+    }
+
+    var isViewingHighlightSummary: Bool {
+        currentHighlightSummary != nil
+    }
+
+    var isViewingGeneratedPage: Bool {
+        currentHighlightSummary != nil || isShowingHomePage
+    }
+
+    var canCompileCurrentHighlights: Bool {
+        !highlightedTextFragments(in: content).isEmpty && currentNoteID != nil && !isCompilingHighlightSummary
+    }
+
+    var homeMarkdown: String {
+        guard !generatedSummaries.isEmpty else {
+            return """
+            # Home
+
+            No highlight summaries yet.
+
+            Highlight text in a page, then compile it to build this home page.
+            """
+        }
+
+        let summaries = generatedSummaries.map { summary in
+            """
+            ## \(summary.title)
+
+            \(summary.markdown.removingFirstMarkdownHeading())
+            """
+        }
+        .joined(separator: "\n\n---\n\n")
+
+        return "# Home\n\n\(summaries)"
     }
 
     private var estimatedMistralBudgetUSD: Double {
@@ -264,6 +313,8 @@ final class BrainStore: ObservableObject {
                 noteIdentityDatabase = try NoteIdentityDatabase(vaultFolderURL: folderURL)
                 resetDraft()
                 try loadNotes()
+                try loadHighlightSummaries()
+                openHomePage()
                 recordRecentVault(note: notes.first)
                 status = "\(brain.vault.name) opened"
             } catch {
@@ -281,6 +332,9 @@ final class BrainStore: ObservableObject {
         pendingAssistantInsertion = nil
         pendingAssistantPreview = nil
         noteIdentityDatabase = nil
+        currentHighlightSummary = nil
+        isShowingHomePage = false
+        generatedSummaries = []
         activeBrain = nil
         notes = []
         selectedNoteID = nil
@@ -293,6 +347,8 @@ final class BrainStore: ObservableObject {
     func newDraft() {
         pendingAssistantInsertion = nil
         pendingAssistantPreview = nil
+        currentHighlightSummary = nil
+        isShowingHomePage = false
         currentNoteID = nil
         selectedNoteID = nil
         title = uniqueTitle(for: "Untitled")
@@ -305,6 +361,8 @@ final class BrainStore: ObservableObject {
     private func resetDraft() {
         pendingAssistantInsertion = nil
         pendingAssistantPreview = nil
+        currentHighlightSummary = nil
+        isShowingHomePage = false
         currentNoteID = nil
         selectedNoteID = nil
         title = "Untitled"
@@ -358,6 +416,8 @@ final class BrainStore: ObservableObject {
 
     func openNote(id: Note.ID) {
         activeSearchHighlight = nil
+        currentHighlightSummary = nil
+        isShowingHomePage = false
         if let currentNoteID, currentNoteID != id {
             autosaveTask?.cancel()
             autosaveTask = nil
@@ -425,6 +485,7 @@ final class BrainStore: ObservableObject {
                     ? existingURL!
                     : markdownNoteURL(for: note, in: brain)
                 try writeMarkdownNote(note, to: targetURL)
+                try persistHighlightedText(from: note, in: brain)
                 try noteIdentityDatabase?.upsert(
                     noteID: note.id,
                     title: note.title,
@@ -458,6 +519,84 @@ final class BrainStore: ObservableObject {
         isShowingModelConfiguration = true
     }
 
+    func showUsedModelsConfiguration() {
+        isShowingUsedModelsConfiguration = true
+    }
+
+    func showHighlightSummaryCompiler() {
+        compileCurrentHighlightSummary()
+    }
+
+    func openHomePage() {
+        autosaveTask?.cancel()
+        autosaveTask = nil
+        pendingAssistantInsertion = nil
+        pendingAssistantPreview = nil
+        activeSearchHighlight = nil
+        currentHighlightSummary = nil
+        isShowingHomePage = true
+        currentNoteID = nil
+        selectedNoteID = nil
+        title = "Home"
+        content = homeMarkdown
+        status = "Home opened"
+    }
+
+    func openHighlightSummary(id: HighlightSummary.ID) {
+        guard let summary = generatedSummaries.first(where: { $0.id == id }) else { return }
+        autosaveTask?.cancel()
+        autosaveTask = nil
+        pendingAssistantInsertion = nil
+        pendingAssistantPreview = nil
+        activeSearchHighlight = nil
+        currentHighlightSummary = summary
+        isShowingHomePage = false
+        currentNoteID = nil
+        selectedNoteID = nil
+        title = summary.title
+        content = summary.markdown
+        status = "Summary opened"
+    }
+
+    func openLatestHighlightSummaryOrCompiler() {
+        openHomePage()
+    }
+
+    func compileCurrentHighlightSummary() {
+        compileCurrentHighlightSummary(using: selectedHighlightSummaryModel)
+    }
+
+    private func compileCurrentHighlightSummary(using model: HighlightSummaryModel) {
+        guard !isCompilingHighlightSummary else { return }
+        guard let sourceNoteID = currentNoteID else {
+            status = "Open a page with highlights first"
+            return
+        }
+
+        let sourceTitle = displayTitle(for: title)
+        let sourceMarkdown = content
+        let highlights = highlightedTextFragments(in: sourceMarkdown)
+        guard !highlights.isEmpty else {
+            status = "Highlight text before compiling a summary"
+            return
+        }
+
+        selectedHighlightSummaryModel = model
+        isShowingHighlightSummaryCompiler = false
+        isCompilingHighlightSummary = true
+        status = "\(model.title) is compiling highlights"
+        saveCurrentNote(statusText: "Highlights saved")
+
+        Task {
+            await generateHighlightSummary(
+                sourceNoteID: sourceNoteID,
+                sourceTitle: sourceTitle,
+                highlights: highlights,
+                model: model
+            )
+        }
+    }
+
     var assistantConfigurationSnapshot: AssistantConfiguration {
         AssistantConfiguration(
             mistralAPIKey: mistralAPIKey,
@@ -465,6 +604,34 @@ final class BrainStore: ObservableObject {
             groqAPIKey: groqAPIKey,
             groqModel: groqModel
         )
+    }
+
+    var ollamaConfigurationSnapshot: OllamaConfiguration {
+        OllamaConfiguration(
+            model: ollamaModel,
+            baseURL: ollamaURL
+        )
+    }
+
+    func saveUsedModelConfiguration(
+        promptModel: AssistantModel,
+        summaryModel: HighlightSummaryModel,
+        ollamaBaseURL: String,
+        ollamaModel: String
+    ) {
+        selectedAssistantModel = promptModel
+        selectedHighlightSummaryModel = summaryModel
+        self.ollamaURL = cleanOllamaURL(ollamaBaseURL)
+        let cleanOllamaModel = ollamaModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.ollamaModel = cleanOllamaModel.isEmpty ? Self.defaultOllamaModel : cleanOllamaModel
+
+        do {
+            try saveAssistantConfiguration()
+            isShowingUsedModelsConfiguration = false
+            status = "Model usage saved"
+        } catch {
+            status = error.localizedDescription
+        }
     }
 
     func saveModelConfiguration(
@@ -1518,6 +1685,69 @@ final class BrainStore: ObservableObject {
         }
     }
 
+    private func generateHighlightSummary(
+        sourceNoteID: Note.ID,
+        sourceTitle: String,
+        highlights: [String],
+        model: HighlightSummaryModel
+    ) async {
+        let startedAt = Date()
+        defer {
+            isCompilingHighlightSummary = false
+        }
+
+        do {
+            let prompt = highlightSummaryPrompt(
+                sourceTitle: sourceTitle,
+                highlights: highlights
+            )
+            let result: ChatCompletionResult
+            switch model {
+            case .mistral:
+                result = try await generateWithMistral(
+                    system: highlightSummaryInstructions(),
+                    user: prompt,
+                    maxTokens: Self.maxAssistantOutputTokens
+                )
+                recordMistralUsage(
+                    inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
+                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+                )
+            case .ollama:
+                result = try await generateWithOllama(
+                    system: highlightSummaryInstructions(),
+                    user: prompt
+                )
+            }
+
+            let duration = Date().timeIntervalSince(startedAt)
+            let markdown = normalizedHighlightSummaryMarkdown(
+                result.content,
+                sourceTitle: sourceTitle
+            )
+            let summary = HighlightSummary(
+                id: "summary-\(sourceNoteID)",
+                sourceNoteID: sourceNoteID,
+                sourceTitle: sourceTitle,
+                title: "Summary of \(sourceTitle)",
+                markdown: markdown,
+                compiledAt: Date(),
+                compileDuration: duration,
+                modelTitle: model.displayModelName(
+                    mistralModel: mistralModel,
+                    ollamaModel: ollamaModel
+                )
+            )
+
+            try persistHighlightSummary(summary)
+            upsertHighlightSummary(summary)
+            openHomePage()
+            status = "Summary compiled"
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
     private func applyAssistantDocumentOutput(_ output: String, prompt: String) {
         let cleanOutput = cleanedAssistantMarkdown(output)
         guard !cleanOutput.isEmpty else { return }
@@ -1540,6 +1770,18 @@ final class BrainStore: ObservableObject {
     }
 
     private func generateWithMistral(prompt: String) async throws -> ChatCompletionResult {
+        try await generateWithMistral(
+            system: assistantInstructions(),
+            user: assistantInput(for: prompt),
+            maxTokens: Self.maxAssistantOutputTokens
+        )
+    }
+
+    private func generateWithMistral(
+        system: String,
+        user: String,
+        maxTokens: Int
+    ) async throws -> ChatCompletionResult {
         guard !mistralAPIKey.isEmpty else {
             throw AssistantError.missingConfiguration("Add a Mistral API key in Settings > Configure Model.")
         }
@@ -1553,15 +1795,15 @@ final class BrainStore: ObservableObject {
             "messages": [
                 [
                     "role": "system",
-                    "content": assistantInstructions()
+                    "content": system
                 ],
                 [
                     "role": "user",
-                    "content": assistantInput(for: prompt)
+                    "content": user
                 ]
             ],
             "temperature": 0.35,
-            "max_tokens": Self.maxAssistantOutputTokens,
+            "max_tokens": maxTokens,
             "stream": false
         ])
 
@@ -1610,6 +1852,46 @@ final class BrainStore: ObservableObject {
         return try extractChatCompletionResult(from: data)
     }
 
+    private func generateWithOllama(system: String, user: String) async throws -> ChatCompletionResult {
+        let base = cleanOllamaURL(ollamaURL)
+        guard let url = URL(string: base)?.appendingPathComponent("api/chat") else {
+            throw AssistantError.missingConfiguration("Set a valid Ollama URL in Settings > Models Used Where.")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 180
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": ollamaModel,
+            "messages": [
+                [
+                    "role": "system",
+                    "content": system
+                ],
+                [
+                    "role": "user",
+                    "content": user
+                ]
+            ],
+            "stream": false,
+            "options": [
+                "temperature": 0.35
+            ]
+        ])
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validateHTTPResponse(response, data: data)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let message = json["message"] as? [String: Any],
+              let content = message["content"] as? String
+        else {
+            throw AssistantError.requestFailed("Ollama returned no Markdown.")
+        }
+
+        return ChatCompletionResult(content: content, inputTokens: nil, outputTokens: nil)
+    }
+
     private func assistantInstructions() -> String {
         """
         You are Zirn's writing assistant. You edit the user's current Markdown document in place.
@@ -1626,6 +1908,54 @@ final class BrainStore: ObservableObject {
         Output polished Markdown with clear headings, short paragraphs, and useful lists only when lists are natural.
         Use Obsidian-style wiki links like [[Page Title]] only when linking is genuinely useful.
         """
+    }
+
+    private func highlightSummaryInstructions() -> String {
+        """
+        You are Zirn's highlight compiler. You turn selected highlighted excerpts into one coherent non-editable Markdown summary.
+        Use only the supplied highlighted excerpts as factual source material.
+        Preserve the user's writing style, rhythm, density, and vocabulary when possible.
+        Return Markdown only. Do not include meta commentary, apologies, or code fences.
+        """
+    }
+
+    private func highlightSummaryPrompt(sourceTitle: String, highlights: [String]) -> String {
+        let highlightBody = highlights.enumerated()
+            .map { index, text in "\(index + 1). \(text)" }
+            .joined(separator: "\n")
+
+        return """
+        Source session title:
+        \(sourceTitle)
+
+        Required heading:
+        # Summary of \(sourceTitle)
+
+        Highlighted excerpts:
+        \(highlightBody)
+
+        Task:
+        Compile the highlighted excerpts into a coherent document with the required heading. Prefer polished prose over a mechanical list unless a list is genuinely clearer.
+
+        Learned user writing samples:
+        \(learnedStyleMemory())
+
+        Correction-derived preferences, strongest first:
+        \(learnedCorrectionMemory())
+        """
+    }
+
+    private func normalizedHighlightSummaryMarkdown(_ markdown: String, sourceTitle: String) -> String {
+        let clean = cleanedAssistantMarkdown(markdown)
+        let requiredHeading = "# Summary of \(sourceTitle)"
+        guard !clean.isEmpty else { return requiredHeading }
+
+        let lines = clean.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let first = lines.first else { return requiredHeading }
+        if first.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("# ") {
+            return ([requiredHeading] + lines.dropFirst().map(String.init)).joined(separator: "\n")
+        }
+        return "\(requiredHeading)\n\n\(clean)"
     }
 
     private func assistantInput(for prompt: String) -> String {
@@ -1778,6 +2108,11 @@ final class BrainStore: ObservableObject {
         return String(format: "$%.2f", value)
     }
 
+    private func cleanOllamaURL(_ value: String) -> String {
+        let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean.isEmpty ? Self.defaultOllamaURL : clean.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
     private func loadAssistantConfiguration() {
         let defaults = UserDefaults.standard
         if let rawModel = defaults.string(forKey: selectedAssistantModelKey),
@@ -1785,6 +2120,12 @@ final class BrainStore: ObservableObject {
             selectedAssistantModel = model
         } else {
             selectedAssistantModel = .mistral
+        }
+        if let rawSummaryModel = defaults.string(forKey: selectedHighlightSummaryModelKey),
+           let summaryModel = HighlightSummaryModel(rawValue: rawSummaryModel) {
+            selectedHighlightSummaryModel = summaryModel
+        } else {
+            selectedHighlightSummaryModel = .mistral
         }
         mistralAPIKey = defaults.string(forKey: mistralAPIKeyKey) ?? ""
         mistralModel = defaults.string(forKey: mistralModelKey) ?? Self.defaultMistralModel
@@ -1794,19 +2135,37 @@ final class BrainStore: ObservableObject {
         defaults.removeObject(forKey: openAIModelKey)
         groqAPIKey = defaults.string(forKey: groqAPIKeyKey) ?? ""
         groqModel = defaults.string(forKey: groqModelKey) ?? Self.defaultGroqModel
+        ollamaModel = defaults.string(forKey: ollamaModelKey) ?? Self.defaultOllamaModel
+        ollamaURL = cleanOllamaURL(defaults.string(forKey: ollamaURLKey) ?? Self.defaultOllamaURL)
     }
 
     private func saveAssistantConfiguration() throws {
         let defaults = UserDefaults.standard
         defaults.set(selectedAssistantModel.rawValue, forKey: selectedAssistantModelKey)
+        defaults.set(selectedHighlightSummaryModel.rawValue, forKey: selectedHighlightSummaryModelKey)
         defaults.set(mistralAPIKey, forKey: mistralAPIKeyKey)
         defaults.set(mistralModel, forKey: mistralModelKey)
         defaults.set(mistralBudgetSpentUSD, forKey: mistralBudgetSpentUSDKey)
         defaults.set(mistralOCRPagesUsed, forKey: mistralOCRPagesUsedKey)
         defaults.set(groqAPIKey, forKey: groqAPIKeyKey)
         defaults.set(groqModel, forKey: groqModelKey)
+        defaults.set(ollamaModel, forKey: ollamaModelKey)
+        defaults.set(cleanOllamaURL(ollamaURL), forKey: ollamaURLKey)
         defaults.removeObject(forKey: openAIAPIKeyKey)
         defaults.removeObject(forKey: openAIModelKey)
+        try syncBrainAIPreferencesIfPossible()
+    }
+
+    private func syncBrainAIPreferencesIfPossible() throws {
+        guard let activeBrain else { return }
+        var brain = try readBrain(from: activeBrain.brainURL)
+        brain.ai.provider = selectedAssistantModel.rawValue
+        brain.ai.mistralModel = mistralModel
+        brain.ai.groqModel = groqModel
+        brain.ai.ollamaModel = ollamaModel
+        brain.ai.ollamaURL = cleanOllamaURL(ollamaURL)
+        brain.vault.updatedAt = Date()
+        try writeBrain(brain, to: activeBrain.brainURL)
     }
 
     private func searchPreview(
@@ -2117,6 +2476,140 @@ final class BrainStore: ObservableObject {
 
     private func imagesFolderURL(for brain: BrainSummary) -> URL {
         brain.folderURL.appendingPathComponent("Images", isDirectory: true)
+    }
+
+    private func hiddenHighlightsFolderURL(for brain: BrainSummary) -> URL {
+        brain.folderURL
+            .appendingPathComponent(".zirn", isDirectory: true)
+            .appendingPathComponent("Highlights", isDirectory: true)
+    }
+
+    private func hiddenSummariesFolderURL(for brain: BrainSummary) -> URL {
+        brain.folderURL
+            .appendingPathComponent(".zirn", isDirectory: true)
+            .appendingPathComponent("Summaries", isDirectory: true)
+    }
+
+    private func loadHighlightSummaries() throws {
+        guard let brain = activeBrain else { return }
+        let folder = hiddenSummariesFolderURL(for: brain)
+        guard FileManager.default.fileExists(atPath: folder.path) else {
+            generatedSummaries = []
+            return
+        }
+
+        let summaryURLs = try FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: nil
+        )
+        .filter { $0.pathExtension == "md" }
+
+        generatedSummaries = try summaryURLs
+            .compactMap { try readHighlightSummary(from: $0) }
+            .sorted { $0.compiledAt > $1.compiledAt }
+    }
+
+    private func upsertHighlightSummary(_ summary: HighlightSummary) {
+        generatedSummaries.removeAll { $0.id == summary.id }
+        generatedSummaries.insert(summary, at: 0)
+        generatedSummaries.sort { $0.compiledAt > $1.compiledAt }
+    }
+
+    private func persistHighlightSummary(_ summary: HighlightSummary) throws {
+        guard let brain = activeBrain else { return }
+        let folder = hiddenSummariesFolderURL(for: brain)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        let metadata = HighlightSummaryMetadata(
+            id: summary.id,
+            sourceNoteID: summary.sourceNoteID,
+            sourceTitle: summary.sourceTitle,
+            title: summary.title,
+            compiledAt: summary.compiledAt,
+            compileDuration: summary.compileDuration,
+            modelTitle: summary.modelTitle
+        )
+        let metadataData = try encoder.encode(metadata)
+        guard let metadataText = String(data: metadataData, encoding: .utf8) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        let fileURL = folder.appendingPathComponent("\(summary.id).md")
+        let markdown = "---\n\(metadataText)\n---\n\n\(summary.markdown)"
+        try Data(markdown.utf8).write(to: fileURL, options: .atomic)
+    }
+
+    private func readHighlightSummary(from url: URL) throws -> HighlightSummary? {
+        guard let text = String(data: try Data(contentsOf: url), encoding: .utf8),
+              text.hasPrefix("---\n"),
+              let metadataEnd = text.range(
+                of: "\n---\n",
+                range: text.index(text.startIndex, offsetBy: 4)..<text.endIndex
+              )
+        else {
+            return nil
+        }
+
+        let metadataText = String(text[text.index(text.startIndex, offsetBy: 4)..<metadataEnd.lowerBound])
+        let metadata = try decoder.decode(
+            HighlightSummaryMetadata.self,
+            from: Data(metadataText.utf8)
+        )
+        var body = String(text[metadataEnd.upperBound...])
+        if body.hasPrefix("\n") {
+            body.removeFirst()
+        }
+
+        return HighlightSummary(
+            id: metadata.id,
+            sourceNoteID: metadata.sourceNoteID,
+            sourceTitle: metadata.sourceTitle,
+            title: metadata.title,
+            markdown: body,
+            compiledAt: metadata.compiledAt,
+            compileDuration: metadata.compileDuration,
+            modelTitle: metadata.modelTitle
+        )
+    }
+
+    private func persistHighlightedText(from note: Note, in brain: BrainSummary) throws {
+        let highlights = highlightedTextFragments(in: note.content)
+        let folder = hiddenHighlightsFolderURL(for: brain)
+        let fileURL = folder.appendingPathComponent("\(note.id).md")
+
+        guard !highlights.isEmpty else {
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                try FileManager.default.removeItem(at: fileURL)
+            }
+            return
+        }
+
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let body = highlights.enumerated()
+            .map { index, text in "\(index + 1). \(text)" }
+            .joined(separator: "\n")
+        let markdown = """
+        # Highlights for \(note.title)
+
+        Source note: \(note.id)
+        Updated: \(ISO8601DateFormatter().string(from: note.updatedAt))
+
+        \(body)
+        """
+        try Data(markdown.utf8).write(to: fileURL, options: .atomic)
+    }
+
+    private func highlightedTextFragments(in markdown: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: #"==([^=]+)=="#) else { return [] }
+        let nsMarkdown = markdown as NSString
+        let fullRange = NSRange(location: 0, length: nsMarkdown.length)
+
+        return regex.matches(in: markdown, range: fullRange).compactMap { match in
+            guard match.numberOfRanges > 1 else { return nil }
+            let text = nsMarkdown.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
+        }
     }
 
     private func appendMarkdownBlock(_ markdown: String) {
@@ -2473,6 +2966,11 @@ struct AssistantConfiguration: Equatable {
     let groqModel: String
 }
 
+struct OllamaConfiguration: Equatable {
+    let model: String
+    let baseURL: String
+}
+
 struct AssistantPreview: Identifiable, Equatable {
     let id = UUID()
     let prompt: String
@@ -2485,6 +2983,52 @@ private struct ChatCompletionResult {
     let content: String
     let inputTokens: Int?
     let outputTokens: Int?
+}
+
+struct HighlightSummary: Identifiable, Equatable {
+    let id: String
+    let sourceNoteID: String
+    let sourceTitle: String
+    let title: String
+    let markdown: String
+    let compiledAt: Date
+    let compileDuration: TimeInterval
+    let modelTitle: String
+}
+
+private struct HighlightSummaryMetadata: Codable {
+    let id: String
+    let sourceNoteID: String
+    let sourceTitle: String
+    let title: String
+    let compiledAt: Date
+    let compileDuration: TimeInterval
+    let modelTitle: String
+}
+
+enum HighlightSummaryModel: String, CaseIterable, Identifiable {
+    case mistral
+    case ollama
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .mistral:
+            return "Mistral"
+        case .ollama:
+            return "Ollama"
+        }
+    }
+
+    func displayModelName(mistralModel: String, ollamaModel: String) -> String {
+        switch self {
+        case .mistral:
+            return "Mistral \(mistralModel)"
+        case .ollama:
+            return "Ollama \(ollamaModel)"
+        }
+    }
 }
 
 enum AssistantModel: String, CaseIterable, Identifiable {
@@ -2622,4 +3166,18 @@ struct BrainAppCompatibility: Codable {
     var appID: String
     var minAppVersion: String
     var lastOpenedWith: String
+}
+
+private extension String {
+    func removingFirstMarkdownHeading() -> String {
+        var lines = split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if let firstLine = lines.first,
+           firstLine.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("# ") {
+            lines.removeFirst()
+            while lines.first?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+                lines.removeFirst()
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
 }
