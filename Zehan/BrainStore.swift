@@ -21,6 +21,7 @@ final class BrainStore: ObservableObject {
     @Published var activeBrain: BrainSummary?
     @Published var notes: [NoteSummary] = []
     @Published var selectedNoteID: Note.ID?
+    @Published var selectedSidebarGroupID: SidebarItem.ID?
     @Published var currentNoteID: Note.ID?
     @Published var title = "Untitled"
     @Published var content = starterMarkdown
@@ -43,8 +44,10 @@ final class BrainStore: ObservableObject {
     @Published var generatedSummaries: [HighlightSummary] = []
     @Published var currentHighlightSummary: HighlightSummary?
     @Published var isShowingHomePage = false
+    @Published var sidebarItems: [SidebarItem] = []
     @Published var selectedHighlightSummaryModel: HighlightSummaryModel = .mistral
     @Published var isCompilingHighlightSummary = false
+    @Published var isGeneratingHomePage = false
     @Published private(set) var mistralBudgetSpentUSD = 0.0
     @Published private(set) var mistralOCRPagesUsed = 0
 
@@ -72,7 +75,9 @@ final class BrainStore: ObservableObject {
     private var ollamaURL = BrainStore.defaultOllamaURL
     private var autosaveTask: Task<Void, Never>?
     private var homeCompilationTask: Task<Void, Never>?
+    private var activeHomeGenerationID: UUID?
     private var needsHomeRegenerationAfterCurrentCompile = false
+    private var needsForcedHomeRegenerationAfterCurrentCompile = false
     private var pendingAssistantInsertion: PendingAssistantInsertion?
     private var isApplyingAssistantOutput = false
     private var noteIdentityDatabase: NoteIdentityDatabase?
@@ -88,6 +93,7 @@ final class BrainStore: ObservableObject {
     private static let mistralOutputPricePerMillionTokens = 1.50
     private static let maxAssistantOutputTokens = 4096
     private static let homeCompilationDebounceNanoseconds: UInt64 = 1_500_000_000
+    private static let homeCompilationAfterAutosaveNanoseconds: UInt64 = 300_000_000
     private static let homeDirectCharacterBudget = 18_000
     private static let homeNoteCondenseCharacterLimit = 4_500
     private static let estimatedCharactersPerToken = 4
@@ -353,7 +359,9 @@ final class BrainStore: ObservableObject {
         generatedSummaries = []
         activeBrain = nil
         notes = []
+        sidebarItems = []
         selectedNoteID = nil
+        selectedSidebarGroupID = nil
         graphLinks = []
         searchIndex = []
         resetDraft()
@@ -367,6 +375,7 @@ final class BrainStore: ObservableObject {
         isShowingHomePage = false
         currentNoteID = nil
         selectedNoteID = nil
+        selectedSidebarGroupID = nil
         title = uniqueTitle(for: "Untitled")
         content = contentBySettingDocumentTitle(title, in: Self.starterMarkdown)
         if activeBrain != nil {
@@ -381,6 +390,7 @@ final class BrainStore: ObservableObject {
         isShowingHomePage = false
         currentNoteID = nil
         selectedNoteID = nil
+        selectedSidebarGroupID = nil
         title = "Untitled"
         content = Self.starterMarkdown
     }
@@ -391,6 +401,7 @@ final class BrainStore: ObservableObject {
         content = contentBySettingDocumentTitle(uniqueTitle, in: content)
         updateCurrentNoteSummaryTitle(to: uniqueTitle)
         scheduleAutosave()
+        scheduleLiveHomePageCompilation()
     }
 
     func updateContentFromEditor(_ newContent: String) {
@@ -406,6 +417,7 @@ final class BrainStore: ObservableObject {
         }
         learnFromUserCorrectionIfNeeded(revisedContent: newContent)
         scheduleAutosave()
+        scheduleLiveHomePageCompilation()
     }
 
     func showPageSearch() {
@@ -434,6 +446,7 @@ final class BrainStore: ObservableObject {
         activeSearchHighlight = nil
         currentHighlightSummary = nil
         isShowingHomePage = false
+        selectedSidebarGroupID = nil
         if let currentNoteID, currentNoteID != id {
             autosaveTask?.cancel()
             autosaveTask = nil
@@ -525,7 +538,7 @@ final class BrainStore: ObservableObject {
                     )
                 )
                 status = statusText
-                scheduleLiveHomePageCompilation()
+                scheduleLiveHomePageCompilation(delay: Self.homeCompilationAfterAutosaveNanoseconds)
             } catch {
                 status = error.localizedDescription
             }
@@ -548,6 +561,27 @@ final class BrainStore: ObservableObject {
         openHomePage(regenerate: true)
     }
 
+    func regenerateHomePage() {
+        if currentNoteID != nil, currentHighlightSummary == nil, !isShowingHomePage {
+            saveCurrentNote(statusText: "Autosaved")
+        }
+
+        homeCompilationTask?.cancel()
+        homeCompilationTask = nil
+        needsHomeRegenerationAfterCurrentCompile = false
+        needsForcedHomeRegenerationAfterCurrentCompile = false
+        isShowingHomePage = true
+        currentNoteID = nil
+        selectedNoteID = nil
+        selectedSidebarGroupID = nil
+        currentHighlightSummary = nil
+        title = "Home"
+        isGeneratingHomePage = true
+        status = "Regenerating Home page"
+
+        startForcedHomePageGeneration()
+    }
+
     private func openHomePage(regenerate: Bool) {
         if currentNoteID != nil, currentHighlightSummary == nil, !isShowingHomePage {
             saveCurrentNote(statusText: "Autosaved")
@@ -562,6 +596,7 @@ final class BrainStore: ObservableObject {
         isShowingHomePage = true
         currentNoteID = nil
         selectedNoteID = nil
+        selectedSidebarGroupID = nil
         title = "Home"
         content = homeMarkdown
         status = "Home opened"
@@ -582,6 +617,7 @@ final class BrainStore: ObservableObject {
         isShowingHomePage = false
         currentNoteID = nil
         selectedNoteID = nil
+        selectedSidebarGroupID = nil
         title = summary.title
         content = summary.markdown
         status = "Summary opened"
@@ -595,14 +631,19 @@ final class BrainStore: ObservableObject {
         compileCurrentHighlightSummary(using: selectedHighlightSummaryModel)
     }
 
-    private func compileHomePageSummary() {
+    private func compileHomePageSummary(force: Bool = false) {
         guard !isCompilingHighlightSummary else {
             needsHomeRegenerationAfterCurrentCompile = true
+            needsForcedHomeRegenerationAfterCurrentCompile = needsForcedHomeRegenerationAfterCurrentCompile || force
+            if force {
+                isGeneratingHomePage = true
+            }
             return
         }
         homeCompilationTask?.cancel()
         homeCompilationTask = nil
         guard let activeBrain else {
+            isGeneratingHomePage = false
             status = "Open or create a brain first"
             return
         }
@@ -610,21 +651,31 @@ final class BrainStore: ObservableObject {
         do {
             let sourceNotes = try loadHomePageSourceNotes()
             guard !sourceNotes.isEmpty else {
-                status = "Create a page before generating Home"
+                let sourceFingerprint = homeSourceFingerprint(for: sourceNotes)
+                persistImmediateHomeSummary(
+                    vaultName: activeBrain.name,
+                    sourceNotes: sourceNotes,
+                    modelTitle: "Local live summary",
+                    sourceFingerprint: sourceFingerprint
+                )
+                isGeneratingHomePage = false
+                status = "Home cleared"
                 return
             }
 
             let sourceFingerprint = homeSourceFingerprint(for: sourceNotes)
-            if latestHomeSummary?.sourceFingerprint == sourceFingerprint {
+            if !force, latestHomeSummary?.sourceFingerprint == sourceFingerprint {
                 if isShowingHomePage {
                     title = "Home"
                     content = homeMarkdown
                 }
+                isGeneratingHomePage = false
                 status = "Home is up to date"
                 return
             }
 
             let model = selectedHighlightSummaryModel
+            isGeneratingHomePage = true
             persistImmediateHomeSummary(
                 vaultName: activeBrain.name,
                 sourceNotes: sourceNotes,
@@ -634,27 +685,84 @@ final class BrainStore: ObservableObject {
             isCompilingHighlightSummary = true
             status = "\(model.title) is generating Home page"
 
-            Task {
-                await generateHomePageSummary(
+            let generationID = UUID()
+            activeHomeGenerationID = generationID
+            homeCompilationTask = Task { [weak self] in
+                await self?.generateHomePageSummary(
                     vaultName: activeBrain.name,
                     sourceNotes: sourceNotes,
                     sourceFingerprint: sourceFingerprint,
-                    model: model
+                    model: model,
+                    generationID: generationID
                 )
             }
         } catch {
+            isGeneratingHomePage = false
             status = error.localizedDescription
         }
     }
 
-    private func scheduleLiveHomePageCompilation() {
+    private func startForcedHomePageGeneration() {
+        guard let activeBrain else {
+            isGeneratingHomePage = false
+            status = "Open or create a brain first"
+            return
+        }
+
+        do {
+            let sourceNotes = try loadHomePageSourceNotes()
+            let sourceFingerprint = homeSourceFingerprint(for: sourceNotes)
+            guard !sourceNotes.isEmpty else {
+                persistImmediateHomeSummary(
+                    vaultName: activeBrain.name,
+                    sourceNotes: sourceNotes,
+                    modelTitle: "Local live summary",
+                    sourceFingerprint: sourceFingerprint
+                )
+                content = homeMarkdown
+                isGeneratingHomePage = false
+                status = "Home cleared"
+                return
+            }
+
+            let model = selectedHighlightSummaryModel
+            let generationID = UUID()
+            activeHomeGenerationID = generationID
+            persistImmediateHomeSummary(
+                vaultName: activeBrain.name,
+                sourceNotes: sourceNotes,
+                modelTitle: "Local live summary",
+                sourceFingerprint: sourceFingerprint
+            )
+            content = homeMarkdown
+            isCompilingHighlightSummary = true
+            isGeneratingHomePage = true
+            status = "\(model.title) is generating Home page"
+
+            homeCompilationTask = Task { [weak self] in
+                await self?.generateHomePageSummary(
+                    vaultName: activeBrain.name,
+                    sourceNotes: sourceNotes,
+                    sourceFingerprint: sourceFingerprint,
+                    model: model,
+                    generationID: generationID
+                )
+            }
+        } catch {
+            isGeneratingHomePage = false
+            status = error.localizedDescription
+        }
+    }
+
+    private func scheduleLiveHomePageCompilation(delay requestedDelay: UInt64? = nil, force: Bool = false) {
         guard activeBrain != nil else { return }
+        let delay = requestedDelay ?? Self.homeCompilationDebounceNanoseconds
         homeCompilationTask?.cancel()
         homeCompilationTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: Self.homeCompilationDebounceNanoseconds)
+            try? await Task.sleep(nanoseconds: delay)
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                self?.compileHomePageSummary()
+                self?.compileHomePageSummary(force: force)
             }
         }
     }
@@ -821,6 +929,14 @@ final class BrainStore: ObservableObject {
         deleteNote(id: id)
     }
 
+    func deleteSelectedSidebarItem() {
+        if let selectedSidebarGroupID {
+            deleteSidebarGroup(id: selectedSidebarGroupID)
+        } else {
+            deleteSelectedNote()
+        }
+    }
+
     func deleteNote(id: Note.ID) {
         autosaveTask?.cancel()
         autosaveTask = nil
@@ -849,10 +965,199 @@ final class BrainStore: ObservableObject {
                 }
                 try syncBrainMetadata()
                 status = "Deleted"
+                scheduleLiveHomePageCompilation(delay: Self.homeCompilationAfterAutosaveNanoseconds, force: true)
             } catch {
                 status = error.localizedDescription
             }
         }
+    }
+
+    func createSidebarGroup() {
+        guard activeBrain != nil else {
+            status = "Open or create a brain first"
+            return
+        }
+
+        let group = SidebarItem(
+            id: UUID().uuidString,
+            kind: .group,
+            noteID: nil,
+            title: nextSidebarGroupTitle(),
+            groupID: nil,
+            isExpanded: true
+        )
+        if let selectedNoteID,
+           let selectedIndex = sidebarItems.firstIndex(where: { $0.noteID == selectedNoteID }) {
+            sidebarItems.insert(group, at: selectedIndex)
+        } else {
+            sidebarItems.append(group)
+        }
+        persistSidebarLayout()
+        status = "\(group.title) created"
+    }
+
+    func selectSidebarGroup(id: SidebarItem.ID) {
+        guard sidebarItems.contains(where: { $0.id == id && $0.kind == .group }) else { return }
+        selectedSidebarGroupID = id
+        selectedNoteID = nil
+    }
+
+    func renameSidebarGroup(id: SidebarItem.ID, to title: String) {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty,
+              let index = sidebarItems.firstIndex(where: { $0.id == id && $0.kind == .group })
+        else { return }
+
+        sidebarItems[index] = SidebarItem(
+            id: sidebarItems[index].id,
+            kind: .group,
+            noteID: nil,
+            title: cleanTitle,
+            groupID: nil,
+            isExpanded: sidebarItems[index].isExpanded
+        )
+        persistSidebarLayout()
+        status = "Group renamed"
+    }
+
+    func deleteSidebarGroup(id: SidebarItem.ID) {
+        guard let groupIndex = sidebarItems.firstIndex(where: { $0.id == id && $0.kind == .group }) else { return }
+        let groupTitle = sidebarItems[groupIndex].title
+        let childNoteIDs = sidebarItems
+            .filter { $0.groupID == id && $0.kind == .note }
+            .compactMap(\.noteID)
+
+        let deletionChoice: SidebarGroupDeletionChoice
+        if childNoteIDs.isEmpty {
+            deletionChoice = .deleteGroupOnly
+        } else {
+            deletionChoice = confirmSidebarGroupDeletion(title: groupTitle, childCount: childNoteIDs.count)
+        }
+
+        guard deletionChoice != .dismiss else {
+            status = "Group kept"
+            return
+        }
+
+        withActiveBrainAccess {
+            do {
+                let deletedCurrentNote = currentNoteID.map { childNoteIDs.contains($0) } ?? false
+
+                if deletionChoice == .deleteGroupAndPages {
+                    for noteID in childNoteIDs {
+                        try learnFromDeletionIfNeeded(noteID: noteID)
+                        if let noteURL = noteURL(for: noteID), FileManager.default.fileExists(atPath: noteURL.path) {
+                            try FileManager.default.removeItem(at: noteURL)
+                        }
+                        try noteIdentityDatabase?.remove(noteID: noteID)
+                    }
+                    sidebarItems.removeAll { item in
+                        item.id == id || (item.groupID == id && item.noteID.map { childNoteIDs.contains($0) } == true)
+                    }
+                } else {
+                    sidebarItems.remove(at: groupIndex)
+                    for index in sidebarItems.indices where sidebarItems[index].groupID == id {
+                        sidebarItems[index].groupID = nil
+                    }
+                }
+
+                if selectedSidebarGroupID == id {
+                    selectedSidebarGroupID = nil
+                }
+
+                try persistSidebarLayoutNoAccess()
+                try loadNotes()
+
+                if deletedCurrentNote {
+                    if let nextNote = notes.first,
+                       let noteURL = noteURL(for: nextNote.id) {
+                        let note = try readNote(from: noteURL)
+                        currentNoteID = note.id
+                        selectedNoteID = note.id
+                        title = note.title
+                        content = note.content
+                    } else {
+                        resetDraft()
+                    }
+                } else if let selectedNoteID, childNoteIDs.contains(selectedNoteID) {
+                    self.selectedNoteID = currentNoteID
+                }
+
+                try syncBrainMetadata()
+                status = deletionChoice == .deleteGroupAndPages ? "Group and pages deleted" : "Group deleted"
+                if deletionChoice == .deleteGroupAndPages {
+                    scheduleLiveHomePageCompilation(delay: Self.homeCompilationAfterAutosaveNanoseconds, force: true)
+                }
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    func toggleSidebarGroup(id: SidebarItem.ID) {
+        guard let index = sidebarItems.firstIndex(where: { $0.id == id && $0.kind == .group }) else { return }
+        sidebarItems[index].isExpanded.toggle()
+        persistSidebarLayout()
+    }
+
+    func moveSidebarItem(id draggedID: SidebarItem.ID, before targetID: SidebarItem.ID) {
+        guard draggedID != targetID,
+              let sourceIndex = sidebarItems.firstIndex(where: { $0.id == draggedID }),
+              let targetIndex = sidebarItems.firstIndex(where: { $0.id == targetID })
+        else { return }
+
+        let targetGroupID = sidebarItems[targetIndex].kind == .group ? nil : sidebarItems[targetIndex].groupID
+        var item = sidebarItems.remove(at: sourceIndex)
+        item.groupID = item.kind == .note ? targetGroupID : nil
+        let adjustedTargetIndex = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex
+        sidebarItems.insert(item, at: adjustedTargetIndex)
+        notes = orderedNotesForSidebar()
+        persistSidebarLayout()
+    }
+
+    func moveSidebarItemToEnd(id draggedID: SidebarItem.ID) {
+        guard let sourceIndex = sidebarItems.firstIndex(where: { $0.id == draggedID }) else { return }
+        var item = sidebarItems.remove(at: sourceIndex)
+        item.groupID = nil
+        sidebarItems.append(item)
+        notes = orderedNotesForSidebar()
+        persistSidebarLayout()
+    }
+
+    func moveSidebarItem(id draggedID: SidebarItem.ID, intoGroup groupID: SidebarItem.ID) {
+        guard draggedID != groupID,
+              let sourceIndex = sidebarItems.firstIndex(where: { $0.id == draggedID }),
+              sidebarItems.contains(where: { $0.id == groupID && $0.kind == .group }),
+              sidebarItems[sourceIndex].kind == .note
+        else { return }
+
+        var item = sidebarItems.remove(at: sourceIndex)
+        item.groupID = groupID
+        guard let currentGroupIndex = sidebarItems.firstIndex(where: { $0.id == groupID && $0.kind == .group }) else {
+            sidebarItems.insert(item, at: sourceIndex)
+            return
+        }
+        sidebarItems[currentGroupIndex].isExpanded = true
+
+        let insertionIndex = sidebarItems.lastIndex(where: { $0.groupID == groupID }).map { $0 + 1 } ?? min(currentGroupIndex + 1, sidebarItems.endIndex)
+        sidebarItems.insert(item, at: min(insertionIndex, sidebarItems.endIndex))
+        notes = orderedNotesForSidebar()
+        persistSidebarLayout()
+    }
+
+    func noteSummary(for id: Note.ID) -> NoteSummary? {
+        notes.first { $0.id == id }
+    }
+
+    func visibleSidebarItems() -> [SidebarItem] {
+        var output: [SidebarItem] = []
+        for item in sidebarItems where item.groupID == nil {
+            output.append(item)
+            if item.kind == .group, item.isExpanded {
+                output.append(contentsOf: sidebarItems.filter { $0.groupID == item.id })
+            }
+        }
+        return output
     }
 
     private func scheduleAutosave() {
@@ -959,6 +1264,7 @@ final class BrainStore: ObservableObject {
                     )
                 )
                 status = "Renamed"
+                scheduleLiveHomePageCompilation(delay: Self.homeCompilationAfterAutosaveNanoseconds)
             } catch {
                 status = error.localizedDescription
             }
@@ -1048,14 +1354,47 @@ final class BrainStore: ObservableObject {
             )
             status = "\(url.lastPathComponent) attached"
         case "png", "jpg", "jpeg", "gif", "heic", "tiff", "webp":
-            assistantAttachment = PromptAttachment(
-                fileName: url.lastPathComponent,
-                fileExtension: url.pathExtension.lowercased(),
-                extractedText: "Image attached. Visual content is available in the source file, but no text was extracted."
-            )
-            status = "\(url.lastPathComponent) attached"
+            guard let data = try? Data(contentsOf: url) else {
+                status = "Could not read \(url.lastPathComponent)"
+                return
+            }
+            attachPromptImage(data: data, suggestedFileName: url.lastPathComponent)
         default:
             status = "Only PDFs, Word documents, and images are supported"
+        }
+    }
+
+    func attachPromptImage(data: Data, suggestedFileName: String? = nil) {
+        guard !mistralAPIKey.isEmpty || requestAndSaveMistralAPIKey(
+            title: "Mistral API Key",
+            message: "Mistral OCR needs your Mistral API key before reading this image."
+        ) else {
+            status = "Mistral API key required for OCR"
+            return
+        }
+
+        guard ocrUploadsRemaining > 0 else {
+            status = "No OCR uploads left"
+            return
+        }
+
+        let fileName = promptImageFileName(suggestedFileName: suggestedFileName)
+        let mimeType = imageMimeType(forFileName: fileName)
+        status = "OCR reading \(fileName)"
+
+        Task {
+            do {
+                let extractedText = try await extractImageTextWithMistralOCR(data: data, mimeType: mimeType)
+                assistantAttachment = PromptAttachment(
+                    fileName: fileName,
+                    fileExtension: (fileName as NSString).pathExtension.lowercased(),
+                    extractedText: extractedText
+                )
+                recordMistralOCRUpload(pageCount: 1)
+                status = "\(fileName) attached · OCRed"
+            } catch {
+                status = error.localizedDescription
+            }
         }
     }
 
@@ -1341,9 +1680,11 @@ final class BrainStore: ObservableObject {
             seenIDs.insert(note.id)
             return note
         }
-        notes = loadedNotes
+        let loadedSummaries = loadedNotes
             .map { NoteSummary(id: $0.id, title: $0.title, updatedAt: $0.updatedAt) }
             .sorted { $0.updatedAt > $1.updatedAt }
+        syncSidebarItems(with: loadedSummaries)
+        notes = orderedNotesForSidebar(from: loadedSummaries)
         graphLinks = buildGraphLinks(from: loadedNotes)
         rebuildSearchIndex(from: loadedNotes, in: brain)
     }
@@ -1363,6 +1704,97 @@ final class BrainStore: ObservableObject {
         }
     }
 
+    private func syncSidebarItems(with loadedSummaries: [NoteSummary]) {
+        let storedItems: [SidebarItem]
+        if let activeBrain,
+           let brain = try? readBrain(from: activeBrain.brainURL),
+           let sidebarItems = brain.sidebar?.items {
+            storedItems = sidebarItems.map(\.sidebarItem)
+        } else {
+            storedItems = sidebarItems
+        }
+
+        let notesByID = Dictionary(uniqueKeysWithValues: loadedSummaries.map { ($0.id, $0) })
+        var seenNoteIDs = Set<Note.ID>()
+        var mergedItems: [SidebarItem] = []
+        let storedGroupIDs = Set(storedItems.filter { $0.kind == .group }.map(\.id))
+
+        for item in storedItems {
+            switch item.kind {
+            case .group:
+                mergedItems.append(item)
+            case .note:
+                guard let noteID = item.noteID,
+                      let note = notesByID[noteID],
+                      !seenNoteIDs.contains(noteID)
+                else { continue }
+                let groupID = item.groupID.flatMap { storedGroupIDs.contains($0) ? $0 : nil }
+                mergedItems.append(SidebarItem(note: note, groupID: groupID))
+                seenNoteIDs.insert(noteID)
+            }
+        }
+
+        for note in loadedSummaries where !seenNoteIDs.contains(note.id) {
+            mergedItems.append(SidebarItem(note: note))
+        }
+
+        sidebarItems = mergedItems
+    }
+
+    private func orderedNotesForSidebar(from sourceNotes: [NoteSummary]? = nil) -> [NoteSummary] {
+        let notesByID = Dictionary(uniqueKeysWithValues: (sourceNotes ?? notes).map { ($0.id, $0) })
+        var orderedNotes: [NoteSummary] = []
+        var seenNoteIDs = Set<Note.ID>()
+
+        for item in sidebarItems where item.kind == .note {
+            guard let noteID = item.noteID,
+                  let note = notesByID[noteID],
+                  !seenNoteIDs.contains(noteID)
+            else { continue }
+            orderedNotes.append(note)
+            seenNoteIDs.insert(noteID)
+        }
+
+        let remainingNotes = notesByID.values
+            .filter { !seenNoteIDs.contains($0.id) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        return orderedNotes + remainingNotes
+    }
+
+    private func persistSidebarLayout() {
+        withActiveBrainAccess {
+            do {
+                try persistSidebarLayoutNoAccess()
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    private func persistSidebarLayoutNoAccess() throws {
+        guard let activeBrain else { return }
+        var brain = try readBrain(from: activeBrain.brainURL)
+        brain.sidebar = BrainSidebarLayout(items: sidebarItems.map(BrainSidebarItem.init))
+        brain.vault.updatedAt = Date()
+        try writeBrain(brain, to: activeBrain.brainURL)
+        self.activeBrain = BrainSummary(
+            id: brain.vault.id,
+            name: brain.vault.name,
+            folderURL: activeBrain.folderURL,
+            brainURL: activeBrain.brainURL,
+            updatedAt: brain.vault.updatedAt
+        )
+    }
+
+    private func nextSidebarGroupTitle() -> String {
+        let existingTitles = Set(sidebarItems.filter { $0.kind == .group }.map { $0.title.lowercased() })
+        var counter = 1
+        while existingTitles.contains("group \(counter)") {
+            counter += 1
+        }
+        return "group \(counter)"
+    }
+
     private func syncBrainMetadata() throws {
         guard let activeBrain else { return }
         var brain = try readBrain(from: activeBrain.brainURL)
@@ -1372,6 +1804,7 @@ final class BrainStore: ObservableObject {
             BrainNoteReference(id: $0.id, title: $0.title, updatedAt: $0.updatedAt)
         }
         brain.graph.links = graphLinks
+        brain.sidebar = BrainSidebarLayout(items: sidebarItems.map(BrainSidebarItem.init))
         brain.app.lastOpenedWith = "1.0"
         try writeBrain(brain, to: activeBrain.brainURL)
         self.activeBrain = BrainSummary(
@@ -1761,6 +2194,25 @@ final class BrainStore: ObservableObject {
         alert.runModal()
     }
 
+    private func confirmSidebarGroupDeletion(title: String, childCount: Int) -> SidebarGroupDeletionChoice {
+        let alert = NSAlert()
+        alert.messageText = "Delete \(title)?"
+        alert.informativeText = "This group contains \(childCount) page\(childCount == 1 ? "" : "s"). Choose whether to keep those pages or delete them too."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Dismiss")
+        alert.addButton(withTitle: "Delete Group Without Deleting Pages")
+        alert.addButton(withTitle: "Delete Group With Everything In It")
+
+        switch alert.runModal() {
+        case .alertSecondButtonReturn:
+            return .deleteGroupOnly
+        case .alertThirdButtonReturn:
+            return .deleteGroupAndPages
+        default:
+            return .dismiss
+        }
+    }
+
     private func generateAssistantResponse(for prompt: String) async {
         defer {
             isGeneratingAssistantResponse = false
@@ -1804,9 +2256,16 @@ final class BrainStore: ObservableObject {
         let startedAt = Date()
         defer {
             isCompilingHighlightSummary = false
+            isGeneratingHomePage = false
             if needsHomeRegenerationAfterCurrentCompile {
+                let shouldForce = needsForcedHomeRegenerationAfterCurrentCompile
                 needsHomeRegenerationAfterCurrentCompile = false
-                scheduleLiveHomePageCompilation()
+                needsForcedHomeRegenerationAfterCurrentCompile = false
+                if shouldForce {
+                    compileHomePageSummary(force: true)
+                } else {
+                    scheduleLiveHomePageCompilation()
+                }
             }
         }
 
@@ -1867,14 +2326,28 @@ final class BrainStore: ObservableObject {
         vaultName: String,
         sourceNotes: [HomePageSourceNote],
         sourceFingerprint: String,
-        model: HighlightSummaryModel
+        model: HighlightSummaryModel,
+        generationID: UUID? = nil
     ) async {
         let startedAt = Date()
         defer {
-            isCompilingHighlightSummary = false
-            if needsHomeRegenerationAfterCurrentCompile {
-                needsHomeRegenerationAfterCurrentCompile = false
-                scheduleLiveHomePageCompilation()
+            if generationID == nil || activeHomeGenerationID == generationID {
+                isCompilingHighlightSummary = false
+                isGeneratingHomePage = false
+                if activeHomeGenerationID == generationID {
+                    activeHomeGenerationID = nil
+                    homeCompilationTask = nil
+                }
+                if needsHomeRegenerationAfterCurrentCompile {
+                    let shouldForce = needsForcedHomeRegenerationAfterCurrentCompile
+                    needsHomeRegenerationAfterCurrentCompile = false
+                    needsForcedHomeRegenerationAfterCurrentCompile = false
+                    if shouldForce {
+                        compileHomePageSummary(force: true)
+                    } else {
+                        scheduleLiveHomePageCompilation()
+                    }
+                }
             }
         }
 
@@ -1898,6 +2371,10 @@ final class BrainStore: ObservableObject {
                     system: homePageSummaryInstructions(),
                     user: prompt
                 )
+            }
+
+            if let generationID, activeHomeGenerationID != generationID {
+                return
             }
 
             let duration = Date().timeIntervalSince(startedAt)
@@ -1925,7 +2402,9 @@ final class BrainStore: ObservableObject {
             }
             status = "Home page generated"
         } catch {
-            status = error.localizedDescription
+            if generationID == nil || activeHomeGenerationID == generationID {
+                status = error.localizedDescription
+            }
         }
     }
 
@@ -2118,9 +2597,8 @@ final class BrainStore: ObservableObject {
     }
 
     private func highlightSummaryPrompt(sourceTitle: String, highlights: [String]) -> String {
-        let highlightBody = highlights.enumerated()
-            .map { index, text in "\(index + 1). \(text)" }
-            .joined(separator: "\n")
+        let highlightBody = pageHighlightChunk(title: sourceTitle, highlights: highlights)
+            ?? "No highlighted data was found."
 
         return """
         Source session title:
@@ -2129,11 +2607,11 @@ final class BrainStore: ObservableObject {
         Required heading:
         # Summary of \(sourceTitle)
 
-        Highlighted excerpts:
+        Assembled highlighted data:
         \(highlightBody)
 
         Task:
-        Compile the highlighted excerpts into a coherent document with the required heading. Prefer polished prose over a mechanical list unless a list is genuinely clearer.
+        Compile the assembled highlighted data into a coherent document with the required heading. Do not repeat the page title for every highlighted item. Prefer polished prose over a mechanical list unless a list is genuinely clearer.
 
         Learned user writing samples:
         \(learnedStyleMemory())
@@ -2153,15 +2631,12 @@ final class BrainStore: ObservableObject {
             }
             .joined(separator: "\n\n")
 
-        let highlights = sourceNotes.flatMap { note in
-            note.highlights.map { highlight in
-                "\(note.title): \(highlight)"
-            }
+        let highlightChunks = sourceNotes.compactMap { note in
+            pageHighlightChunk(title: note.title, highlights: note.highlights)
         }
-
-        let highlightBody = highlights.isEmpty
+        let highlightBody = highlightChunks.isEmpty
             ? "No highlighted text was found."
-            : highlights.enumerated().map { index, text in "\(index + 1). \(text)" }.joined(separator: "\n")
+            : highlightChunks.joined(separator: "\n\n")
 
         return """
         Vault:
@@ -2174,12 +2649,12 @@ final class BrainStore: ObservableObject {
         Summarize all pages in the vault into a coherent, proper text overview. Combine related ideas across pages instead of summarizing page-by-page. Explain what is going on in the vault.
 
         ## Highlighted Text Summary
-        Summarize all highlighted excerpts across the vault into a coherent section. Then add concise bullet points or flashcards for the most useful highlighted ideas. If there are no highlights, say that no highlights have been added yet.
+        Summarize the assembled highlighted data across the vault into a coherent section. Each page's highlights have already been grouped into one chunk, so do not duplicate page titles or repeat the same label for every item. Then add concise bullet points or flashcards for the most useful highlighted ideas. If there are no highlights, say that no highlights have been added yet.
 
         Page contents or condensed page notes:
         \(pageBody)
 
-        All highlighted excerpts in the vault:
+        Assembled highlighted data in the vault:
         \(highlightBody)
 
         Learned user writing samples:
@@ -2258,15 +2733,14 @@ final class BrainStore: ObservableObject {
     }
 
     private func homePageCondensePrompt(note: HomePageSourceNote, highlights: [String]) -> String {
-        let highlightBody = highlights.isEmpty
-            ? "No highlighted excerpts in this page."
-            : highlights.enumerated().map { index, text in "\(index + 1). \(text)" }.joined(separator: "\n")
+        let highlightBody = pageHighlightChunk(title: note.title, highlights: highlights)
+            ?? "No highlighted excerpts in this page."
 
         return """
         Page title:
         \(note.title)
 
-        Highlighted excerpts to preserve:
+        Assembled highlighted data to preserve:
         \(highlightBody)
 
         Full Markdown page:
@@ -2318,13 +2792,16 @@ final class BrainStore: ObservableObject {
             """
         }
         .joined(separator: "\n\n")
+        let pageSummarySection = pageSummaries.isEmpty
+            ? "No pages yet. Press Cmd N to start a new page."
+            : pageSummaries
 
-        let highlights = sourceNotes.flatMap { note in
-            highlightedTextFragments(in: note.content).map { "- **\(note.title):** \($0)" }
+        let highlightChunks = sourceNotes.compactMap { note in
+            pageHighlightChunk(title: note.title, highlights: highlightedTextFragments(in: note.content))
         }
-        let highlightedSummary = highlights.isEmpty
+        let highlightedSummary = highlightChunks.isEmpty
             ? "No highlighted text has been compiled yet."
-            : highlights.joined(separator: "\n")
+            : highlightChunks.joined(separator: "\n\n")
 
         let vaultSummary = localVaultSummary(from: sourceNotes)
 
@@ -2337,7 +2814,7 @@ final class BrainStore: ObservableObject {
 
         ## Page Summaries
 
-        \(pageSummaries)
+        \(pageSummarySection)
 
         ## Highlighted Text Summary
 
@@ -2382,6 +2859,24 @@ final class BrainStore: ObservableObject {
 
         let clean = selected.trimmingCharacters(in: .whitespacesAndNewlines)
         return clean.hasSuffix(".") ? clean : "\(clean)."
+    }
+
+    private func pageHighlightChunk(title: String, highlights: [String]) -> String? {
+        let cleanHighlights = highlights
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !cleanHighlights.isEmpty else { return nil }
+
+        let body = cleanHighlights
+            .map { "- \($0)" }
+            .joined(separator: "\n")
+
+        return """
+        ### \(title)
+
+        \(body)
+        """
     }
 
     private func homeSourceFingerprint(for sourceNotes: [HomePageSourceNote]) -> String {
@@ -2914,6 +3409,26 @@ final class BrainStore: ObservableObject {
         return try extractOCRMarkdown(from: responseData)
     }
 
+    private func extractImageTextWithMistralOCR(data: Data, mimeType: String) async throws -> String {
+        var request = URLRequest(url: URL(string: "https://api.mistral.ai/v1/ocr")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(mistralAPIKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": Self.mistralOCRModel,
+            "document": [
+                "type": "image_url",
+                "image_url": "data:\(mimeType);base64,\(data.base64EncodedString())"
+            ],
+            "include_image_base64": false,
+            "table_format": "markdown"
+        ])
+
+        let (responseData, response) = try await URLSession.shared.data(for: request)
+        try validateHTTPResponse(response, data: responseData)
+        return try extractOCRMarkdown(from: responseData)
+    }
+
     private func extractOCRMarkdown(from data: Data) throws -> String {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let pages = json["pages"] as? [[String: Any]]
@@ -3078,9 +3593,7 @@ final class BrainStore: ObservableObject {
         }
 
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let body = highlights.enumerated()
-            .map { index, text in "\(index + 1). \(text)" }
-            .joined(separator: "\n")
+        let body = pageHighlightChunk(title: note.title, highlights: highlights) ?? "No highlighted text."
         let markdown = """
         # Highlights for \(note.title)
 
@@ -3127,6 +3640,35 @@ final class BrainStore: ObservableObject {
             counter += 1
         }
         return candidate
+    }
+
+    private func promptImageFileName(suggestedFileName: String?) -> String {
+        let cleanBase = (suggestedFileName as NSString?)?.deletingPathExtension
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let fallbackBase = "pasted-image-\(formatter.string(from: Date()))"
+        let base = imageSafeFileName(cleanBase?.isEmpty == false ? cleanBase! : fallbackBase)
+        let rawExtension = (suggestedFileName as NSString?)?.pathExtension.lowercased()
+        let fileExtension = rawExtension?.isEmpty == false ? rawExtension! : "png"
+        return "\(base).\(fileExtension)"
+    }
+
+    private func imageMimeType(forFileName fileName: String) -> String {
+        switch (fileName as NSString).pathExtension.lowercased() {
+        case "jpg", "jpeg":
+            return "image/jpeg"
+        case "gif":
+            return "image/gif"
+        case "heic":
+            return "image/heic"
+        case "tif", "tiff":
+            return "image/tiff"
+        case "webp":
+            return "image/webp"
+        default:
+            return "image/png"
+        }
     }
 
     private func imageSafeFileName(_ name: String) -> String {
@@ -3409,6 +3951,64 @@ struct NoteSummary: Identifiable, Equatable {
     let updatedAt: Date
 }
 
+struct SidebarItem: Identifiable, Codable, Equatable {
+    enum Kind: String, Codable {
+        case note
+        case group
+    }
+
+    var id: String
+    var kind: Kind
+    var noteID: String?
+    var title: String
+    var groupID: String?
+    var isExpanded: Bool
+
+    init(
+        id: String,
+        kind: Kind,
+        noteID: String?,
+        title: String,
+        groupID: String? = nil,
+        isExpanded: Bool = true
+    ) {
+        self.id = id
+        self.kind = kind
+        self.noteID = noteID
+        self.title = title
+        self.groupID = groupID
+        self.isExpanded = isExpanded
+    }
+
+    init(note: NoteSummary, groupID: String? = nil) {
+        id = "note-\(note.id)"
+        kind = .note
+        noteID = note.id
+        title = note.title
+        self.groupID = groupID
+        isExpanded = true
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case noteID
+        case title
+        case groupID
+        case isExpanded
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        kind = try container.decode(Kind.self, forKey: .kind)
+        noteID = try container.decodeIfPresent(String.self, forKey: .noteID)
+        title = try container.decode(String.self, forKey: .title)
+        groupID = try container.decodeIfPresent(String.self, forKey: .groupID)
+        isExpanded = try container.decodeIfPresent(Bool.self, forKey: .isExpanded) ?? true
+    }
+}
+
 struct NoteSearchResult: Identifiable, Equatable {
     let id: String
     let noteID: String
@@ -3589,6 +4189,12 @@ enum AssistantError: LocalizedError {
     }
 }
 
+private enum SidebarGroupDeletionChoice {
+    case dismiss
+    case deleteGroupOnly
+    case deleteGroupAndPages
+}
+
 struct Note: Identifiable, Codable {
     let id: String
     let title: String
@@ -3609,6 +4215,7 @@ struct BrainFile: Codable {
     var vault: VaultIdentity
     var rootNoteID: String?
     var graph: BrainGraph
+    var sidebar: BrainSidebarLayout? = nil
     var sourceRegistry: SourceRegistryPointer
     var ai: BrainAIPreferences
     var styleMemory: [String]
@@ -3643,6 +4250,58 @@ struct VaultIdentity: Codable {
 struct BrainGraph: Codable {
     var notes: [BrainNoteReference]
     var links: [BrainLinkReference]
+}
+
+struct BrainSidebarLayout: Codable {
+    var items: [BrainSidebarItem]
+}
+
+struct BrainSidebarItem: Codable {
+    var id: String
+    var kind: SidebarItem.Kind
+    var noteID: String?
+    var title: String
+    var groupID: String? = nil
+    var isExpanded: Bool = true
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case noteID
+        case title
+        case groupID
+        case isExpanded
+    }
+
+    init(_ item: SidebarItem) {
+        id = item.id
+        kind = item.kind
+        noteID = item.noteID
+        title = item.title
+        groupID = item.groupID
+        isExpanded = item.isExpanded
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        kind = try container.decode(SidebarItem.Kind.self, forKey: .kind)
+        noteID = try container.decodeIfPresent(String.self, forKey: .noteID)
+        title = try container.decode(String.self, forKey: .title)
+        groupID = try container.decodeIfPresent(String.self, forKey: .groupID)
+        isExpanded = try container.decodeIfPresent(Bool.self, forKey: .isExpanded) ?? true
+    }
+
+    var sidebarItem: SidebarItem {
+        SidebarItem(
+            id: id,
+            kind: kind,
+            noteID: noteID,
+            title: title,
+            groupID: groupID,
+            isExpanded: isExpanded
+        )
+    }
 }
 
 struct BrainNoteReference: Codable {

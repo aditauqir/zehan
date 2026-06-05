@@ -28,6 +28,12 @@ struct ZirnApp: App {
                     store.createBrainVaultFromUser()
                 }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
+
+                Button("New Group") {
+                    store.createSidebarGroup()
+                }
+                .keyboardShortcut("g", modifiers: .command)
+                .disabled(store.activeBrain == nil)
             }
 
             CommandGroup(after: .newItem) {
@@ -76,11 +82,11 @@ struct ZirnApp: App {
                 }
                 .keyboardShortcut("h", modifiers: [.command, .shift])
 
-                Button("Delete Page") {
-                    store.deleteSelectedNote()
+                Button("Delete") {
+                    store.deleteSelectedSidebarItem()
                 }
                 .keyboardShortcut(.delete, modifiers: .command)
-                .disabled(store.activeBrain == nil || (store.selectedNoteID == nil && store.currentNoteID == nil))
+                .disabled(store.activeBrain == nil || (store.selectedSidebarGroupID == nil && store.selectedNoteID == nil && store.currentNoteID == nil))
             }
 
             CommandGroup(replacing: .appVisibility) {

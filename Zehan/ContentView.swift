@@ -248,6 +248,7 @@ private struct WorkspaceView: View {
     @State private var isDocumentDropTargeted = false
     @State private var sidebarSearchQuery = ""
     @State private var isSidebarSearchActive = false
+    @State private var draggedSidebarItemID: SidebarItem.ID?
     @State private var typingStatus = MarkdownTypingStatus()
     @FocusState private var isSidebarSearchFocused: Bool
 
@@ -286,6 +287,12 @@ private struct WorkspaceView: View {
                                 store.openHomePage()
                             }
                         },
+                        reloadHome: {
+                            isEditingMarkdown = false
+                            isSidebarSearchActive = false
+                            sidebarSearchQuery = ""
+                            store.regenerateHomePage()
+                        },
                         activateSearch: {
                             withAnimation(.easeInOut(duration: 0.55)) {
                                 isSidebarSearchActive = true
@@ -311,32 +318,33 @@ private struct WorkspaceView: View {
                                     }
                                 }
                             } else {
-                                ForEach(store.notes) { note in
-                                    NoteSidebarRow(
-                                        note: note,
-                                        isSelected: !store.isViewingGeneratedPage && (store.selectedNoteID == note.id || store.currentNoteID == note.id),
-                                        open: {
-                                            withAnimation(.easeInOut(duration: 0.18)) {
-                                                isEditingMarkdown = false
-                                                store.openNote(id: note.id)
-                                            }
-                                        },
-                                        rename: {
-                                            isEditingMarkdown = false
-                                            store.renameNoteFromUser(id: note.id)
-                                        },
-                                        nutshell: {
-                                            isEditingMarkdown = false
-                                            store.showNoteNutshell(id: note.id)
-                                        },
-                                        delete: {
-                                            withAnimation(.easeInOut(duration: 0.2)) {
-                                                isEditingMarkdown = false
-                                                store.deleteNote(id: note.id)
-                                            }
+                                ForEach(store.visibleSidebarItems()) { item in
+                                    sidebarItemRow(item)
+                                        .onDrag {
+                                            draggedSidebarItemID = item.id
+                                            return NSItemProvider(object: item.id as NSString)
                                         }
-                                    )
+                                        .onDrop(
+                                            of: [.plainText],
+                                            delegate: SidebarItemDropDelegate(
+                                                item: item,
+                                                store: store,
+                                                draggedItemID: { draggedSidebarItemID },
+                                                clearDraggedItem: { draggedSidebarItemID = nil }
+                                            )
+                                        )
                                 }
+
+                                Color.clear
+                                    .frame(height: 14)
+                                    .onDrop(
+                                        of: [.plainText],
+                                        delegate: SidebarEndDropDelegate(
+                                            store: store,
+                                            draggedItemID: { draggedSidebarItemID },
+                                            clearDraggedItem: { draggedSidebarItemID = nil }
+                                        )
+                                    )
                             }
                         }
                         .padding(.top, 8)
@@ -373,6 +381,17 @@ private struct WorkspaceView: View {
             } detail: {
                 ZStack(alignment: .bottom) {
                     workspaceDetail
+                    if shouldShowNewPageHint {
+                        NewBrainPageHint {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                isEditingMarkdown = false
+                                store.newDraft()
+                            }
+                        }
+                        .padding(.bottom, 116)
+                        .transition(.scale(scale: 0.96).combined(with: .opacity))
+                        .zIndex(2)
+                    }
                 }
             }
 
@@ -418,6 +437,11 @@ private struct WorkspaceView: View {
             isSidebarSearchFocused = true
             store.isShowingPageSearch = false
         }
+        .onChange(of: isReadingMode) { _, isReading in
+            if isReading {
+                isEditingMarkdown = false
+            }
+        }
     }
 
     private var workspaceDetail: some View {
@@ -451,7 +475,7 @@ private struct WorkspaceView: View {
                         if store.isShowingHomePage {
                             ReadOnlyHomePageView(
                                 markdown: store.homeMarkdown,
-                                isGenerating: store.isCompilingHighlightSummary,
+                                isGenerating: store.isGeneratingHomePage,
                                 openLinkedNote: { store.openLinkedNote(named: $0) },
                                 imageURL: store.markdownImageURL
                             )
@@ -465,6 +489,7 @@ private struct WorkspaceView: View {
                             MarkdownEditingSurface(
                                 content: contentBinding,
                                 isEditing: $isEditingMarkdown,
+                                isReadOnly: isReadingMode,
                                 searchHighlight: store.activeSearchHighlight,
                                 noteTitles: store.notes.map(\.title),
                                 openLinkedNote: { store.openLinkedNote(named: $0) },
@@ -537,6 +562,66 @@ private struct WorkspaceView: View {
                 }
                 .padding(.bottom, 54)
                 .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    private var shouldShowNewPageHint: Bool {
+        store.activeBrain != nil
+            && store.notes.isEmpty
+            && !store.isShowingHomePage
+            && store.currentHighlightSummary == nil
+            && !isEditingMarkdown
+    }
+
+    @ViewBuilder
+    private func sidebarItemRow(_ item: SidebarItem) -> some View {
+        switch item.kind {
+        case .note:
+            if let noteID = item.noteID,
+               let note = store.noteSummary(for: noteID) {
+                NoteSidebarRow(
+                    note: note,
+                    isSelected: !store.isViewingGeneratedPage && (store.selectedNoteID == note.id || store.currentNoteID == note.id),
+                    open: {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            isEditingMarkdown = false
+                            store.openNote(id: note.id)
+                        }
+                    },
+                    rename: {
+                        isEditingMarkdown = false
+                        store.renameNoteFromUser(id: note.id)
+                    },
+                    nutshell: {
+                        isEditingMarkdown = false
+                        store.showNoteNutshell(id: note.id)
+                    },
+                    delete: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isEditingMarkdown = false
+                            store.deleteNote(id: note.id)
+                        }
+                    }
+                )
+                .padding(.leading, item.groupID == nil ? 0 : 18)
+            }
+        case .group:
+            SidebarGroupRow(
+                item: item,
+                isSelected: store.selectedSidebarGroupID == item.id,
+                toggle: {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        store.selectSidebarGroup(id: item.id)
+                        store.toggleSidebarGroup(id: item.id)
+                    }
+                },
+                rename: { newTitle in
+                    store.renameSidebarGroup(id: item.id, to: newTitle)
+                },
+                delete: {
+                    store.deleteSidebarGroup(id: item.id)
+                }
+            )
         }
     }
 
@@ -710,6 +795,73 @@ private struct FooterStatusMessage: View {
                     .contentTransition(.opacity)
             }
         }
+    }
+}
+
+private struct NewBrainPageHint: View {
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                Image(systemName: "doc.badge.plus")
+                    .font(.system(size: 15, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .frame(width: 26, height: 26)
+                    .background(
+                        Circle()
+                            .fill(Color.primary.opacity(isHovered ? 0.13 : 0.08))
+                    )
+
+                HStack(spacing: 6) {
+                    Text("Press")
+                        .foregroundStyle(.secondary)
+
+                    KeyboardShortcutCapsule(text: "Cmd")
+                    KeyboardShortcutCapsule(text: "N")
+
+                    Text("to start a new page")
+                        .foregroundStyle(.primary.opacity(0.82))
+                }
+                .font(.system(size: 13.5, weight: .semibold))
+            }
+            .padding(.leading, 10)
+            .padding(.trailing, 14)
+            .padding(.vertical, 9)
+            .background(.ultraThinMaterial)
+            .clipShape(Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(Color.primary.opacity(isHovered ? 0.18 : 0.10), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(isHovered ? 0.18 : 0.11), radius: isHovered ? 14 : 9, y: isHovered ? 8 : 5)
+        }
+        .buttonStyle(.plain)
+        .help("Create a new page")
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.16)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+private struct KeyboardShortcutCapsule: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .bold, design: .rounded))
+            .foregroundStyle(.primary.opacity(0.78))
+            .padding(.horizontal, 7)
+            .frame(height: 20)
+            .background(Color.primary.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+            }
     }
 }
 
@@ -1082,6 +1234,7 @@ private struct NoteGraphView: View {
     @State private var savedNodePositions: [String: CGPoint] = [:]
     @State private var activeDragPosition: CGPoint?
     @State private var activeDraggedNodeID: Note.ID?
+    private let graphNodeSize = CGSize(width: 74, height: 38)
 
     var body: some View {
         GeometryReader { proxy in
@@ -1162,7 +1315,7 @@ private struct NoteGraphView: View {
                         note: note,
                         isSelected: note.id == selectedNoteID
                     )
-                    .frame(width: 74, height: 38)
+                    .frame(width: graphNodeSize.width, height: graphNodeSize.height)
                     .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .scaleEffect(isDragging ? 1.08 : 1)
                     .position(point)
@@ -1263,10 +1416,103 @@ private struct NoteGraphView: View {
         let visibleIDs = Set(noteIDs)
         savedNodePositions = savedNodePositions.filter { visibleIDs.contains($0.key) }
 
+        var occupiedPositions: [String: CGPoint] = savedNodePositions
+            .filter { visibleIDs.contains($0.key) }
+            .mapValues { clampedNodePoint($0, in: size) }
+
         for id in noteIDs {
             let fallback = defaultPositions[id] ?? CGPoint(x: size.width / 2, y: size.height / 2)
-            savedNodePositions[id] = clampedNodePoint(savedNodePositions[id] ?? fallback, in: size)
+            if let savedPosition = savedNodePositions[id] {
+                let clampedPosition = clampedNodePoint(savedPosition, in: size)
+                savedNodePositions[id] = clampedPosition
+                occupiedPositions[id] = clampedPosition
+            } else {
+                let openPosition = nonOverlappingNodePoint(
+                    preferred: fallback,
+                    nodeID: id,
+                    occupied: Array(occupiedPositions.values),
+                    size: size
+                )
+                savedNodePositions[id] = openPosition
+                occupiedPositions[id] = openPosition
+            }
         }
+    }
+
+    private func nonOverlappingNodePoint(
+        preferred: CGPoint,
+        nodeID: String,
+        occupied: [CGPoint],
+        size: CGSize
+    ) -> CGPoint {
+        let preferredPoint = clampedNodePoint(preferred, in: size)
+        guard overlapsNode(at: preferredPoint, occupied: occupied) else { return preferredPoint }
+
+        let candidates = proceduralStarCandidates(around: preferredPoint, nodeID: nodeID, size: size)
+        if let openCandidate = candidates.first(where: { !overlapsNode(at: $0, occupied: occupied) }) {
+            return openCandidate
+        }
+
+        return candidates.max { lhs, rhs in
+            nodePlacementScore(lhs, preferred: preferredPoint, occupied: occupied)
+                < nodePlacementScore(rhs, preferred: preferredPoint, occupied: occupied)
+        } ?? preferredPoint
+    }
+
+    private func proceduralStarCandidates(around preferred: CGPoint, nodeID: String, size: CGSize) -> [CGPoint] {
+        let center = CGPoint(x: size.width / 2, y: size.height / 2 - 4)
+        let seedAngle = seededAngle(for: nodeID)
+        let goldenAngle = CGFloat.pi * (3 - sqrt(5))
+        let spacing = max(graphNodeSize.width + 14, graphNodeSize.height + 22)
+        var candidates: [CGPoint] = [preferred]
+
+        for index in 1...180 {
+            let radius = sqrt(CGFloat(index)) * spacing * 0.42
+            let angle = seedAngle + CGFloat(index) * goldenAngle
+            candidates.append(
+                clampedNodePoint(
+                    CGPoint(
+                        x: preferred.x + cos(angle) * radius,
+                        y: preferred.y + sin(angle) * radius
+                    ),
+                    in: size
+                )
+            )
+
+            candidates.append(
+                clampedNodePoint(
+                    CGPoint(
+                        x: center.x + cos(angle) * radius,
+                        y: center.y + sin(angle) * radius
+                    ),
+                    in: size
+                )
+            )
+        }
+
+        return candidates.removingNearDuplicatePoints()
+    }
+
+    private func overlapsNode(at point: CGPoint, occupied: [CGPoint]) -> Bool {
+        occupied.contains { other in
+            abs(point.x - other.x) < graphNodeSize.width + 12
+                && abs(point.y - other.y) < graphNodeSize.height + 12
+        }
+    }
+
+    private func nodePlacementScore(_ point: CGPoint, preferred: CGPoint, occupied: [CGPoint]) -> CGFloat {
+        let nearestDistance = occupied
+            .map { hypot(point.x - $0.x, point.y - $0.y) }
+            .min() ?? 10_000
+        let preferredDistance = hypot(point.x - preferred.x, point.y - preferred.y)
+        return nearestDistance - preferredDistance * 0.08
+    }
+
+    private func seededAngle(for id: String) -> CGFloat {
+        let seed = id.unicodeScalars.reduce(UInt32(2166136261)) { partial, scalar in
+            (partial ^ scalar.value) &* 16777619
+        }
+        return CGFloat(seed % 360) / 180 * .pi
     }
 
     private func clampedNodePoint(_ point: CGPoint, in size: CGSize) -> CGPoint {
@@ -1276,6 +1522,25 @@ private struct NoteGraphView: View {
             x: min(max(point.x, horizontalInset), max(horizontalInset, size.width - horizontalInset)),
             y: min(max(point.y, verticalInset), max(verticalInset, size.height - verticalInset))
         )
+    }
+}
+
+private extension Array where Element == CGPoint {
+    func removingNearDuplicatePoints() -> [CGPoint] {
+        var output: [CGPoint] = []
+        for point in self {
+            guard !output.contains(where: { hypot(point.x - $0.x, point.y - $0.y) < 2 }) else {
+                continue
+            }
+            output.append(point)
+        }
+        return output
+    }
+}
+
+private extension Collection {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 
@@ -1543,14 +1808,182 @@ private struct HomeSidebarRow: View {
     }
 }
 
+private struct SidebarGroupRow: View {
+    let item: SidebarItem
+    let isSelected: Bool
+    let toggle: () -> Void
+    let rename: (String) -> Void
+    let delete: () -> Void
+    @State private var isHovered = false
+    @State private var isRenaming = false
+    @State private var draftTitle = ""
+    @FocusState private var isRenameFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "folder")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 16, height: 16)
+
+            if isRenaming {
+                TextField("Group name", text: $draftTitle)
+                    .font(.system(size: 13, weight: .semibold))
+                    .textFieldStyle(.plain)
+                    .focused($isRenameFocused)
+                    .onSubmit(commitRename)
+                    .onExitCommand(perform: cancelRename)
+            } else {
+                Text(item.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+
+            Image(systemName: item.isExpanded ? "chevron.down" : "chevron.right")
+                .font(.system(size: 10.5, weight: .bold))
+                .foregroundStyle(.secondary)
+                .frame(width: 18, height: 18)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 32)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(rowFill)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onTapGesture {
+            if !isRenaming {
+                toggle()
+            }
+        }
+        .onTapGesture(count: 2) {
+            beginRename()
+        }
+        .contextMenu {
+            Button {
+                beginRename()
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                delete()
+            } label: {
+                Label("Delete Group", systemImage: "trash")
+            }
+        }
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
+        .onChange(of: item.title) { _, newTitle in
+            if !isRenaming {
+                draftTitle = newTitle
+            }
+        }
+        .task {
+            draftTitle = item.title
+        }
+    }
+
+    private func beginRename() {
+        draftTitle = item.title
+        isRenaming = true
+        DispatchQueue.main.async {
+            isRenameFocused = true
+        }
+    }
+
+    private func commitRename() {
+        let cleanTitle = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanTitle.isEmpty {
+            rename(cleanTitle)
+        }
+        isRenaming = false
+    }
+
+    private func cancelRename() {
+        draftTitle = item.title
+        isRenaming = false
+    }
+
+    private var rowFill: Color {
+        if isSelected {
+            return Color.primary.opacity(isHovered ? 0.16 : 0.12)
+        }
+        return Color.primary.opacity(isHovered ? 0.075 : 0.025)
+    }
+}
+
+private struct SidebarItemDropDelegate: DropDelegate {
+    let item: SidebarItem
+    let store: BrainStore
+    let draggedItemID: () -> SidebarItem.ID?
+    let clearDraggedItem: () -> Void
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.plainText])
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedID = draggedItemID(),
+              draggedID != item.id
+        else { return }
+
+        withAnimation(.easeInOut(duration: 0.16)) {
+            if item.kind == .group {
+                store.moveSidebarItem(id: draggedID, intoGroup: item.id)
+            } else {
+                store.moveSidebarItem(id: draggedID, before: item.id)
+            }
+        }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        clearDraggedItem()
+        return true
+    }
+}
+
+private struct SidebarEndDropDelegate: DropDelegate {
+    let store: BrainStore
+    let draggedItemID: () -> SidebarItem.ID?
+    let clearDraggedItem: () -> Void
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.plainText])
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedID = draggedItemID() else { return }
+        withAnimation(.easeInOut(duration: 0.16)) {
+            store.moveSidebarItemToEnd(id: draggedID)
+        }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        clearDraggedItem()
+        return true
+    }
+}
+
 private struct SidebarHomeSearchControl: View {
     @Binding var isSearchActive: Bool
     @Binding var query: String
     var isSearchFocused: FocusState<Bool>.Binding
     let isHomeSelected: Bool
     let openHome: () -> Void
+    let reloadHome: () -> Void
     let activateSearch: () -> Void
     @Namespace private var liquidNamespace
+    @State private var isHomeHovered = false
+    @State private var isSearchHovered = false
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -1568,40 +2001,62 @@ private struct SidebarHomeSearchControl: View {
 
     private var inactiveButtons: some View {
         HStack(spacing: 8) {
-            Button(action: openHome) {
-                Image(systemName: "house.fill")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.primary.opacity(isHomeSelected ? 0.9 : 0.62))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 32)
-                    .background {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(.ultraThinMaterial)
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(isHomeSelected ? Color.primary.opacity(0.14) : Color.primary.opacity(0.045))
-                            }
-                    }
-                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .help("Home")
-            .offset(x: isSearchActive ? -18 : 0)
-            .opacity(isSearchActive ? 0 : 1)
-            .scaleEffect(isSearchActive ? 0.96 : 1, anchor: .leading)
+            homeSegment
 
             Button(action: activateSearch) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.primary.opacity(0.66))
+                    .foregroundStyle(.primary.opacity(isSearchHovered ? 0.86 : 0.66))
                     .matchedGeometryEffect(id: "searchIcon", in: liquidNamespace)
                     .frame(maxWidth: .infinity)
                     .frame(height: 32)
-                    .background(searchLiquidSurface)
+                    .background(searchLiquidSurface(isHovered: isSearchHovered))
                     .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .buttonStyle(.plain)
             .help("Search Pages")
+            .onHover { hovering in
+                withAnimation(.easeOut(duration: 0.14)) {
+                    isSearchHovered = hovering
+                }
+            }
+        }
+    }
+
+    private var homeSegment: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(homeSegmentFill)
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(homeSegmentStroke, lineWidth: 1)
+                }
+                .shadow(color: Color.accentColor.opacity(isHomeHovered ? 0.16 : 0), radius: isHomeHovered ? 8 : 0, y: isHomeHovered ? 2 : 0)
+
+            Button(action: isHomeSelected ? reloadHome : openHome) {
+                Image(systemName: isHomeSelected ? "arrow.clockwise" : "house.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(isHomeSelected || isHomeHovered ? 0.9 : 0.62))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 32)
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .help(isHomeSelected ? "Regenerate Home page" : "Home")
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 32)
+        .offset(x: isSearchActive ? -18 : 0)
+        .opacity(isSearchActive ? 0 : 1)
+        .scaleEffect(isSearchActive ? 0.96 : 1, anchor: .leading)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.14)) {
+                isHomeHovered = hovering
+            }
         }
     }
 
@@ -1637,7 +2092,7 @@ private struct SidebarHomeSearchControl: View {
         .padding(.horizontal, 10)
         .frame(height: 32)
         .frame(maxWidth: .infinity)
-        .background(searchLiquidSurface)
+        .background(searchLiquidSurface(isHovered: false))
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onTapGesture {
             isSearchFocused.wrappedValue = true
@@ -1647,19 +2102,33 @@ private struct SidebarHomeSearchControl: View {
         }
     }
 
-    private var searchLiquidSurface: some View {
+    private func searchLiquidSurface(isHovered: Bool) -> some View {
         RoundedRectangle(cornerRadius: 8, style: .continuous)
             .fill(.ultraThinMaterial)
             .overlay {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.primary.opacity(isSearchActive ? 0.060 : 0.050))
+                    .fill(Color.primary.opacity(isSearchActive ? 0.060 : (isHovered ? 0.095 : 0.050)))
             }
             .overlay {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(isSearchActive || isSearchFocused.wrappedValue ? Color.accentColor.opacity(0.38) : Color.primary.opacity(0.095), lineWidth: 1)
+                    .stroke(isSearchActive || isSearchFocused.wrappedValue || isHovered ? Color.accentColor.opacity(0.38) : Color.primary.opacity(0.095), lineWidth: 1)
             }
-            .shadow(color: .black.opacity(isSearchActive ? 0.10 : 0.02), radius: isSearchActive ? 10 : 3, y: isSearchActive ? 4 : 1)
+            .shadow(color: isHovered ? Color.accentColor.opacity(0.14) : .black.opacity(isSearchActive ? 0.10 : 0.02), radius: isSearchActive || isHovered ? 10 : 3, y: isSearchActive || isHovered ? 4 : 1)
             .matchedGeometryEffect(id: "searchSurface", in: liquidNamespace)
+    }
+
+    private var homeSegmentFill: Color {
+        if isHomeSelected {
+            return Color.primary.opacity(isHomeHovered ? 0.18 : 0.14)
+        }
+        return Color.primary.opacity(isHomeHovered ? 0.095 : 0.045)
+    }
+
+    private var homeSegmentStroke: Color {
+        if isHomeSelected || isHomeHovered {
+            return Color.accentColor.opacity(0.34)
+        }
+        return Color.primary.opacity(0.095)
     }
 
     private func dismissSearch() {
@@ -1735,25 +2204,46 @@ private struct ReadOnlyHomePageView: View {
 
     var body: some View {
         ScrollView {
-            if isGenerating {
-                HomeGenerationInlineBlocks()
-                    .padding(.vertical, 8)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-            } else {
-                MarkdownPreview(
-                    content: markdown,
-                    searchHighlight: nil,
-                    openLinkedNote: openLinkedNote,
-                    imageURL: imageURL
-                )
-                .padding(.vertical, 8)
-                .textSelection(.enabled)
-                .transition(.opacity)
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 10) {
+                    Text("Home")
+                        .font(.system(size: 52, weight: .bold))
+                        .foregroundStyle(.primary)
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.top, 8)
+
+                if isGenerating {
+                    HomeGenerationInlineBlocks()
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                } else {
+                    MarkdownPreview(
+                        content: markdownWithoutHomeHeading,
+                        searchHighlight: nil,
+                        openLinkedNote: openLinkedNote,
+                        imageURL: imageURL
+                    )
+                    .textSelection(.enabled)
+                    .transition(.opacity)
+                }
             }
+            .padding(.vertical, 8)
         }
         .scrollContentBackground(.hidden)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .animation(.easeInOut(duration: 0.24), value: isGenerating)
+    }
+
+    private var markdownWithoutHomeHeading: String {
+        var lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) == "# Home" {
+            lines.removeFirst()
+            while lines.first?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+                lines.removeFirst()
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 }
 
@@ -1903,6 +2393,7 @@ private struct HighlightSummaryFooter: View {
 private struct MarkdownEditingSurface: View {
     @Binding var content: String
     @Binding var isEditing: Bool
+    let isReadOnly: Bool
     let searchHighlight: SearchHighlight?
     let noteTitles: [String]
     let openLinkedNote: (String) -> Void
@@ -1941,7 +2432,7 @@ private struct MarkdownEditingSurface: View {
 
     var body: some View {
         Group {
-            if isEditing {
+            if isEditing && !isReadOnly {
                 editor
             } else {
                 renderedPreview
@@ -1949,6 +2440,11 @@ private struct MarkdownEditingSurface: View {
         }
         .onExitCommand {
             isEditing = false
+        }
+        .onChange(of: isReadOnly) { _, readOnly in
+            if readOnly {
+                isEditing = false
+            }
         }
     }
 
@@ -1961,7 +2457,8 @@ private struct MarkdownEditingSurface: View {
                     typingStatus: $typingStatus,
                     linkTabCompletionTitle: linkSuggestions.first,
                     suggestionRange: activeSuggestionNSRange,
-                    suggestionAnchor: $suggestionAnchor
+                    suggestionAnchor: $suggestionAnchor,
+                    insertImageData: insertImageData
                 )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -2032,7 +2529,7 @@ private struct MarkdownEditingSurface: View {
         .onTapGesture {
             if searchHighlight != nil {
                 clearSearchHighlight()
-            } else {
+            } else if !isReadOnly {
                 isEditing = true
             }
         }
@@ -2142,13 +2639,15 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
     let linkTabCompletionTitle: String?
     let suggestionRange: NSRange?
     @Binding var suggestionAnchor: CGPoint?
+    let insertImageData: (Data, String?) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             text: $text,
             selectionRange: $selectionRange,
             typingStatus: $typingStatus,
-            suggestionAnchor: $suggestionAnchor
+            suggestionAnchor: $suggestionAnchor,
+            insertImageData: insertImageData
         )
     }
 
@@ -2195,6 +2694,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         context.coordinator.selectionRange = $selectionRange
         context.coordinator.typingStatus = $typingStatus
         context.coordinator.suggestionAnchor = $suggestionAnchor
+        context.coordinator.insertImageData = insertImageData
         context.coordinator.linkTabCompletionTitle = linkTabCompletionTitle
         context.coordinator.suggestionRange = suggestionRange
 
@@ -2230,6 +2730,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         var selectionRange: Binding<NSRange>
         var typingStatus: Binding<MarkdownTypingStatus>
         var suggestionAnchor: Binding<CGPoint?>
+        var insertImageData: (Data, String?) -> Void
         var linkTabCompletionTitle: String?
         var suggestionRange: NSRange?
         weak var textView: NSTextView?
@@ -2240,12 +2741,14 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             text: Binding<String>,
             selectionRange: Binding<NSRange>,
             typingStatus: Binding<MarkdownTypingStatus>,
-            suggestionAnchor: Binding<CGPoint?>
+            suggestionAnchor: Binding<CGPoint?>,
+            insertImageData: @escaping (Data, String?) -> Void
         ) {
             self.text = text
             self.selectionRange = selectionRange
             self.typingStatus = typingStatus
             self.suggestionAnchor = suggestionAnchor
+            self.insertImageData = insertImageData
         }
 
         func textDidChange(_ notification: Notification) {
@@ -2261,6 +2764,12 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
                 publishSelection(from: textView)
             }
             updateSuggestionAnchor()
+        }
+
+        func pasteImageFromClipboard() -> Bool {
+            guard let image = PasteboardImageReader.imagePayload(from: .general) else { return false }
+            insertImageData(image.data, image.fileName)
+            return true
         }
 
         private func publishSelection(from textView: NSTextView) {
@@ -2938,8 +3447,90 @@ private extension String {
     }
 }
 
+private extension NSImage {
+    func pngData() -> Data? {
+        guard let tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffRepresentation)
+        else { return nil }
+
+        return bitmap.representation(using: .png, properties: [:])
+    }
+}
+
+private struct PasteboardImagePayload {
+    let data: Data
+    let fileName: String
+}
+
+private enum PasteboardImageReader {
+    static func hasImage(on pasteboard: NSPasteboard = .general) -> Bool {
+        imagePayload(from: pasteboard) != nil
+    }
+
+    static func imagePayload(from pasteboard: NSPasteboard) -> PasteboardImagePayload? {
+        for candidate in directImageTypes {
+            if let data = pasteboard.data(forType: candidate.type) {
+                if candidate.needsPNGConversion,
+                   let image = NSImage(data: data),
+                   let pngData = image.pngData() {
+                    return PasteboardImagePayload(data: pngData, fileName: "clipboard-image.png")
+                }
+
+                return PasteboardImagePayload(data: data, fileName: "clipboard-image.\(candidate.fileExtension)")
+            }
+        }
+
+        if let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL],
+           let imageURL = urls.first(where: isSupportedImageURL),
+           let data = try? Data(contentsOf: imageURL) {
+            return PasteboardImagePayload(data: data, fileName: imageURL.lastPathComponent)
+        }
+
+        if let images = pasteboard.readObjects(forClasses: [NSImage.self]) as? [NSImage],
+           let image = images.first,
+           let pngData = image.pngData() {
+            return PasteboardImagePayload(data: pngData, fileName: "clipboard-image.png")
+        }
+
+        return nil
+    }
+
+    nonisolated private static func isSupportedImageURL(_ url: URL) -> Bool {
+        ["png", "jpg", "jpeg", "gif", "heic", "tif", "tiff", "webp"].contains(url.pathExtension.lowercased())
+    }
+
+    private static let directImageTypes: [(type: NSPasteboard.PasteboardType, fileExtension: String, needsPNGConversion: Bool)] = [
+        (.png, "png", false),
+        (NSPasteboard.PasteboardType(UTType.jpeg.identifier), "jpg", false),
+        (.tiff, "png", true),
+        (NSPasteboard.PasteboardType(UTType.gif.identifier), "gif", false),
+        (NSPasteboard.PasteboardType("public.heic"), "heic", false),
+        (NSPasteboard.PasteboardType("org.webmproject.webp"), "webp", false)
+    ]
+}
+
 private final class MarkdownNSTextView: NSTextView {
     weak var commandHandler: InlineMarkdownEditor.Coordinator?
+
+    override func paste(_ sender: Any?) {
+        if commandHandler?.pasteImageFromClipboard() == true {
+            return
+        }
+
+        super.paste(sender)
+    }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)),
+           PasteboardImageReader.hasImage() {
+            return true
+        }
+
+        return super.validateUserInterfaceItem(item)
+    }
 
     @objc(toggleBoldface:)
     func handleToggleBoldface(_ sender: Any?) {
@@ -3344,6 +3935,9 @@ private struct AssistantFloatingPill: View {
         .onChange(of: measuredPromptHeight) { _, _ in
             expandComposerIfPromptNeedsRoom()
         }
+        .onPasteCommand(of: [.image, .fileURL]) { providers in
+            pastePromptImages(from: providers)
+        }
     }
 
     private var modelMenu: some View {
@@ -3643,6 +4237,95 @@ private struct AssistantFloatingPill: View {
             isExpandedPromptFocused = true
         }
     }
+
+    private func pastePromptImages(from providers: [NSItemProvider]) {
+        guard isPromptFocused || isExpandedPromptFocused else { return }
+
+        if let fileProvider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) {
+            fileProvider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+                if let error {
+                    Task { @MainActor in
+                        store.status = error.localizedDescription
+                    }
+                    return
+                }
+
+                let url: URL?
+                if let data = item as? Data {
+                    url = URL(dataRepresentation: data, relativeTo: nil)
+                } else if let nsURL = item as? NSURL {
+                    url = nsURL as URL
+                } else {
+                    url = item as? URL
+                }
+
+                guard let url else {
+                    Task { @MainActor in
+                        store.status = "Only image files can be pasted into the prompt"
+                    }
+                    return
+                }
+
+                Task { @MainActor in
+                    store.attachPromptDocument(from: url)
+                }
+            }
+            return
+        }
+
+        guard let imageProvider = providers.first(where: { provider in
+            Self.promptImagePasteTypes.contains { provider.hasItemConformingToTypeIdentifier($0) }
+        }) else {
+            return
+        }
+
+        let typeIdentifier = Self.promptImagePasteTypes.first {
+            imageProvider.hasItemConformingToTypeIdentifier($0)
+        } ?? UTType.image.identifier
+        imageProvider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, error in
+            if let error {
+                Task { @MainActor in
+                    store.status = error.localizedDescription
+                }
+                return
+            }
+
+            guard let data else {
+                Task { @MainActor in
+                    store.status = "Could not read pasted image"
+                }
+                return
+            }
+
+            Task { @MainActor in
+                store.attachPromptImage(data: data, suggestedFileName: imageProvider.suggestedName ?? Self.promptImageFileName(for: typeIdentifier))
+            }
+        }
+    }
+
+    private static func promptImageFileName(for typeIdentifier: String) -> String {
+        let fileExtension: String
+        if let preferredExtension = UTType(typeIdentifier)?.preferredFilenameExtension {
+            fileExtension = preferredExtension
+        } else if typeIdentifier == "public.heic" {
+            fileExtension = "heic"
+        } else if typeIdentifier == "org.webmproject.webp" {
+            fileExtension = "webp"
+        } else {
+            fileExtension = "png"
+        }
+        return "pasted-image.\(fileExtension)"
+    }
+
+    private static let promptImagePasteTypes = [
+        UTType.png.identifier,
+        UTType.jpeg.identifier,
+        UTType.tiff.identifier,
+        UTType.gif.identifier,
+        "public.heic",
+        "org.webmproject.webp",
+        UTType.image.identifier
+    ]
 }
 
 private struct ThinkingStatusPill: View {
@@ -3734,11 +4417,34 @@ private struct MarkdownPreview: View {
         MarkdownBlock.parse(content)
     }
 
+    private var renderBlocks: [MarkdownRenderBlock] {
+        var output: [MarkdownRenderBlock] = []
+        var imageGroup: [MarkdownBlock] = []
+
+        func flushImageGroup() {
+            guard !imageGroup.isEmpty else { return }
+            output.append(MarkdownRenderBlock(id: imageGroup.first?.id ?? output.count, blocks: imageGroup))
+            imageGroup.removeAll()
+        }
+
+        for block in blocks {
+            if case .image = block.kind {
+                imageGroup.append(block)
+            } else {
+                flushImageGroup()
+                output.append(MarkdownRenderBlock(id: block.id, blocks: [block]))
+            }
+        }
+
+        flushImageGroup()
+        return output
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(blocks) { block in
-                blockView(block)
-                    .id(block.id)
+            ForEach(renderBlocks) { renderBlock in
+                renderBlockView(renderBlock)
+                    .id(renderBlock.id)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -3754,6 +4460,38 @@ private struct MarkdownPreview: View {
             openLinkedNote(title)
             return .handled
         })
+    }
+
+    @ViewBuilder
+    private func renderBlockView(_ renderBlock: MarkdownRenderBlock) -> some View {
+        if renderBlock.blocks.count > 1,
+           renderBlock.blocks.allSatisfy({ block in
+               if case .image = block.kind { return true }
+               return false
+           }) {
+            imageGridView(renderBlock.blocks)
+        } else if let block = renderBlock.blocks.first {
+            blockView(block)
+        }
+    }
+
+    private func imageGridView(_ blocks: [MarkdownBlock]) -> some View {
+        let columns = Array(
+            repeating: GridItem(.flexible(minimum: 180, maximum: 320), spacing: 12),
+            count: min(3, max(2, blocks.count))
+        )
+
+        return LazyVGrid(columns: columns, alignment: .center, spacing: 12) {
+            ForEach(blocks) { block in
+                if case .image(let alt, let path) = block.kind {
+                    MarkdownImageView(alt: alt, url: imageURL(path), maxWidth: 320, maxHeight: 240)
+                        .frame(maxWidth: .infinity)
+                        .highlightedSearchBlock(searchHighlight?.blockIndex == block.id)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.vertical, 4)
     }
 
     @ViewBuilder
@@ -3827,7 +4565,12 @@ private struct MarkdownPreview: View {
                 .highlightedSearchBlock(isHighlighted)
 
         case .image(let alt, let path):
-            MarkdownImageView(alt: alt, url: imageURL(path))
+            MarkdownImageView(alt: alt, url: imageURL(path), maxWidth: 520, maxHeight: 360)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .highlightedSearchBlock(isHighlighted)
+
+        case .table(let table):
+            tableView(table, highlighted: isHighlighted)
                 .highlightedSearchBlock(isHighlighted)
 
         case .divider:
@@ -3835,6 +4578,87 @@ private struct MarkdownPreview: View {
                 .fill(.secondary.opacity(0.22))
                 .frame(height: 1)
                 .padding(.vertical, 10)
+        }
+    }
+
+    private func tableView(_ table: MarkdownTable, highlighted: Bool) -> some View {
+        ScrollView(.horizontal) {
+            VStack(alignment: .leading, spacing: 0) {
+                tableRowView(table.headers, alignments: table.alignments, isHeader: true, highlighted: highlighted)
+
+                Rectangle()
+                    .fill(Color.primary.opacity(0.16))
+                    .frame(height: 1)
+
+                ForEach(Array(table.rows.enumerated()), id: \.offset) { index, row in
+                    tableRowView(row, alignments: table.alignments, isHeader: false, highlighted: highlighted)
+                        .background(index.isMultiple(of: 2) ? Color.primary.opacity(0.025) : Color.clear)
+                }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .background(.quaternary.opacity(0.18))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+            }
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .scrollIndicators(.visible)
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    private func tableRowView(
+        _ cells: [String],
+        alignments: [MarkdownTableAlignment],
+        isHeader: Bool,
+        highlighted: Bool
+    ) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(cells.indices, id: \.self) { index in
+                inlineText(cells[index], highlighted: highlighted)
+                    .font(.system(size: isHeader ? 13.5 : 13, weight: isHeader ? .semibold : .regular))
+                    .lineLimit(nil)
+                    .multilineTextAlignment(textAlignment(for: alignments[safe: index] ?? .left))
+                    .frame(
+                        minWidth: 118,
+                        maxWidth: 210,
+                        alignment: frameAlignment(for: alignments[safe: index] ?? .left)
+                    )
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, isHeader ? 9 : 8)
+                    .background(isHeader ? Color.primary.opacity(0.055) : Color.clear)
+                    .overlay(alignment: .trailing) {
+                        if index < cells.count - 1 {
+                            Rectangle()
+                                .fill(Color.primary.opacity(0.08))
+                                .frame(width: 1)
+                        }
+                    }
+            }
+        }
+    }
+
+    private func textAlignment(for alignment: MarkdownTableAlignment) -> TextAlignment {
+        switch alignment {
+        case .left:
+            return .leading
+        case .center:
+            return .center
+        case .right:
+            return .trailing
+        }
+    }
+
+    private func frameAlignment(for alignment: MarkdownTableAlignment) -> Alignment {
+        switch alignment {
+        case .left:
+            return .leading
+        case .center:
+            return .center
+        case .right:
+            return .trailing
         }
     }
 
@@ -3963,6 +4787,8 @@ private struct MarkdownPreview: View {
 private struct MarkdownImageView: View {
     let alt: String
     let url: URL?
+    let maxWidth: CGFloat
+    let maxHeight: CGFloat
 
     var body: some View {
         Group {
@@ -3990,7 +4816,7 @@ private struct MarkdownImageView: View {
                 missingImage
             }
         }
-        .frame(maxWidth: 520, maxHeight: 360, alignment: .leading)
+        .frame(maxWidth: maxWidth, maxHeight: maxHeight, alignment: .center)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
@@ -4008,6 +4834,23 @@ private struct MarkdownImageView: View {
     }
 }
 
+private struct MarkdownRenderBlock: Identifiable {
+    let id: Int
+    let blocks: [MarkdownBlock]
+}
+
+private struct MarkdownTable {
+    let headers: [String]
+    let alignments: [MarkdownTableAlignment]
+    let rows: [[String]]
+}
+
+private enum MarkdownTableAlignment {
+    case left
+    case center
+    case right
+}
+
 private struct MarkdownBlock: Identifiable {
     enum Kind {
         case heading(level: Int, text: String)
@@ -4018,6 +4861,7 @@ private struct MarkdownBlock: Identifiable {
         case quote(String)
         case code(String)
         case image(alt: String, path: String)
+        case table(MarkdownTable)
         case divider
     }
 
@@ -4041,7 +4885,9 @@ private struct MarkdownBlock: Identifiable {
             paragraph.removeAll()
         }
 
-        for line in lines {
+        var lineIndex = 0
+        while lineIndex < lines.count {
+            let line = lines[lineIndex]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
             if trimmed.hasPrefix("```") {
@@ -4052,43 +4898,58 @@ private struct MarkdownBlock: Identifiable {
                     flushParagraph()
                 }
                 isInCodeBlock.toggle()
+                lineIndex += 1
                 continue
             }
 
             if isInCodeBlock {
                 codeLines.append(line)
+                lineIndex += 1
                 continue
             }
 
             guard !trimmed.isEmpty else {
                 flushParagraph()
+                lineIndex += 1
                 continue
             }
 
-            if let heading = parseHeading(trimmed) {
+            if let parsedTable = parseTable(startingAt: lineIndex, in: lines) {
+                flushParagraph()
+                append(.table(parsedTable.table))
+                lineIndex += parsedTable.consumedLineCount
+            } else if let heading = parseHeading(trimmed) {
                 flushParagraph()
                 append(.heading(level: heading.level, text: heading.text))
+                lineIndex += 1
             } else if let image = parseImage(trimmed) {
                 flushParagraph()
                 append(.image(alt: image.alt, path: image.path))
+                lineIndex += 1
             } else if isDivider(trimmed) {
                 flushParagraph()
                 append(.divider)
+                lineIndex += 1
             } else if let task = parseTask(trimmed) {
                 flushParagraph()
                 append(.task(isDone: task.isDone, text: task.text))
+                lineIndex += 1
             } else if let bullet = parseBullet(trimmed) {
                 flushParagraph()
                 append(.bullet(bullet))
+                lineIndex += 1
             } else if let numbered = parseNumbered(trimmed) {
                 flushParagraph()
                 append(.numbered(numbered.number, numbered.text))
+                lineIndex += 1
             } else if trimmed.hasPrefix(">") {
                 flushParagraph()
                 let text = trimmed.dropFirst().trimmingCharacters(in: .whitespaces)
                 append(.quote(text))
+                lineIndex += 1
             } else {
                 paragraph.append(trimmed)
+                lineIndex += 1
             }
         }
 
@@ -4124,6 +4985,106 @@ private struct MarkdownBlock: Identifiable {
         let pathEnd = line.index(before: line.endIndex)
         guard pathStart <= pathEnd else { return nil }
         return (alt, String(line[pathStart..<pathEnd]))
+    }
+
+    private static func parseTable(startingAt index: Int, in lines: [String]) -> (table: MarkdownTable, consumedLineCount: Int)? {
+        guard index + 1 < lines.count else { return nil }
+
+        let headerLine = lines[index].trimmingCharacters(in: .whitespaces)
+        let separatorLine = lines[index + 1].trimmingCharacters(in: .whitespaces)
+        guard headerLine.contains("|") else { return nil }
+
+        let headers = splitTableRow(headerLine)
+        let separatorCells = splitTableRow(separatorLine)
+        guard headers.count >= 2,
+              separatorCells.count == headers.count,
+              separatorCells.allSatisfy(isTableSeparatorCell)
+        else { return nil }
+
+        let alignments = separatorCells.map { tableAlignment(for: $0) }
+        var rows: [[String]] = []
+        var cursor = index + 2
+
+        while cursor < lines.count {
+            let rowLine = lines[cursor].trimmingCharacters(in: .whitespaces)
+            guard !rowLine.isEmpty,
+                  rowLine.contains("|"),
+                  splitTableRow(rowLine).count >= 2
+            else { break }
+
+            rows.append(normalizedTableCells(splitTableRow(rowLine), columnCount: headers.count))
+            cursor += 1
+        }
+
+        return (
+            MarkdownTable(
+                headers: normalizedTableCells(headers, columnCount: headers.count),
+                alignments: normalizedTableAlignments(alignments, columnCount: headers.count),
+                rows: rows
+            ),
+            cursor - index
+        )
+    }
+
+    nonisolated private static func splitTableRow(_ line: String) -> [String] {
+        var cleanLine = line.trimmingCharacters(in: .whitespaces)
+        if cleanLine.hasPrefix("|") {
+            cleanLine.removeFirst()
+        }
+        if cleanLine.hasSuffix("|") {
+            cleanLine.removeLast()
+        }
+
+        return cleanLine
+            .split(separator: "|", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    nonisolated private static func isTableSeparatorCell(_ cell: String) -> Bool {
+        var cleanCell = cell.trimmingCharacters(in: .whitespaces)
+        if cleanCell.hasPrefix(":") {
+            cleanCell.removeFirst()
+        }
+        if cleanCell.hasSuffix(":") {
+            cleanCell.removeLast()
+        }
+
+        return cleanCell.count >= 3 && cleanCell.allSatisfy { $0 == "-" }
+    }
+
+    nonisolated private static func tableAlignment(for separatorCell: String) -> MarkdownTableAlignment {
+        let cleanCell = separatorCell.trimmingCharacters(in: .whitespaces)
+        if cleanCell.hasPrefix(":") && cleanCell.hasSuffix(":") {
+            return .center
+        }
+        if cleanCell.hasSuffix(":") {
+            return .right
+        }
+        return .left
+    }
+
+    nonisolated private static func normalizedTableCells(_ cells: [String], columnCount: Int) -> [String] {
+        if cells.count == columnCount {
+            return cells
+        }
+
+        if cells.count > columnCount {
+            return Array(cells.prefix(columnCount))
+        }
+
+        return cells + Array(repeating: "", count: columnCount - cells.count)
+    }
+
+    nonisolated private static func normalizedTableAlignments(_ alignments: [MarkdownTableAlignment], columnCount: Int) -> [MarkdownTableAlignment] {
+        if alignments.count == columnCount {
+            return alignments
+        }
+
+        if alignments.count > columnCount {
+            return Array(alignments.prefix(columnCount))
+        }
+
+        return alignments + Array(repeating: .left, count: columnCount - alignments.count)
     }
 
     private static func parseTask(_ line: String) -> (isDone: Bool, text: String)? {
