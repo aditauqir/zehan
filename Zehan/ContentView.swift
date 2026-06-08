@@ -279,12 +279,21 @@ private struct WorkspaceView: View {
                         query: $sidebarSearchQuery,
                         isSearchFocused: $isSidebarSearchFocused,
                         isHomeSelected: store.isShowingHomePage,
+                        isHelpDeskSelected: store.isShowingHelpDesk,
                         openHome: {
                             withAnimation(.easeInOut(duration: 0.18)) {
                                 isEditingMarkdown = false
                                 isSidebarSearchActive = false
                                 sidebarSearchQuery = ""
                                 store.openHomePage()
+                            }
+                        },
+                        openHelpDesk: {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                isEditingMarkdown = false
+                                isSidebarSearchActive = false
+                                sidebarSearchQuery = ""
+                                store.openHelpDesk()
                             }
                         },
                         reloadHome: {
@@ -335,6 +344,17 @@ private struct WorkspaceView: View {
                                         )
                                 }
 
+                                if shouldShowNewPageHint {
+                                    NewBrainPageHint {
+                                        withAnimation(.easeInOut(duration: 0.18)) {
+                                            isEditingMarkdown = false
+                                            store.newDraft()
+                                        }
+                                    }
+                                    .padding(.top, 8)
+                                    .transition(.opacity.combined(with: .move(edge: .top)))
+                                }
+
                                 Color.clear
                                     .frame(height: 14)
                                     .onDrop(
@@ -379,20 +399,7 @@ private struct WorkspaceView: View {
                 .padding(.horizontal, 12)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260)
             } detail: {
-                ZStack(alignment: .bottom) {
-                    workspaceDetail
-                    if shouldShowNewPageHint {
-                        NewBrainPageHint {
-                            withAnimation(.easeInOut(duration: 0.18)) {
-                                isEditingMarkdown = false
-                                store.newDraft()
-                            }
-                        }
-                        .padding(.bottom, 116)
-                        .transition(.scale(scale: 0.96).combined(with: .opacity))
-                        .zIndex(2)
-                    }
-                }
+                workspaceDetail
             }
 
             if isGraphExpanded {
@@ -450,7 +457,7 @@ private struct WorkspaceView: View {
     private var workspaceDetail: some View {
         ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
-                if !store.isShowingHomePage {
+                if !store.isShowingHomePage && !store.isShowingHelpDesk {
                     HStack {
                         DocumentChromeControls(
                             canDelete: !store.isViewingGeneratedPage && (store.selectedNoteID != nil || store.currentNoteID != nil),
@@ -475,7 +482,9 @@ private struct WorkspaceView: View {
                 }
 
                     Group {
-                        if store.isShowingHomePage {
+                        if store.isShowingHelpDesk {
+                            HelpDeskView(store: store)
+                        } else if store.isShowingHomePage {
                             ReadOnlyHomePageView(
                                 markdown: store.homeMarkdown,
                                 isGenerating: store.isGeneratingHomePage,
@@ -513,7 +522,9 @@ private struct WorkspaceView: View {
                     .padding(.bottom, 18)
 
                     HStack {
-                        if store.isShowingHomePage {
+                        if store.isShowingHelpDesk {
+                            Text("Zirn Chat")
+                        } else if store.isShowingHomePage {
                             HomeFooter(latestSummary: store.latestHomeSummary)
                         } else if let summary = store.currentHighlightSummary {
                             HighlightSummaryFooter(summary: summary)
@@ -575,7 +586,6 @@ private struct WorkspaceView: View {
     private var shouldShowNewPageHint: Bool {
         store.activeBrain != nil
             && store.notes.isEmpty
-            && !store.isShowingHomePage
             && store.currentHighlightSummary == nil
             && !isEditingMarkdown
     }
@@ -811,38 +821,18 @@ private struct NewBrainPageHint: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 11) {
-                Image(systemName: "doc.badge.plus")
-                    .font(.system(size: 15, weight: .semibold))
-                    .symbolRenderingMode(.hierarchical)
-                    .frame(width: 26, height: 26)
-                    .background(
-                        Circle()
-                            .fill(Color.primary.opacity(isHovered ? 0.13 : 0.08))
-                    )
-
-                HStack(spacing: 6) {
-                    Text("Press")
-                        .foregroundStyle(.secondary)
-
-                    KeyboardShortcutCapsule(text: "Cmd")
-                    KeyboardShortcutCapsule(text: "N")
-
-                    Text("to start a new page")
-                        .foregroundStyle(.primary.opacity(0.82))
-                }
-                .font(.system(size: 13.5, weight: .semibold))
+            HStack(spacing: 5) {
+                Text("Press")
+                Image(systemName: "command")
+                    .font(.system(size: 11, weight: .bold))
+                Text("N to start")
+                Spacer(minLength: 0)
             }
-            .padding(.leading, 10)
-            .padding(.trailing, 14)
-            .padding(.vertical, 9)
-            .background(.ultraThinMaterial)
-            .clipShape(Capsule())
-            .overlay {
-                Capsule()
-                    .stroke(Color.primary.opacity(isHovered ? 0.18 : 0.10), lineWidth: 1)
-            }
-            .shadow(color: .black.opacity(isHovered ? 0.18 : 0.11), radius: isHovered ? 14 : 9, y: isHovered ? 8 : 5)
+            .font(.system(size: 12.5, weight: .semibold))
+            .foregroundStyle(.primary.opacity(isHovered ? 0.9 : 0.58))
+            .lineLimit(1)
+            .padding(.horizontal, 12)
+            .frame(height: 28)
         }
         .buttonStyle(.plain)
         .help("Create a new page")
@@ -851,24 +841,6 @@ private struct NewBrainPageHint: View {
                 isHovered = hovering
             }
         }
-    }
-}
-
-private struct KeyboardShortcutCapsule: View {
-    let text: String
-
-    var body: some View {
-        Text(text)
-            .font(.system(size: 11, weight: .bold, design: .rounded))
-            .foregroundStyle(.primary.opacity(0.78))
-            .padding(.horizontal, 7)
-            .frame(height: 20)
-            .background(Color.primary.opacity(0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
-            }
     }
 }
 
@@ -1993,11 +1965,14 @@ private struct SidebarHomeSearchControl: View {
     @Binding var query: String
     var isSearchFocused: FocusState<Bool>.Binding
     let isHomeSelected: Bool
+    let isHelpDeskSelected: Bool
     let openHome: () -> Void
+    let openHelpDesk: () -> Void
     let reloadHome: () -> Void
     let activateSearch: () -> Void
     @Namespace private var liquidNamespace
     @State private var isHomeHovered = false
+    @State private var isHelpDeskHovered = false
     @State private var isSearchHovered = false
 
     var body: some View {
@@ -2018,50 +1993,85 @@ private struct SidebarHomeSearchControl: View {
         HStack(spacing: 8) {
             homeSegment
 
-            Button(action: activateSearch) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.primary.opacity(isSearchHovered ? 0.86 : 0.66))
-                    .matchedGeometryEffect(id: "searchIcon", in: liquidNamespace)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 32)
-                    .background(searchLiquidSurface(isHovered: isSearchHovered))
-                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .help("Search Pages")
-            .onHover { hovering in
-                withAnimation(.easeOut(duration: 0.14)) {
-                    isSearchHovered = hovering
-                }
-            }
+            helpDeskSegment
+
+            searchSegment
         }
     }
 
     private var homeSegment: some View {
+        sidebarSegment(
+            systemImage: isHomeSelected ? "arrow.clockwise" : "house.fill",
+            isSelected: isHomeSelected,
+            isHovered: isHomeHovered,
+            help: isHomeSelected ? "Regenerate Home page" : "Home",
+            action: isHomeSelected ? reloadHome : openHome,
+            hover: { isHomeHovered = $0 }
+        )
+    }
+
+    private var helpDeskSegment: some View {
+        sidebarSegment(
+            systemImage: "bubble.left.and.text.bubble.right",
+            isSelected: isHelpDeskSelected,
+            isHovered: isHelpDeskHovered,
+            help: "Zirn Chat",
+            action: openHelpDesk,
+            hover: { isHelpDeskHovered = $0 }
+        )
+    }
+
+    private var searchSegment: some View {
+        Button(action: activateSearch) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.primary.opacity(isSearchHovered ? 0.86 : 0.66))
+                .matchedGeometryEffect(id: "searchIcon", in: liquidNamespace)
+                .frame(maxWidth: .infinity)
+                .frame(height: 32)
+                .background(searchLiquidSurface(isHovered: isSearchHovered))
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help("Search Pages")
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.14)) {
+                isSearchHovered = hovering
+            }
+        }
+    }
+
+    private func sidebarSegment(
+        systemImage: String,
+        isSelected: Bool,
+        isHovered: Bool,
+        help: String,
+        action: @escaping () -> Void,
+        hover: @escaping (Bool) -> Void
+    ) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .overlay {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(homeSegmentFill)
+                        .fill(segmentFill(isSelected: isSelected, isHovered: isHovered))
                 }
                 .overlay {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(homeSegmentStroke, lineWidth: 1)
+                        .stroke(segmentStroke(isSelected: isSelected, isHovered: isHovered), lineWidth: 1)
                 }
-                .shadow(color: Color.accentColor.opacity(isHomeHovered ? 0.16 : 0), radius: isHomeHovered ? 8 : 0, y: isHomeHovered ? 2 : 0)
+                .shadow(color: Color.accentColor.opacity(isHovered ? 0.16 : 0), radius: isHovered ? 8 : 0, y: isHovered ? 2 : 0)
 
-            Button(action: isHomeSelected ? reloadHome : openHome) {
-                Image(systemName: isHomeSelected ? "arrow.clockwise" : "house.fill")
+            Button(action: action) {
+                Image(systemName: systemImage)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.primary.opacity(isHomeSelected || isHomeHovered ? 0.9 : 0.62))
+                    .foregroundStyle(.primary.opacity(isSelected || isHovered ? 0.9 : 0.62))
                     .frame(maxWidth: .infinity)
                     .frame(height: 32)
                     .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .buttonStyle(.plain)
-            .help(isHomeSelected ? "Regenerate Home page" : "Home")
+            .help(help)
         }
         .frame(maxWidth: .infinity)
         .frame(height: 32)
@@ -2070,7 +2080,7 @@ private struct SidebarHomeSearchControl: View {
         .scaleEffect(isSearchActive ? 0.96 : 1, anchor: .leading)
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.14)) {
-                isHomeHovered = hovering
+                hover(hovering)
             }
         }
     }
@@ -2132,15 +2142,15 @@ private struct SidebarHomeSearchControl: View {
             .matchedGeometryEffect(id: "searchSurface", in: liquidNamespace)
     }
 
-    private var homeSegmentFill: Color {
-        if isHomeSelected {
-            return Color.primary.opacity(isHomeHovered ? 0.18 : 0.14)
+    private func segmentFill(isSelected: Bool, isHovered: Bool) -> Color {
+        if isSelected {
+            return Color.primary.opacity(isHovered ? 0.18 : 0.14)
         }
-        return Color.primary.opacity(isHomeHovered ? 0.095 : 0.045)
+        return Color.primary.opacity(isHovered ? 0.095 : 0.045)
     }
 
-    private var homeSegmentStroke: Color {
-        if isHomeSelected || isHomeHovered {
+    private func segmentStroke(isSelected: Bool, isHovered: Bool) -> Color {
+        if isSelected || isHovered {
             return Color.accentColor.opacity(0.34)
         }
         return Color.primary.opacity(0.095)
@@ -2187,6 +2197,541 @@ private struct HighlightSummarySidebarRow: View {
                 isHovered = hovering
             }
         }
+    }
+}
+
+private struct HelpDeskView: View {
+    @ObservedObject var store: BrainStore
+    @State private var conversationSearchQuery = ""
+    @State private var isConversationPopoverPresented = false
+    @State private var isConversationMenuHovered = false
+    @State private var isNewHovered = false
+    @State private var isUploadHovered = false
+    @State private var isSendHovered = false
+
+    private var selectedConversation: HelpDeskConversation? {
+        guard let id = store.selectedHelpDeskConversationID else { return nil }
+        return store.helpDeskConversations.first { $0.id == id }
+    }
+
+    private var historyConversations: [HelpDeskConversation] {
+        store.helpDeskConversations.filter { !$0.messages.isEmpty }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+
+            Divider()
+                .opacity(0.35)
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 14) {
+                        if let selectedConversation, !selectedConversation.messages.isEmpty {
+                            ForEach(selectedConversation.messages) { message in
+                                HelpDeskMessageBubble(
+                                    message: message,
+                                    openLinkedNote: { store.openLinkedNote(named: $0) },
+                                    imageURL: store.markdownImageURL,
+                                    imageData: store.markdownImageData
+                                )
+                                .id(message.id)
+                            }
+                        } else {
+                            HelpDeskEmptyState()
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 34)
+                        }
+
+                        if store.isGeneratingHelpDeskResponse {
+                            HelpDeskThinkingBubble()
+                                .id("thinking")
+                        }
+                    }
+                    .padding(.horizontal, 34)
+                    .padding(.top, 18)
+                    .padding(.bottom, 20)
+                }
+                .onChange(of: selectedConversation?.messages.count ?? 0) { _, _ in
+                    scrollToBottom(proxy)
+                }
+                .onChange(of: store.isGeneratingHelpDeskResponse) { _, _ in
+                    scrollToBottom(proxy)
+                }
+            }
+
+            composer
+                .padding(.horizontal, 34)
+                .padding(.bottom, 20)
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .sheet(isPresented: $store.isShowingHelpDeskConversationBrowser) {
+            HelpDeskConversationBrowser(
+                conversations: store.helpDeskConversations,
+                selectedID: store.selectedHelpDeskConversationID,
+                searchQuery: $conversationSearchQuery,
+                select: { store.selectHelpDeskConversation(id: $0) },
+                startNew: { store.startNewHelpDeskConversation() }
+            )
+            .frame(width: 520, height: 560)
+            .presentationBackground(.regularMaterial)
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            Text("Zirn Chat")
+                .font(.system(size: 30, weight: .bold))
+
+            conversationMenu
+
+            Spacer()
+
+            Button {
+                store.startNewHelpDeskConversation()
+            } label: {
+                HStack(spacing: 7) {
+                    Text("New")
+                    Image(systemName: "plus")
+                        .font(.system(size: 11.5, weight: .bold))
+                }
+                .font(.system(size: 12.5, weight: .bold))
+                .foregroundStyle(.black.opacity(0.86))
+                .padding(.horizontal, 14)
+                .frame(height: 32)
+                .background {
+                    Capsule()
+                        .fill(.white.opacity(isNewHovered ? 0.96 : 0.88))
+                        .overlay {
+                            Capsule()
+                                .fill(.ultraThinMaterial.opacity(isNewHovered ? 0.35 : 0.18))
+                        }
+                        .overlay {
+                            Capsule()
+                                .stroke(.white.opacity(0.48), lineWidth: 0.8)
+                        }
+                        .shadow(color: .white.opacity(isNewHovered ? 0.24 : 0.08), radius: isNewHovered ? 11 : 4)
+                }
+            }
+            .buttonStyle(.plain)
+            .help("Start new conversation")
+            .onHover { hovering in
+                withAnimation(.easeOut(duration: 0.14)) {
+                    isNewHovered = hovering
+                }
+            }
+        }
+        .padding(.horizontal, 34)
+        .padding(.vertical, 22)
+    }
+
+    private var conversationMenu: some View {
+        Button {
+            isConversationPopoverPresented.toggle()
+        } label: {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.secondary.opacity(isConversationMenuHovered ? 0.95 : 0.72))
+                .frame(width: 18, height: 28)
+        }
+        .buttonStyle(.plain)
+        .help("Conversation history")
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.14)) {
+                isConversationMenuHovered = hovering
+            }
+        }
+        .popover(isPresented: $isConversationPopoverPresented, arrowEdge: .bottom) {
+            conversationPopover
+        }
+    }
+
+    private var conversationPopover: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if historyConversations.isEmpty {
+                HStack(spacing: 9) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("No history")
+                        .font(.system(size: 13.5, weight: .semibold))
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .frame(height: 38)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(historyConversations) { conversation in
+                            HelpDeskConversationMenuRow(
+                                conversation: conversation,
+                                isSelected: conversation.id == store.selectedHelpDeskConversationID,
+                                select: {
+                                    store.selectHelpDeskConversation(id: conversation.id)
+                                    isConversationPopoverPresented = false
+                                },
+                                delete: {
+                                    store.deleteHelpDeskConversation(id: conversation.id)
+                                }
+                            )
+                        }
+                    }
+                    .padding(6)
+                }
+                .frame(maxHeight: 320)
+            }
+        }
+        .frame(width: 300)
+        .background(.regularMaterial)
+    }
+
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let attachment = store.helpDeskAttachment {
+                HStack(spacing: 8) {
+                    Image(systemName: "paperclip")
+                    Text(attachment.fileName)
+                        .lineLimit(1)
+                    Button {
+                        store.removeHelpDeskAttachment()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 11)
+                .frame(height: 28)
+                .background {
+                    Capsule()
+                        .fill(.ultraThinMaterial)
+                        .overlay {
+                            Capsule()
+                                .fill(.white.opacity(0.07))
+                        }
+                        .overlay {
+                            Capsule()
+                                .stroke(Color.primary.opacity(0.12), lineWidth: 0.8)
+                        }
+                }
+            }
+
+            HStack(alignment: .center, spacing: 10) {
+                Button {
+                    store.chooseHelpDeskAttachmentFromUser()
+                } label: {
+                    Image(systemName: "paperclip")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.primary.opacity(isUploadHovered ? 0.92 : 0.72))
+                        .frame(width: 32, height: 32)
+                        .background {
+                            Circle()
+                                .fill(.ultraThinMaterial)
+                                .overlay {
+                                    Circle()
+                                        .fill(.white.opacity(isUploadHovered ? 0.15 : 0.04))
+                                }
+                                .overlay {
+                                    Circle()
+                                        .stroke(Color.primary.opacity(isUploadHovered ? 0.18 : 0.08), lineWidth: 0.8)
+                                }
+                        }
+                }
+                .buttonStyle(.plain)
+                .help("Upload context")
+                .onHover { hovering in
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        isUploadHovered = hovering
+                    }
+                }
+
+                TextField("Ask the vault", text: $store.helpDeskInput, axis: .vertical)
+                    .font(.system(size: 14))
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...5)
+                    .frame(minHeight: 32, alignment: .center)
+                    .onSubmit {
+                        store.submitHelpDeskPrompt()
+                    }
+
+                Button {
+                    store.submitHelpDeskPrompt()
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(canSend ? (isSendHovered ? .white : Color.accentColor) : .secondary.opacity(0.55))
+                        .frame(width: 30, height: 32)
+                        .background {
+                            if canSend && isSendHovered {
+                                Circle()
+                                    .fill(Color.accentColor.opacity(0.78))
+                            }
+                        }
+                        .overlay {
+                            if canSend && (isSendHovered || store.isGeneratingHelpDeskResponse) {
+                                AnimatedThinkingBorder(lineWidth: 0.7)
+                                    .clipShape(Circle())
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSend)
+                .onHover { hovering in
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        isSendHovered = hovering
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                if store.isGeneratingHelpDeskResponse {
+                    AnimatedThinkingBorder(cornerRadius: 18)
+                } else {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                }
+            }
+        }
+    }
+
+    private var canSend: Bool {
+        (!store.helpDeskInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.helpDeskAttachment != nil)
+            && !store.isGeneratingHelpDeskResponse
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            if store.isGeneratingHelpDeskResponse {
+                proxy.scrollTo("thinking", anchor: .bottom)
+            } else if let lastID = selectedConversation?.messages.last?.id {
+                proxy.scrollTo(lastID, anchor: .bottom)
+            }
+        }
+    }
+}
+
+private struct HelpDeskConversationMenuRow: View {
+    let conversation: HelpDeskConversation
+    let isSelected: Bool
+    let select: () -> Void
+    let delete: () -> Void
+
+    @State private var isRowHovered = false
+    @State private var isDeleteHovered = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button(action: select) {
+                HStack(spacing: 8) {
+                    Image(systemName: isSelected ? "checkmark" : "bubble.left")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 16)
+                    Text(conversation.title)
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 6)
+                }
+                .foregroundStyle(.primary.opacity(isRowHovered ? 0.96 : 0.82))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button(action: delete) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(isDeleteHovered ? .red : .secondary.opacity(0.72))
+                    .frame(width: 24, height: 24)
+                    .background {
+                        Circle()
+                            .fill(Color.red.opacity(isDeleteHovered ? 0.16 : 0))
+                    }
+            }
+            .buttonStyle(.plain)
+            .help("Delete conversation")
+            .onHover { hovering in
+                withAnimation(.easeOut(duration: 0.12)) {
+                    isDeleteHovered = hovering
+                }
+            }
+        }
+        .padding(.leading, 9)
+        .padding(.trailing, 5)
+        .frame(height: 36)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(rowBackground)
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                isRowHovered = hovering
+            }
+        }
+    }
+
+    private var rowBackground: Color {
+        if isDeleteHovered {
+            return Color.red.opacity(0.08)
+        }
+        if isRowHovered || isSelected {
+            return Color.white.opacity(0.08)
+        }
+        return Color.clear
+    }
+}
+
+private struct HelpDeskMessageBubble: View {
+    let message: HelpDeskMessage
+    let openLinkedNote: (String) -> Void
+    let imageURL: (String) -> URL?
+    let imageData: (String) -> Data?
+
+    var body: some View {
+        HStack(alignment: .top) {
+            if message.role == .user {
+                Spacer(minLength: 90)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                if let attachmentName = message.attachmentName {
+                    Label(attachmentName, systemImage: "paperclip")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+
+                MarkdownPreview(
+                    content: message.content,
+                    searchHighlight: nil,
+                    openLinkedNote: openLinkedNote,
+                    imageURL: imageURL,
+                    imageData: imageData
+                )
+            }
+            .padding(.horizontal, message.role == .user ? 14 : 0)
+            .padding(.vertical, message.role == .user ? 10 : 0)
+            .background {
+                if message.role == .user {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                }
+            }
+            .frame(maxWidth: message.role == .user ? 520 : .infinity, alignment: .leading)
+
+            if message.role == .assistant {
+                Spacer(minLength: 90)
+            }
+        }
+    }
+}
+
+private struct HelpDeskEmptyState: View {
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "brain.head.profile")
+                .font(.system(size: 38, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("Ask anything across this vault.")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.primary)
+            Text("Zirn Chat uses your pages and this conversation's history for follow-up questions.")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(28)
+    }
+}
+
+private struct HelpDeskThinkingBubble: View {
+    var body: some View {
+        HStack {
+            ThinkingStatusPill()
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct HelpDeskConversationBrowser: View {
+    let conversations: [HelpDeskConversation]
+    let selectedID: HelpDeskConversation.ID?
+    @Binding var searchQuery: String
+    let select: (HelpDeskConversation.ID) -> Void
+    let startNew: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    private var filteredConversations: [HelpDeskConversation] {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return conversations }
+        return conversations.filter { conversation in
+            conversation.title.lowercased().contains(query)
+                || conversation.messages.contains { $0.content.lowercased().contains(query) }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            HStack {
+                Text("Conversations")
+                    .font(.system(size: 22, weight: .bold))
+                Spacer()
+                Button {
+                    startNew()
+                    dismiss()
+                } label: {
+                    Label("New", systemImage: "plus")
+                }
+                .buttonStyle(.borderless)
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Search conversations", text: $searchQuery)
+                    .textFieldStyle(.plain)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 36)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(filteredConversations) { conversation in
+                        Button {
+                            select(conversation.id)
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: conversation.id == selectedID ? "checkmark.circle.fill" : "bubble.left")
+                                    .foregroundStyle(conversation.id == selectedID ? Color.accentColor : .secondary)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(conversation.title)
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                    Text("\(conversation.messages.count) messages")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                            }
+                            .padding(10)
+                            .background(Color.primary.opacity(conversation.id == selectedID ? 0.10 : 0.035))
+                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(20)
     }
 }
 
@@ -3750,7 +4295,7 @@ private struct AssistantPreviewPanel: View {
     let openLinkedNote: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 10) {
                 Label("\(preview.providerTitle) Preview", systemImage: "sparkles")
                     .font(.system(size: 12, weight: .semibold))
@@ -3812,17 +4357,7 @@ private struct AssistantConversationPanel: View {
                     .foregroundStyle(.primary.opacity(0.55))
             }
 
-            ScrollView {
-                MarkdownPreview(
-                    content: response.answer,
-                    searchHighlight: nil,
-                    openLinkedNote: openLinkedNote
-                )
-                .padding(.trailing, 4)
-                .textSelection(.enabled)
-            }
-            .scrollIndicators(needsScrolling ? .visible : .hidden)
-            .frame(maxHeight: responseViewportHeight)
+            responseContent
 
             HStack {
                 Spacer()
@@ -3860,12 +4395,32 @@ private struct AssistantConversationPanel: View {
         .help("Close this answer")
     }
 
-    private var panelWidth: CGFloat {
-        min(620, max(360, CGFloat(response.answer.count) * 4.8))
+    @ViewBuilder
+    private var responseContent: some View {
+        if needsScrolling {
+            ScrollView {
+                responseMarkdown
+                    .padding(.trailing, 4)
+            }
+            .scrollIndicators(.visible)
+            .frame(height: responseMaxHeight)
+        } else {
+            responseMarkdown
+                .padding(.trailing, 4)
+        }
     }
 
-    private var responseViewportHeight: CGFloat {
-        min(responseMaxHeight, max(72, estimatedResponseHeight))
+    private var responseMarkdown: some View {
+        MarkdownPreview(
+            content: response.answer,
+            searchHighlight: nil,
+            openLinkedNote: openLinkedNote
+        )
+        .textSelection(.enabled)
+    }
+
+    private var panelWidth: CGFloat {
+        min(620, max(360, CGFloat(response.answer.count) * 4.8))
     }
 
     private var responseMaxHeight: CGFloat {
@@ -3959,6 +4514,7 @@ private struct PromptTextInputView: NSViewRepresentable {
     let suggestionRange: NSRange?
     @Binding var suggestionAnchor: CGPoint?
     let isExpanded: Bool
+    let isFocused: Bool
     let submitOnReturn: Bool
     let submit: () -> Void
     let completeLink: (String) -> Void
@@ -4010,9 +4566,11 @@ private struct PromptTextInputView: NSViewRepresentable {
         context.coordinator.linkTabCompletionTitle = linkTabCompletionTitle
         context.coordinator.suggestionRange = suggestionRange
         context.coordinator.isExpanded = isExpanded
+        context.coordinator.isFocused = isFocused
         context.coordinator.submitOnReturn = submitOnReturn
         context.coordinator.updateTextInsets(in: textView)
         textView.setSelectedRange(clamped(selectionRange, in: text))
+        context.coordinator.applyFocus(to: textView)
         return scrollView
     }
 
@@ -4024,6 +4582,7 @@ private struct PromptTextInputView: NSViewRepresentable {
         context.coordinator.linkTabCompletionTitle = linkTabCompletionTitle
         context.coordinator.suggestionRange = suggestionRange
         context.coordinator.isExpanded = isExpanded
+        context.coordinator.isFocused = isFocused
         context.coordinator.submitOnReturn = submitOnReturn
         context.coordinator.submit = submit
         context.coordinator.completeLink = completeLink
@@ -4036,6 +4595,7 @@ private struct PromptTextInputView: NSViewRepresentable {
             textView.setSelectedRange(clamped(selectionRange, in: text))
         }
         context.coordinator.updateSuggestionAnchor()
+        context.coordinator.applyFocus(to: textView)
     }
 
     private func clamped(_ range: NSRange, in text: String) -> NSRange {
@@ -4053,6 +4613,7 @@ private struct PromptTextInputView: NSViewRepresentable {
         var linkTabCompletionTitle: String?
         var suggestionRange: NSRange?
         var isExpanded = false
+        var isFocused = false
         var submitOnReturn = true
         weak var textView: NSTextView?
 
@@ -4075,6 +4636,18 @@ private struct PromptTextInputView: NSViewRepresentable {
                 ? NSSize(width: 10, height: 8)
                 : NSSize(width: 0, height: 3)
             textView.textContainer?.lineFragmentPadding = 0
+        }
+
+        func applyFocus(to textView: NSTextView) {
+            guard isFocused else { return }
+            DispatchQueue.main.async {
+                guard let window = textView.window,
+                      window.firstResponder !== textView
+                else { return }
+
+                window.makeFirstResponder(textView)
+                textView.setSelectedRange(self.clampedSelection(in: textView.string))
+            }
         }
 
         func textDidChange(_ notification: Notification) {
@@ -4151,6 +4724,13 @@ private struct PromptTextInputView: NSViewRepresentable {
             DispatchQueue.main.async {
                 self.selectionRange.wrappedValue = range
             }
+        }
+
+        private func clampedSelection(in text: String) -> NSRange {
+            let length = (text as NSString).length
+            let location = min(max(0, selectionRange.wrappedValue.location), length)
+            let rangeLength = min(selectionRange.wrappedValue.length, max(0, length - location))
+            return NSRange(location: location, length: rangeLength)
         }
     }
 }
@@ -4362,18 +4942,22 @@ private struct AssistantFloatingPill: View {
             }
             .overlay {
                 RoundedRectangle(cornerRadius: pillCornerRadius, style: .continuous)
-                    .stroke(borderColor, lineWidth: isPromptFocused ? 0.6 : 1)
+                    .stroke(borderColor, lineWidth: isAnyPromptFocused ? 0.6 : 1)
             }
             .overlay {
                 if isThinking {
                     AnimatedThinkingBorder(cornerRadius: pillCornerRadius)
                 }
             }
-            .shadow(color: glowColor, radius: isPromptFocused ? 7 : 13, y: isPromptFocused ? 0 : 7)
+            .shadow(color: glowColor, radius: isAnyPromptFocused ? 7 : 13, y: isAnyPromptFocused ? 0 : 7)
             .onExitCommand {
                 if isExpandedComposerPresented {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         isExpandedComposerPresented = false
+                    }
+                    DispatchQueue.main.async {
+                        isExpandedPromptFocused = false
+                        isPromptFocused = true
                     }
                 }
             }
@@ -4516,9 +5100,11 @@ private struct AssistantFloatingPill: View {
                 isExpandedComposerPresented.toggle()
             }
             if !isExpandedComposerPresented {
+                isExpandedPromptFocused = false
                 isPromptFocused = true
             } else {
                 DispatchQueue.main.async {
+                    isPromptFocused = false
                     isExpandedPromptFocused = true
                 }
             }
@@ -4634,6 +5220,7 @@ private struct AssistantFloatingPill: View {
                 suggestionRange: activePromptSuggestionNSRange,
                 suggestionAnchor: $promptSuggestionAnchor,
                 isExpanded: isExpanded,
+                isFocused: isExpanded ? isExpandedPromptFocused : isPromptFocused,
                 submitOnReturn: !isExpanded,
                 submit: submitOrPreviewThinking,
                 completeLink: { title in
@@ -4818,7 +5405,7 @@ private struct AssistantFloatingPill: View {
             return .white.opacity(0.34)
         }
 
-        return isPromptFocused ? .white.opacity(0.34) : .primary.opacity(0.12)
+        return isAnyPromptFocused ? .white.opacity(0.34) : .primary.opacity(0.12)
     }
 
     private var glowColor: Color {
@@ -4826,7 +5413,11 @@ private struct AssistantFloatingPill: View {
             return .white.opacity(0.20)
         }
 
-        return isPromptFocused ? .white.opacity(0.12) : .black.opacity(0.14)
+        return isAnyPromptFocused ? .white.opacity(0.12) : .black.opacity(0.14)
+    }
+
+    private var isAnyPromptFocused: Bool {
+        isPromptFocused || isExpandedPromptFocused
     }
 
     private func submitOrPreviewThinking() {
@@ -4849,6 +5440,7 @@ private struct AssistantFloatingPill: View {
             isExpandedComposerPresented = true
         }
         DispatchQueue.main.async {
+            isPromptFocused = false
             isExpandedPromptFocused = true
         }
     }

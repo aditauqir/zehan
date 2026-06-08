@@ -8,6 +8,7 @@
 import Combine
 import Foundation
 import AppKit
+import NaturalLanguage
 import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -47,10 +48,17 @@ final class BrainStore: ObservableObject {
     @Published var generatedSummaries: [HighlightSummary] = []
     @Published var currentHighlightSummary: HighlightSummary?
     @Published var isShowingHomePage = false
+    @Published var isShowingHelpDesk = false
     @Published var sidebarItems: [SidebarItem] = []
     @Published var selectedHighlightSummaryModel: HighlightSummaryModel = .mistral
     @Published var isCompilingHighlightSummary = false
     @Published var isGeneratingHomePage = false
+    @Published var helpDeskConversations: [HelpDeskConversation] = []
+    @Published var selectedHelpDeskConversationID: HelpDeskConversation.ID?
+    @Published var helpDeskInput = ""
+    @Published var helpDeskAttachment: PromptAttachment?
+    @Published var isGeneratingHelpDeskResponse = false
+    @Published var isShowingHelpDeskConversationBrowser = false
     @Published private(set) var mistralBudgetSpentUSD = 0.0
     @Published private(set) var mistralOCRPagesUsed = 0
 
@@ -87,6 +95,10 @@ final class BrainStore: ObservableObject {
     private var isApplyingAssistantOutput = false
     private var noteIdentityDatabase: NoteIdentityDatabase?
     private var searchIndex: [NoteSearchIndexEntry] = []
+    private var semanticSearchIndex: [SemanticSearchIndexEntry] = []
+    private lazy var semanticSearchEmbedding = NLEmbedding.wordEmbedding(for: .english)
+    private var helpDeskDatabase = HelpDeskDatabase(vaultID: nil, conversations: [])
+    private var helpDeskSessionDatabase: HelpDeskSessionDatabase?
 
     static let defaultMistralModel = "mistral-large-latest"
     static let defaultGroqModel = "llama-3.3-70b-versatile"
@@ -101,6 +113,10 @@ final class BrainStore: ObservableObject {
     private static let homeCompilationAfterAutosaveNanoseconds: UInt64 = 300_000_000
     private static let homeDirectCharacterBudget = 18_000
     private static let homeNoteCondenseCharacterLimit = 4_500
+    private static let helpDeskContextCharacterBudget = 16_000
+    private static let helpDeskRelevantBlockLimit = 10
+    private static let helpDeskHistoryMessageLimit = 8
+    private static let semanticSearchMinimumSimilarity = 0.22
     private static let estimatedCharactersPerToken = 4
     private static let mistralOCRModel = "mistral-ocr-latest"
     private static let mistralOCRPageLimit = 100
@@ -170,7 +186,7 @@ final class BrainStore: ObservableObject {
     }
 
     var isViewingGeneratedPage: Bool {
-        currentHighlightSummary != nil || isShowingHomePage
+        currentHighlightSummary != nil || isShowingHomePage || isShowingHelpDesk
     }
 
     var canCompileCurrentHighlights: Bool {
@@ -338,6 +354,7 @@ final class BrainStore: ObservableObject {
                 resetDraft()
                 try loadNotes()
                 try loadHighlightSummaries()
+                try loadHelpDeskDatabase()
                 openHomePage()
                 recordRecentVault(note: notes.first)
                 status = "\(brain.vault.name) opened"
@@ -359,9 +376,18 @@ final class BrainStore: ObservableObject {
         pendingAssistantInsertion = nil
         pendingAssistantPreview = nil
         noteIdentityDatabase = nil
+        helpDeskSessionDatabase = nil
         currentHighlightSummary = nil
         isShowingHomePage = false
+        isShowingHelpDesk = false
         generatedSummaries = []
+        helpDeskDatabase = HelpDeskDatabase(vaultID: nil, conversations: [])
+        helpDeskConversations = []
+        selectedHelpDeskConversationID = nil
+        helpDeskInput = ""
+        helpDeskAttachment = nil
+        isGeneratingHelpDeskResponse = false
+        isShowingHelpDeskConversationBrowser = false
         activeBrain = nil
         notes = []
         sidebarItems = []
@@ -369,6 +395,7 @@ final class BrainStore: ObservableObject {
         selectedSidebarGroupID = nil
         graphLinks = []
         searchIndex = []
+        semanticSearchIndex = []
         resetDraft()
         status = "Choose a brain"
     }
@@ -378,6 +405,7 @@ final class BrainStore: ObservableObject {
         pendingAssistantPreview = nil
         currentHighlightSummary = nil
         isShowingHomePage = false
+        isShowingHelpDesk = false
         currentNoteID = nil
         selectedNoteID = nil
         selectedSidebarGroupID = nil
@@ -393,6 +421,7 @@ final class BrainStore: ObservableObject {
         pendingAssistantPreview = nil
         currentHighlightSummary = nil
         isShowingHomePage = false
+        isShowingHelpDesk = false
         currentNoteID = nil
         selectedNoteID = nil
         selectedSidebarGroupID = nil
@@ -451,6 +480,7 @@ final class BrainStore: ObservableObject {
         activeSearchHighlight = nil
         currentHighlightSummary = nil
         isShowingHomePage = false
+        isShowingHelpDesk = false
         selectedSidebarGroupID = nil
         if let currentNoteID, currentNoteID != id {
             autosaveTask?.cancel()
@@ -518,6 +548,10 @@ final class BrainStore: ObservableObject {
                 let targetURL = existingURL?.pathExtension == "md"
                     ? existingURL!
                     : markdownNoteURL(for: note, in: brain)
+                try FileManager.default.createDirectory(
+                    at: targetURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
                 try writeMarkdownNote(note, to: targetURL)
                 try persistHighlightedText(from: note, in: brain)
                 try noteIdentityDatabase?.upsert(
@@ -566,6 +600,135 @@ final class BrainStore: ObservableObject {
         openHomePage(regenerate: true)
     }
 
+    func openHelpDesk() {
+        if currentNoteID != nil, currentHighlightSummary == nil, !isShowingHomePage {
+            saveCurrentNote(statusText: "Autosaved")
+        }
+
+        autosaveTask?.cancel()
+        autosaveTask = nil
+        pendingAssistantInsertion = nil
+        pendingAssistantPreview = nil
+        activeSearchHighlight = nil
+        currentHighlightSummary = nil
+        isShowingHomePage = false
+        isShowingHelpDesk = true
+        currentNoteID = nil
+        selectedNoteID = nil
+        selectedSidebarGroupID = nil
+        title = "Zirn Chat"
+        content = ""
+        if selectedHelpDeskConversationID == nil {
+            startNewHelpDeskConversation()
+        }
+        status = "Zirn Chat opened"
+    }
+
+    func startNewHelpDeskConversation() {
+        let now = Date()
+        let conversation = HelpDeskConversation(
+            id: UUID().uuidString,
+            title: "New conversation",
+            messages: [],
+            createdAt: now,
+            updatedAt: now
+        )
+        helpDeskDatabase.conversations.insert(conversation, at: 0)
+        syncHelpDeskConversations()
+        selectedHelpDeskConversationID = conversation.id
+        helpDeskInput = ""
+        helpDeskAttachment = nil
+        persistHelpDeskConversationQuietly(conversation)
+        status = "New Zirn Chat conversation"
+    }
+
+    func selectHelpDeskConversation(id: HelpDeskConversation.ID) {
+        guard helpDeskDatabase.conversations.contains(where: { $0.id == id }) else { return }
+        selectedHelpDeskConversationID = id
+        helpDeskAttachment = nil
+        isShowingHelpDeskConversationBrowser = false
+        openHelpDesk()
+    }
+
+    func deleteHelpDeskConversation(id: HelpDeskConversation.ID) {
+        guard let index = helpDeskDatabase.conversations.firstIndex(where: { $0.id == id }) else { return }
+        let wasSelected = selectedHelpDeskConversationID == id
+        helpDeskDatabase.conversations.remove(at: index)
+        syncHelpDeskConversations()
+        if wasSelected {
+            selectedHelpDeskConversationID = helpDeskConversations.first?.id
+            helpDeskAttachment = nil
+            helpDeskInput = ""
+        }
+        deleteHelpDeskConversationFromStoreQuietly(id: id)
+        status = "Conversation deleted"
+    }
+
+    func submitHelpDeskPrompt() {
+        let prompt = helpDeskInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty || helpDeskAttachment != nil, !isGeneratingHelpDeskResponse else { return }
+        guard activeBrain != nil else {
+            status = "Open or create a brain first"
+            return
+        }
+
+        if selectedHelpDeskConversationID == nil {
+            startNewHelpDeskConversation()
+        }
+        guard let brainID = activeBrain?.id,
+              let conversationID = selectedHelpDeskConversationID else {
+            status = "No Zirn Chat conversation is selected."
+            return
+        }
+
+        let userMessage = HelpDeskMessage(
+            id: UUID().uuidString,
+            role: .user,
+            content: prompt.isEmpty ? "Use the attached file as context." : prompt,
+            attachmentName: helpDeskAttachment?.fileName,
+            createdAt: Date()
+        )
+        appendHelpDeskMessage(userMessage)
+        helpDeskInput = ""
+        isGeneratingHelpDeskResponse = true
+        status = "\(selectedAssistantModel.title) is answering Zirn Chat"
+
+        let attachment = helpDeskAttachment
+        helpDeskAttachment = nil
+
+        Task {
+            await generateHelpDeskResponse(
+                for: userMessage,
+                attachment: attachment,
+                vaultID: brainID,
+                conversationID: conversationID
+            )
+        }
+    }
+
+    func chooseHelpDeskAttachmentFromUser() {
+        let panel = NSOpenPanel()
+        panel.title = "Attach File"
+        panel.message = "Choose a PDF, Word document, or image."
+        panel.prompt = "Attach"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [
+            .pdf,
+            UTType(filenameExtension: "doc") ?? .data,
+            UTType(filenameExtension: "docx") ?? .data,
+            .image
+        ]
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        attachHelpDeskDocument(from: url)
+    }
+
+    func removeHelpDeskAttachment() {
+        helpDeskAttachment = nil
+    }
+
     func regenerateHomePage() {
         if currentNoteID != nil, currentHighlightSummary == nil, !isShowingHomePage {
             saveCurrentNote(statusText: "Autosaved")
@@ -576,6 +739,7 @@ final class BrainStore: ObservableObject {
         needsHomeRegenerationAfterCurrentCompile = false
         needsForcedHomeRegenerationAfterCurrentCompile = false
         isShowingHomePage = true
+        isShowingHelpDesk = false
         currentNoteID = nil
         selectedNoteID = nil
         selectedSidebarGroupID = nil
@@ -599,6 +763,7 @@ final class BrainStore: ObservableObject {
         activeSearchHighlight = nil
         currentHighlightSummary = nil
         isShowingHomePage = true
+        isShowingHelpDesk = false
         currentNoteID = nil
         selectedNoteID = nil
         selectedSidebarGroupID = nil
@@ -620,6 +785,7 @@ final class BrainStore: ObservableObject {
         activeSearchHighlight = nil
         currentHighlightSummary = summary
         isShowingHomePage = false
+        isShowingHelpDesk = false
         currentNoteID = nil
         selectedNoteID = nil
         selectedSidebarGroupID = nil
@@ -1025,7 +1191,7 @@ final class BrainStore: ObservableObject {
     }
 
     func createSidebarGroup() {
-        guard activeBrain != nil else {
+        guard let activeBrain else {
             status = "Open or create a brain first"
             return
         }
@@ -1044,8 +1210,18 @@ final class BrainStore: ObservableObject {
         } else {
             sidebarItems.append(group)
         }
-        persistSidebarLayout()
-        status = "\(group.title) created"
+        withSecurityScopedAccess(to: activeBrain.folderURL) {
+            do {
+                try FileManager.default.createDirectory(
+                    at: sidebarGroupFolderURL(for: group, in: activeBrain),
+                    withIntermediateDirectories: true
+                )
+                try persistSidebarLayoutNoAccess()
+                status = "\(group.title) created"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
     }
 
     func selectSidebarGroup(id: SidebarItem.ID) {
@@ -1057,23 +1233,39 @@ final class BrainStore: ObservableObject {
     func renameSidebarGroup(id: SidebarItem.ID, to title: String) {
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanTitle.isEmpty,
+              let activeBrain,
               let index = sidebarItems.firstIndex(where: { $0.id == id && $0.kind == .group })
         else { return }
 
-        sidebarItems[index] = SidebarItem(
-            id: sidebarItems[index].id,
-            kind: .group,
-            noteID: nil,
-            title: cleanTitle,
-            groupID: nil,
-            isExpanded: sidebarItems[index].isExpanded
-        )
-        persistSidebarLayout()
-        status = "Group renamed"
+        withSecurityScopedAccess(to: activeBrain.folderURL) {
+            do {
+                let oldGroup = sidebarItems[index]
+                let oldFolderURL = sidebarGroupFolderURL(for: oldGroup, in: activeBrain)
+                let uniqueTitle = uniqueSidebarGroupTitle(cleanTitle, excluding: id)
+                sidebarItems[index] = SidebarItem(
+                    id: oldGroup.id,
+                    kind: .group,
+                    noteID: nil,
+                    title: uniqueTitle,
+                    groupID: nil,
+                    isExpanded: oldGroup.isExpanded
+                )
+                let newFolderURL = sidebarGroupFolderURL(for: sidebarItems[index], in: activeBrain)
+                try moveSidebarGroupFolder(from: oldFolderURL, to: newFolderURL)
+                try moveNotesInGroupToFilesystem(groupID: id, in: activeBrain)
+                try persistSidebarLayoutNoAccess()
+                try loadNotes()
+                status = uniqueTitle == cleanTitle ? "Group renamed" : "Group renamed to \(uniqueTitle)"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
     }
 
     func deleteSidebarGroup(id: SidebarItem.ID) {
-        guard let groupIndex = sidebarItems.firstIndex(where: { $0.id == id && $0.kind == .group }) else { return }
+        guard let activeBrain,
+              let groupIndex = sidebarItems.firstIndex(where: { $0.id == id && $0.kind == .group })
+        else { return }
         let groupTitle = sidebarItems[groupIndex].title
         let childNoteIDs = sidebarItems
             .filter { $0.groupID == id && $0.kind == .note }
@@ -1111,7 +1303,12 @@ final class BrainStore: ObservableObject {
                     for index in sidebarItems.indices where sidebarItems[index].groupID == id {
                         sidebarItems[index].groupID = nil
                     }
+                    for noteID in childNoteIDs {
+                        try moveNoteFile(noteID: noteID, toGroupID: nil, in: activeBrain)
+                    }
                 }
+
+                try removeSidebarGroupFolderIfEmpty(title: groupTitle, in: activeBrain)
 
                 if selectedSidebarGroupID == id {
                     selectedSidebarGroupID = nil
@@ -1154,6 +1351,7 @@ final class BrainStore: ObservableObject {
 
     func moveSidebarItem(id draggedID: SidebarItem.ID, before targetID: SidebarItem.ID) {
         guard draggedID != targetID,
+              let activeBrain,
               let sourceIndex = sidebarItems.firstIndex(where: { $0.id == draggedID }),
               let targetIndex = sidebarItems.firstIndex(where: { $0.id == targetID })
         else { return }
@@ -1164,20 +1362,23 @@ final class BrainStore: ObservableObject {
         let adjustedTargetIndex = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex
         sidebarItems.insert(item, at: adjustedTargetIndex)
         notes = orderedNotesForSidebar()
-        persistSidebarLayout()
+        persistSidebarLayoutAndFilesystem(for: item, in: activeBrain)
     }
 
     func moveSidebarItemToEnd(id draggedID: SidebarItem.ID) {
-        guard let sourceIndex = sidebarItems.firstIndex(where: { $0.id == draggedID }) else { return }
+        guard let activeBrain,
+              let sourceIndex = sidebarItems.firstIndex(where: { $0.id == draggedID })
+        else { return }
         var item = sidebarItems.remove(at: sourceIndex)
         item.groupID = nil
         sidebarItems.append(item)
         notes = orderedNotesForSidebar()
-        persistSidebarLayout()
+        persistSidebarLayoutAndFilesystem(for: item, in: activeBrain)
     }
 
     func moveSidebarItem(id draggedID: SidebarItem.ID, intoGroup groupID: SidebarItem.ID) {
         guard draggedID != groupID,
+              let activeBrain,
               let sourceIndex = sidebarItems.firstIndex(where: { $0.id == draggedID }),
               sidebarItems.contains(where: { $0.id == groupID && $0.kind == .group }),
               sidebarItems[sourceIndex].kind == .note
@@ -1194,7 +1395,7 @@ final class BrainStore: ObservableObject {
         let insertionIndex = sidebarItems.lastIndex(where: { $0.groupID == groupID }).map { $0 + 1 } ?? min(currentGroupIndex + 1, sidebarItems.endIndex)
         sidebarItems.insert(item, at: min(insertionIndex, sidebarItems.endIndex))
         notes = orderedNotesForSidebar()
-        persistSidebarLayout()
+        persistSidebarLayoutAndFilesystem(for: item, in: activeBrain)
     }
 
     func noteSummary(for id: Note.ID) -> NoteSummary? {
@@ -1341,7 +1542,7 @@ final class BrainStore: ObservableObject {
         let queryTokens = searchTokens(in: cleanQuery)
         guard !queryTokens.isEmpty else { return [] }
 
-        return searchIndex
+        let lexicalResults = searchIndex
             .filter { entry in
                 queryTokens.allSatisfy { entry.normalizedText.contains($0) }
             }
@@ -1362,6 +1563,38 @@ final class BrainStore: ObservableObject {
                     blockIndex: entry.blockIndex
                 )
             }
+
+        guard let queryVector = semanticVector(for: cleanQuery) else {
+            return Array(lexicalResults)
+        }
+
+        var seenResultKeys = Set(lexicalResults.map { "\($0.noteID)-\($0.blockIndex ?? -1)" })
+        let semanticResults = semanticSearchIndex
+            .compactMap { entry -> (SemanticSearchIndexEntry, Double)? in
+                let similarity = cosineSimilarity(queryVector, entry.vector)
+                guard similarity >= Self.semanticSearchMinimumSimilarity else { return nil }
+                return (entry, similarity)
+            }
+            .sorted { lhs, rhs in
+                if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
+                if lhs.0.updatedAt != rhs.0.updatedAt { return lhs.0.updatedAt > rhs.0.updatedAt }
+                return lhs.0.title.localizedCaseInsensitiveCompare(rhs.0.title) == .orderedAscending
+            }
+            .compactMap { entry, _ -> NoteSearchResult? in
+                let key = "\(entry.noteID)-\(entry.blockIndex ?? -1)"
+                guard !seenResultKeys.contains(key) else { return nil }
+                seenResultKeys.insert(key)
+                return NoteSearchResult(
+                    id: "\(entry.noteID)-semantic-\(entry.blockIndex ?? -1)",
+                    noteID: entry.noteID,
+                    title: entry.title,
+                    preview: String(entry.displayText.prefix(180)).trimmingCharacters(in: .whitespacesAndNewlines),
+                    query: cleanQuery,
+                    blockIndex: entry.blockIndex
+                )
+            }
+
+        return Array((lexicalResults + semanticResults).prefix(120))
     }
 
     func openSearchResult(_ result: NoteSearchResult) {
@@ -1467,6 +1700,69 @@ final class BrainStore: ObservableObject {
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
         attachPromptDocument(from: url)
+    }
+
+    private func attachHelpDeskDocument(from url: URL) {
+        guard isSupportedPromptDocument(url) else {
+            status = "Only PDFs, Word documents, and images are supported"
+            return
+        }
+
+        let didStart = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStart {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        switch url.pathExtension.lowercased() {
+        case "pdf", "doc", "docx":
+            let extractedText = extractedPromptDocumentText(from: url)
+            helpDeskAttachment = PromptAttachment(
+                fileName: url.lastPathComponent,
+                fileExtension: url.pathExtension.lowercased(),
+                extractedText: extractedText
+            )
+            status = "\(url.lastPathComponent) attached"
+        case "png", "jpg", "jpeg", "gif", "heic", "tiff", "webp":
+            guard !mistralAPIKey.isEmpty || requestAndSaveMistralAPIKey(
+                title: "Mistral API Key",
+                message: "Mistral OCR needs your Mistral API key before reading this image."
+            ) else {
+                status = "Mistral API key required for OCR"
+                return
+            }
+
+            guard ocrUploadsRemaining > 0 else {
+                status = "No OCR uploads left"
+                return
+            }
+
+            guard let data = try? Data(contentsOf: url) else {
+                status = "Could not read \(url.lastPathComponent)"
+                return
+            }
+
+            let fileName = promptImageFileName(suggestedFileName: url.lastPathComponent)
+            let mimeType = imageMimeType(forFileName: fileName)
+            status = "OCR reading \(fileName)"
+            Task {
+                do {
+                    let extractedText = try await extractImageTextWithMistralOCR(data: data, mimeType: mimeType)
+                    helpDeskAttachment = PromptAttachment(
+                        fileName: fileName,
+                        fileExtension: (fileName as NSString).pathExtension.lowercased(),
+                        extractedText: extractedText
+                    )
+                    recordMistralOCRUpload(pageCount: 1)
+                    status = "\(fileName) attached · OCRed"
+                } catch {
+                    status = error.localizedDescription
+                }
+            }
+        default:
+            status = "Only PDFs, Word documents, and images are supported"
+        }
     }
 
     func insertMarkdownImage(from url: URL) {
@@ -1691,20 +1987,17 @@ final class BrainStore: ObservableObject {
         let folder = notesFolderURL(for: brain)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 
-        let noteURLs = try FileManager.default.contentsOfDirectory(
-            at: folder,
-            includingPropertiesForKeys: nil
-        )
-        .filter { $0.pathExtension == "md" || $0.pathExtension == "json" }
+        let noteURLs = try noteFileURLs(in: brain)
 
         var seenIDs = Set<Note.ID>()
         var reservedTitles = Set<String>()
         let loadedNotes = try noteURLs.map { url in
             var note = try readNote(from: url)
             var noteURL = url
-            var fileName = noteURL.lastPathComponent
+            var fileName = relativeNoteFileName(for: noteURL, in: brain)
             let metadataID = note.id.trimmingCharacters(in: .whitespacesAndNewlines)
             let indexedID = noteIdentityDatabase?.noteID(forFileName: fileName)
+                ?? noteIdentityDatabase?.noteID(forFileName: noteURL.lastPathComponent)
             let candidateID = indexedID ?? (metadataID.isEmpty ? nil : note.id)
             let finalID: Note.ID
 
@@ -1724,12 +2017,16 @@ final class BrainStore: ObservableObject {
                     updatedAt: Date()
                 )
                 let updatedURL = markdownNoteURL(for: note, in: brain)
+                try FileManager.default.createDirectory(
+                    at: updatedURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
                 try writeMarkdownNote(note, to: updatedURL)
                 if updatedURL != noteURL, FileManager.default.fileExists(atPath: noteURL.path) {
                     try? FileManager.default.removeItem(at: noteURL)
                 }
                 noteURL = updatedURL
-                fileName = noteURL.lastPathComponent
+                fileName = relativeNoteFileName(for: noteURL, in: brain)
             }
 
             try noteIdentityDatabase?.upsert(
@@ -1751,18 +2048,86 @@ final class BrainStore: ObservableObject {
     }
 
     private func loadHomePageSourceNotes() throws -> [HomePageSourceNote] {
-        guard activeBrain != nil else { return [] }
+        guard let brain = activeBrain else { return [] }
 
-        return try notes.compactMap { summary in
-            guard let url = noteURL(for: summary.id) else { return nil }
-            let note = try readNote(from: url)
-            return HomePageSourceNote(
-                id: note.id,
-                title: note.title,
-                content: note.content,
-                updatedAt: note.updatedAt
-            )
+        var sourceNotes: [HomePageSourceNote] = []
+        var capturedError: Error?
+        withSecurityScopedAccess(to: brain.folderURL) {
+            do {
+                sourceNotes = try loadSourceNotesFromVaultNoAccess(brain)
+            } catch {
+                capturedError = error
+            }
         }
+
+        if let capturedError {
+            throw capturedError
+        }
+        return sourceNotes
+    }
+
+    private func loadSourceNotesFromVaultNoAccess(_ brain: BrainSummary) throws -> [HomePageSourceNote] {
+        let fileNotes = ((try? noteFileURLs(in: brain)) ?? [])
+            .compactMap { try? readNote(from: $0) }
+
+        let fileNotesByID = Dictionary(grouping: fileNotes, by: \.id)
+            .compactMapValues { $0.first }
+        let fileNotesByTitle = Dictionary(grouping: fileNotes) { normalizedLinkTitle($0.title) }
+            .compactMapValues { $0.first }
+
+        var sourceNotes: [HomePageSourceNote] = []
+        var seenIDs = Set<Note.ID>()
+        var seenTitles = Set<String>()
+
+        func append(_ note: Note) {
+            let normalizedTitle = normalizedLinkTitle(note.title)
+            guard !seenIDs.contains(note.id),
+                  !seenTitles.contains(normalizedTitle)
+            else { return }
+
+            sourceNotes.append(
+                HomePageSourceNote(
+                    id: note.id,
+                    title: note.title,
+                    content: note.content,
+                    updatedAt: note.updatedAt
+                )
+            )
+            seenIDs.insert(note.id)
+            seenTitles.insert(normalizedTitle)
+        }
+
+        func appendSummaryOnly(_ summary: NoteSummary) {
+            let normalizedTitle = normalizedLinkTitle(summary.title)
+            guard !seenIDs.contains(summary.id),
+                  !seenTitles.contains(normalizedTitle)
+            else { return }
+
+            sourceNotes.append(
+                HomePageSourceNote(
+                    id: summary.id,
+                    title: summary.title,
+                    content: "",
+                    updatedAt: summary.updatedAt
+                )
+            )
+            seenIDs.insert(summary.id)
+            seenTitles.insert(normalizedTitle)
+        }
+
+        for summary in notes {
+            if let note = fileNotesByID[summary.id] ?? fileNotesByTitle[normalizedLinkTitle(summary.title)] {
+                append(note)
+            } else {
+                appendSummaryOnly(summary)
+            }
+        }
+
+        for note in fileNotes.sorted(by: { $0.updatedAt > $1.updatedAt }) {
+            append(note)
+        }
+
+        return sourceNotes
     }
 
     private func syncSidebarItems(with loadedSummaries: [NoteSummary]) {
@@ -1772,7 +2137,7 @@ final class BrainStore: ObservableObject {
            let sidebarItems = brain.sidebar?.items {
             storedItems = sidebarItems.map(\.sidebarItem)
         } else {
-            storedItems = sidebarItems
+            storedItems = []
         }
 
         let notesByID = Dictionary(uniqueKeysWithValues: loadedSummaries.map { ($0.id, $0) })
@@ -2358,6 +2723,109 @@ final class BrainStore: ObservableObject {
         }
     }
 
+    private func generateHelpDeskResponse(
+        for userMessage: HelpDeskMessage,
+        attachment: PromptAttachment?,
+        vaultID: String,
+        conversationID: HelpDeskConversation.ID
+    ) async {
+        defer {
+            isGeneratingHelpDeskResponse = false
+        }
+
+        do {
+            guard activeBrain?.id == vaultID else {
+                return
+            }
+            guard helpDeskDatabase.vaultID == vaultID,
+                  helpDeskDatabase.conversations.contains(where: { $0.id == conversationID }) else {
+                throw AssistantError.requestFailed("No Zirn Chat conversation is selected.")
+            }
+
+            let history = helpDeskMessages(for: conversationID)
+                .filter { $0.id != userMessage.id }
+            let vaultContext = try helpDeskVaultContext(for: userMessage.content, history: history)
+            let attachmentContext = helpDeskAttachmentContext(attachment)
+            let currentInput = """
+            User question:
+            \(userMessage.content)
+
+            Attached file:
+            \(attachmentContext)
+
+            Vault context:
+            \(vaultContext)
+
+            Required output:
+            Answer like a vault-aware Zirn Chat assistant. Use the vault and conversation history. If the answer depends on a page, mention the page title naturally.
+            """
+            var messages = history.suffix(Self.helpDeskHistoryMessageLimit).map { message in
+                [
+                    "role": message.role.chatRole,
+                    "content": promptExcerpt(message.content, characterLimit: 1_200)
+                ]
+            }
+            messages.append(
+                [
+                    "role": "user",
+                    "content": currentInput
+                ]
+            )
+
+            let result: ChatCompletionResult
+            switch selectedAssistantModel {
+            case .mistral:
+                result = try await generateWithMistral(
+                    system: helpDeskInstructions(),
+                    messages: messages,
+                    maxTokens: Self.maxAssistantOutputTokens
+                )
+                let estimatedInput = messages.reduce(helpDeskInstructions().count) { total, message in
+                    total + (message["content"]?.count ?? 0)
+                }
+                recordMistralUsage(
+                    inputTokens: result.inputTokens ?? estimatedTokenCount(forCharacterCount: estimatedInput),
+                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+                )
+            case .groq:
+                result = try await generateWithGroq(
+                    system: helpDeskInstructions(),
+                    messages: messages
+                )
+            }
+
+            let answer = cleanedAssistantMarkdown(result.content)
+            guard !answer.isEmpty else {
+                throw AssistantError.requestFailed("The model returned no answer.")
+            }
+
+            appendHelpDeskMessage(
+                HelpDeskMessage(
+                    id: UUID().uuidString,
+                    role: .assistant,
+                    content: answer,
+                    attachmentName: nil,
+                    createdAt: Date()
+                ),
+                conversationID: conversationID
+            )
+            updateHelpDeskConversationTitleIfNeeded(conversationID: conversationID, prompt: userMessage.content)
+            status = "\(selectedAssistantModel.title) answered Zirn Chat"
+        } catch {
+            appendHelpDeskMessage(
+                HelpDeskMessage(
+                    id: UUID().uuidString,
+                    role: .assistant,
+                    content: "I could not answer because \(error.localizedDescription)",
+                    attachmentName: nil,
+                    createdAt: Date()
+                ),
+                conversationID: conversationID
+            )
+            status = error.localizedDescription
+        }
+    }
+
     private func clearSubmittedAssistantPromptIfUnchanged(prompt: String, linkedPageTitles: [String]) {
         let currentPrompt = assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let currentLinkedPageTitles = assistantPromptLinkedPages.map(\.title)
@@ -2505,7 +2973,8 @@ final class BrainStore: ObservableObject {
             }
 
             let duration = Date().timeIntervalSince(startedAt)
-            let markdown = normalizedHomePageMarkdown(result.content)
+            let fallbackMarkdown = localHomePageMarkdown(vaultName: vaultName, sourceNotes: sourceNotes)
+            let markdown = normalizedHomePageMarkdown(result.content, fallbackMarkdown: fallbackMarkdown)
             let summary = HighlightSummary(
                 id: homeSummaryID,
                 sourceNoteID: "vault",
@@ -2723,6 +3192,7 @@ final class BrainStore: ObservableObject {
         """
         You are Zirn's writing assistant. You edit the user's current Markdown document in place.
         You will receive the full current document and a user request. Return the complete revised Markdown document, not a patch, diff, explanation, or separate suggestion.
+        The user may type quickly and make spelling mistakes, missing spaces, or phonetic typos. Infer the intended meaning from context instead of rejecting the request for spelling.
         If the user asks to add, include the original document plus the addition in the best location.
         If the user asks to edit, rewrite only the needed parts and preserve everything else.
         If the user asks to delete, remove the requested text or section and keep the remaining document coherent.
@@ -2741,9 +3211,21 @@ final class BrainStore: ObservableObject {
         """
         You are Zirn's conversational assistant. Answer the user's question without editing, rewriting, or replacing the Markdown document.
         Use the current Markdown document and any attached document as context when relevant.
+        The user may type quickly and make spelling mistakes, missing spaces, or phonetic typos. Infer the intended meaning from context instead of rejecting the question for spelling.
         Return Markdown only. Do not claim you changed the file.
         If the user asks you to edit the note, briefly tell them to turn on writing mode with the pen icon.
         Keep answers concise, useful, and grounded in the supplied context.
+        """
+    }
+
+    private func helpDeskInstructions() -> String {
+        """
+        You are Zirn Chat, a ChatGPT-style assistant for the user's entire vault.
+        Answer questions using the supplied vault context and the prior conversation turns.
+        The user may type quickly and make spelling mistakes, missing spaces, or phonetic typos. Infer the intended meaning from vault titles, page content, and conversation history instead of rejecting the question for spelling.
+        Resolve pronouns and follow-up phrases like "it", "that", and "what was it" from conversation history.
+        Be direct, useful, and grounded. If the vault does not contain enough information, say what is missing.
+        Return Markdown only. Do not edit the user's Markdown files.
         """
     }
 
@@ -2761,6 +3243,7 @@ final class BrainStore: ObservableObject {
         You are Zirn's Home page compiler. You synthesize every page in the user's vault into one read-only Markdown Home document.
         Use the supplied page contents or condensed page notes for the vault summary, then use every supplied highlighted excerpt for the highlighted text summary.
         Preserve the user's writing style, rhythm, density, and vocabulary when possible.
+        Every sentence and bullet must be complete. Remove fragments, dangling clauses, placeholder text, artifacts, and unfinished thoughts before returning.
         Return Markdown only. Do not include meta commentary, apologies, or code fences.
         """
     }
@@ -3088,10 +3571,10 @@ final class BrainStore: ObservableObject {
         return "\(requiredHeading)\n\n\(clean)"
     }
 
-    private func normalizedHomePageMarkdown(_ markdown: String) -> String {
-        let clean = cleanedAssistantMarkdown(markdown)
+    private func normalizedHomePageMarkdown(_ markdown: String, fallbackMarkdown: String? = nil) -> String {
+        let clean = sanitizedHomePageMarkdown(cleanedAssistantMarkdown(markdown))
         guard !clean.isEmpty else {
-            return """
+            return fallbackMarkdown ?? """
             # Home
 
             ## Vault Summary
@@ -3113,6 +3596,49 @@ final class BrainStore: ObservableObject {
             return (["# Home"] + lines.dropFirst().map(String.init)).joined(separator: "\n")
         }
         return "# Home\n\n\(clean)"
+    }
+
+    private func sanitizedHomePageMarkdown(_ markdown: String) -> String {
+        let lines = markdown
+            .replacingOccurrences(of: "\u{FFFD}", with: "")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+            .filter { line in
+                let clean = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                let lower = clean.lowercased()
+                return !lower.hasPrefix("artifact:")
+                    && !lower.hasPrefix("incomplete")
+                    && !lower.contains("undefined")
+                    && !lower.contains("<|")
+                    && !lower.contains("|>")
+            }
+
+        var sanitized = lines
+        while let last = sanitized.last {
+            let clean = last.trimmingCharacters(in: .whitespacesAndNewlines)
+            if clean.isEmpty {
+                sanitized.removeLast()
+                continue
+            }
+            if isCompleteHomeMarkdownLine(clean) {
+                break
+            }
+            sanitized.removeLast()
+        }
+
+        let text = sanitized.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        let requiredSections = ["## Vault Summary", "## Highlighted Text Summary"]
+        guard requiredSections.allSatisfy({ text.contains($0) }) else { return "" }
+        return text
+    }
+
+    private func isCompleteHomeMarkdownLine(_ line: String) -> Bool {
+        if line.hasPrefix("#") { return true }
+        if line.hasSuffix("```") { return true }
+        if line.hasSuffix(")") || line.hasSuffix("]") { return true }
+        if line.hasSuffix(".") || line.hasSuffix("!") || line.hasSuffix("?") || line.hasSuffix(":") { return true }
+        if line.count < 32 { return true }
+        return false
     }
 
     private func promptExcerpt(_ markdown: String, characterLimit: Int = 3_500) -> String {
@@ -3140,6 +3666,7 @@ final class BrainStore: ObservableObject {
 
         Required output:
         Return the complete revised Markdown document only.
+        If the user request has typos or missing spaces, silently infer the intended words from context.
         When referring to any selected linked page, use its exact Obsidian wiki link form, such as [[Page Title]].
 
         Learned user writing samples:
@@ -3169,6 +3696,7 @@ final class BrainStore: ObservableObject {
 
         Required output:
         Answer the user. Do not rewrite the Markdown file.
+        If the question has typos or missing spaces, silently infer the intended words from context.
         """
     }
 
@@ -3181,6 +3709,496 @@ final class BrainStore: ObservableObject {
             ]
         )
         return messages
+    }
+
+    private func helpDeskMessages(for conversationID: HelpDeskConversation.ID) -> [HelpDeskMessage] {
+        helpDeskDatabase.conversations.first { $0.id == conversationID }?.messages ?? []
+    }
+
+    private func appendHelpDeskMessage(
+        _ message: HelpDeskMessage,
+        conversationID explicitConversationID: HelpDeskConversation.ID? = nil
+    ) {
+        guard let conversationID = explicitConversationID ?? selectedHelpDeskConversationID,
+              let index = helpDeskDatabase.conversations.firstIndex(where: { $0.id == conversationID })
+        else { return }
+
+        helpDeskDatabase.conversations[index].messages.append(message)
+        helpDeskDatabase.conversations[index].updatedAt = message.createdAt
+        let conversation = helpDeskDatabase.conversations[index]
+        syncHelpDeskConversations()
+        persistHelpDeskMessageQuietly(message, conversation: conversation)
+    }
+
+    private func updateHelpDeskConversationTitleIfNeeded(conversationID: HelpDeskConversation.ID, prompt: String) {
+        guard let index = helpDeskDatabase.conversations.firstIndex(where: { $0.id == conversationID }),
+              helpDeskDatabase.conversations[index].title == "New conversation"
+        else { return }
+
+        helpDeskDatabase.conversations[index].title = helpDeskConversationTitle(from: prompt)
+        let conversation = helpDeskDatabase.conversations[index]
+        syncHelpDeskConversations()
+        persistHelpDeskConversationQuietly(conversation)
+    }
+
+    private func helpDeskConversationTitle(from prompt: String) -> String {
+        let clean = prompt
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return "Attached file" }
+        let words = clean.split(separator: " ").prefix(7).joined(separator: " ")
+        return words.count > 54 ? "\(words.prefix(54))..." : words
+    }
+
+    private func helpDeskVaultContext(for question: String, history: [HelpDeskMessage]) throws -> String {
+        if let indexedContext = helpDeskIndexedVaultContext(for: question, history: history) {
+            return indexedContext
+        }
+
+        let sourceNotes: [HomePageSourceNote]
+        do {
+            sourceNotes = try loadHomePageSourceNotes()
+        } catch {
+            status = error.localizedDescription
+            sourceNotes = notes.compactMap { summary in
+                guard let url = noteURL(for: summary.id),
+                      let note = try? readNote(from: url)
+                else { return nil }
+                return HomePageSourceNote(
+                    id: note.id,
+                    title: note.title,
+                    content: note.content,
+                    updatedAt: note.updatedAt
+                )
+            }
+        }
+
+        guard !sourceNotes.isEmpty else {
+            return "The vault has no pages yet."
+        }
+
+        let query = helpDeskRetrievalQuery(question: question, history: history)
+        let tokens = helpDeskRetrievalTokens(in: query)
+        guard !tokens.isEmpty else {
+            return compactHelpDeskVaultContext(from: sourceNotes)
+        }
+
+        let candidates = helpDeskContextCandidates(from: sourceNotes, tokens: tokens, query: query)
+        let titleMatchedNotes = sourceNotes.filter { note in
+            let titleTokens = helpDeskRetrievalTokens(in: note.title)
+            return !titleTokens.isEmpty && titleTokens.allSatisfy { titleToken in
+                tokens.contains { helpDeskTokensMatch($0, titleToken) }
+            }
+        }
+
+        var remainingBudget = Self.helpDeskContextCharacterBudget
+        var chunks: [String] = []
+
+        func appendChunk(_ chunk: String) {
+            guard remainingBudget > 0 else { return }
+            let excerpt = promptExcerpt(chunk, characterLimit: remainingBudget)
+            remainingBudget -= excerpt.count
+            chunks.append(excerpt)
+        }
+
+        let pageList = sourceNotes
+            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+            .map { "- \($0.title)" }
+            .joined(separator: "\n")
+        appendChunk(
+            """
+            Vault pages:
+            \(pageList)
+            """
+        )
+
+        var includedNoteIDs = Set<String>()
+        var fullIncludedNoteIDs = Set<String>()
+        for note in titleMatchedNotes.sorted(by: { $0.updatedAt > $1.updatedAt }) {
+            guard remainingBudget > 0 else { break }
+            includedNoteIDs.insert(note.id)
+            fullIncludedNoteIDs.insert(note.id)
+            appendChunk(
+                """
+                ### \(note.title)
+                \(note.content.trimmingCharacters(in: .whitespacesAndNewlines))
+                """
+            )
+        }
+
+        var blockCountsByNoteID: [String: Int] = [:]
+        for candidate in candidates.prefix(Self.helpDeskRelevantBlockLimit) {
+            guard remainingBudget > 0 else { break }
+            guard !fullIncludedNoteIDs.contains(candidate.noteID) else { continue }
+            guard (blockCountsByNoteID[candidate.noteID] ?? 0) < 3 else { continue }
+            appendChunk(
+                """
+                ### \(candidate.title)
+                \(candidate.text)
+                """
+            )
+            includedNoteIDs.insert(candidate.noteID)
+            blockCountsByNoteID[candidate.noteID, default: 0] += 1
+        }
+
+        let remainingNotes = sourceNotes
+            .filter { !includedNoteIDs.contains($0.id) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        for note in remainingNotes {
+            guard remainingBudget > 1_000 else { break }
+            appendChunk(
+                """
+                ### \(note.title)
+                \(plainText(fromMarkdown: note.content).prefix(700))
+                """
+            )
+        }
+
+        if chunks.count <= 1 {
+            return compactHelpDeskVaultContext(from: sourceNotes)
+        }
+        return chunks.joined(separator: "\n\n")
+    }
+
+    private func helpDeskIndexedVaultContext(for question: String, history: [HelpDeskMessage]) -> String? {
+        guard !searchIndex.isEmpty else { return nil }
+
+        let query = helpDeskRetrievalQuery(question: question, history: history)
+        let tokens = helpDeskRetrievalTokens(in: query)
+        let queryVector = semanticVector(for: query)
+        if tokens.isEmpty, queryVector == nil {
+            return compactIndexedHelpDeskVaultContext()
+        }
+
+        var remainingBudget = Self.helpDeskContextCharacterBudget
+        var chunks: [String] = []
+
+        func appendChunk(_ chunk: String) {
+            guard remainingBudget > 0 else { return }
+            let excerpt = promptExcerpt(chunk, characterLimit: remainingBudget)
+            remainingBudget -= excerpt.count
+            chunks.append(excerpt)
+        }
+
+        let pageList = notes
+            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+            .map { "- \($0.title)" }
+            .joined(separator: "\n")
+        appendChunk(
+            """
+            Vault pages:
+            \(pageList)
+            """
+        )
+
+        var includedNoteIDs = Set<String>()
+        var fullyIncludedNoteIDs = Set<String>()
+        let titleMatchedNotes = notes.filter { note in
+            let titleTokens = helpDeskRetrievalTokens(in: note.title)
+            return !titleTokens.isEmpty && titleTokens.allSatisfy { titleToken in
+                tokens.contains { helpDeskTokensMatch($0, titleToken) }
+            }
+        }
+
+        for note in titleMatchedNotes.sorted(by: { $0.updatedAt > $1.updatedAt }) {
+            guard remainingBudget > 0 else { break }
+            let noteBlocks = indexedBodyBlocks(for: note.id)
+            guard !noteBlocks.isEmpty else { continue }
+            includedNoteIDs.insert(note.id)
+            fullyIncludedNoteIDs.insert(note.id)
+            appendChunk(
+                """
+                ### \(note.title)
+                \(noteBlocks.map(\.displayText).joined(separator: "\n\n"))
+                """
+            )
+        }
+
+        let candidates = helpDeskIndexedContextCandidates(tokens: tokens, query: query, queryVector: queryVector)
+        var blockCountsByNoteID: [String: Int] = [:]
+        for candidate in candidates.prefix(Self.helpDeskRelevantBlockLimit) {
+            guard remainingBudget > 0 else { break }
+            guard !fullyIncludedNoteIDs.contains(candidate.noteID) else { continue }
+            guard (blockCountsByNoteID[candidate.noteID] ?? 0) < 3 else { continue }
+            appendChunk(
+                """
+                ### \(candidate.title)
+                \(candidate.text)
+                """
+            )
+            includedNoteIDs.insert(candidate.noteID)
+            blockCountsByNoteID[candidate.noteID, default: 0] += 1
+        }
+
+        for note in notes.filter({ !includedNoteIDs.contains($0.id) }).sorted(by: { $0.updatedAt > $1.updatedAt }) {
+            guard remainingBudget > 1_000 else { break }
+            let preview = indexedBodyBlocks(for: note.id)
+                .map(\.displayText)
+                .joined(separator: " ")
+                .prefix(700)
+            guard !preview.isEmpty else { continue }
+            appendChunk(
+                """
+                ### \(note.title)
+                \(preview)
+                """
+            )
+        }
+
+        if chunks.count <= 1 {
+            return compactIndexedHelpDeskVaultContext()
+        }
+        return chunks.joined(separator: "\n\n")
+    }
+
+    private func helpDeskRetrievalQuery(question: String, history: [HelpDeskMessage]) -> String {
+        let recentConversation = history
+            .suffix(4)
+            .map { $0.content }
+            .joined(separator: " ")
+        return "\(recentConversation) \(question)"
+    }
+
+    private func helpDeskRetrievalTokens(in text: String) -> [String] {
+        let stopwords: Set<String> = [
+            "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "did", "do", "does",
+            "for", "from", "had", "has", "have", "how", "i", "if", "in", "is", "it", "its",
+            "me", "my", "of", "on", "or", "so", "that", "the", "their", "there", "this", "to",
+            "was", "were", "what", "when", "where", "which", "who", "why", "with", "you"
+        ]
+        var seen = Set<String>()
+        return searchTokens(in: text).filter { token in
+            guard token.count > 2 || token.allSatisfy(\.isNumber) else { return false }
+            guard !stopwords.contains(token), !seen.contains(token) else { return false }
+            seen.insert(token)
+            return true
+        }
+    }
+
+    private func helpDeskTokensMatch(_ lhs: String, _ rhs: String) -> Bool {
+        if lhs == rhs { return true }
+        if lhs.count < 4 || rhs.count < 4 { return false }
+        if lhs.hasPrefix(rhs) || rhs.hasPrefix(lhs) {
+            return min(lhs.count, rhs.count) >= 5
+        }
+
+        let distanceLimit = lhs.count >= 8 && rhs.count >= 8 ? 2 : 1
+        guard abs(lhs.count - rhs.count) <= distanceLimit else { return false }
+        return boundedEditDistance(lhs, rhs, limit: distanceLimit) <= distanceLimit
+    }
+
+    private func boundedEditDistance(_ lhs: String, _ rhs: String, limit: Int) -> Int {
+        let left = Array(lhs)
+        let right = Array(rhs)
+        guard abs(left.count - right.count) <= limit else { return limit + 1 }
+        if left.isEmpty { return right.count }
+        if right.isEmpty { return left.count }
+
+        var previous = Array(0...right.count)
+        var current = Array(repeating: 0, count: right.count + 1)
+
+        for leftIndex in 1...left.count {
+            current[0] = leftIndex
+            var rowMinimum = current[0]
+
+            for rightIndex in 1...right.count {
+                let substitutionCost = left[leftIndex - 1] == right[rightIndex - 1] ? 0 : 1
+                current[rightIndex] = min(
+                    previous[rightIndex] + 1,
+                    current[rightIndex - 1] + 1,
+                    previous[rightIndex - 1] + substitutionCost
+                )
+                rowMinimum = min(rowMinimum, current[rightIndex])
+            }
+
+            if rowMinimum > limit {
+                return limit + 1
+            }
+            swap(&previous, &current)
+        }
+
+        return previous[right.count]
+    }
+
+    private func helpDeskContextCandidates(
+        from sourceNotes: [HomePageSourceNote],
+        tokens: [String],
+        query: String
+    ) -> [HelpDeskContextCandidate] {
+        let normalizedQuery = normalizedSearchText(query)
+        return sourceNotes.flatMap { note -> [HelpDeskContextCandidate] in
+            let titleText = normalizedSearchText(note.title)
+            return markdownSearchBlocks(from: note.content).compactMap { block -> HelpDeskContextCandidate? in
+                let blockText = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !blockText.isEmpty else { return nil }
+                let normalizedBlock = normalizedSearchText(blockText)
+                let blockTokens = searchTokens(in: blockText)
+                let noteTitleTokens = searchTokens(in: note.title)
+                var score = 0.0
+                for token in tokens {
+                    if titleText.contains(token) {
+                        score += 10
+                    } else if noteTitleTokens.contains(where: { helpDeskTokensMatch(token, $0) }) {
+                        score += 7
+                    }
+
+                    if normalizedBlock.contains(token) {
+                        score += 5
+                    } else if blockTokens.contains(where: { helpDeskTokensMatch(token, $0) }) {
+                        score += 3
+                    }
+                }
+                if !titleText.isEmpty, normalizedQuery.contains(titleText) {
+                    score += 16
+                }
+                guard score > 0 else { return nil }
+                return HelpDeskContextCandidate(
+                    noteID: note.id,
+                    title: note.title,
+                    text: blockText,
+                    score: score,
+                    updatedAt: note.updatedAt
+                )
+            }
+        }
+        .sorted { lhs, rhs in
+            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+            return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+        }
+    }
+
+    private func helpDeskIndexedContextCandidates(
+        tokens: [String],
+        query: String,
+        queryVector: [Double]?
+    ) -> [HelpDeskContextCandidate] {
+        let normalizedQuery = normalizedSearchText(query)
+        let lexicalCandidates = searchIndex.compactMap { entry -> HelpDeskContextCandidate? in
+            guard entry.kind == "block" else { return nil }
+            let titleText = normalizedSearchText(entry.title)
+            let blockTokens = searchTokens(in: entry.displayText)
+            let noteTitleTokens = searchTokens(in: entry.title)
+            var score = 0.0
+            for token in tokens {
+                if titleText.contains(token) {
+                    score += 10
+                } else if noteTitleTokens.contains(where: { helpDeskTokensMatch(token, $0) }) {
+                    score += 7
+                }
+
+                if entry.normalizedText.contains(token) {
+                    score += 5
+                } else if blockTokens.contains(where: { helpDeskTokensMatch(token, $0) }) {
+                    score += 3
+                }
+            }
+            if !titleText.isEmpty, normalizedQuery.contains(titleText) {
+                score += 16
+            }
+            guard score > 0 else { return nil }
+            return HelpDeskContextCandidate(
+                noteID: entry.noteID,
+                title: entry.title,
+                text: entry.displayText,
+                score: score,
+                updatedAt: entry.updatedAt
+            )
+        }
+
+        let semanticCandidates = (queryVector == nil ? [] : semanticSearchIndex.compactMap { entry -> HelpDeskContextCandidate? in
+            guard entry.kind == "block", let queryVector else { return nil }
+            let similarity = cosineSimilarity(queryVector, entry.vector)
+            guard similarity >= Self.semanticSearchMinimumSimilarity else { return nil }
+            return HelpDeskContextCandidate(
+                noteID: entry.noteID,
+                title: entry.title,
+                text: entry.displayText,
+                score: 6 + (similarity * 16),
+                updatedAt: entry.updatedAt
+            )
+        })
+
+        var bestByBlock: [String: HelpDeskContextCandidate] = [:]
+        for candidate in lexicalCandidates + semanticCandidates {
+            let key = "\(candidate.noteID)-\(candidate.text)"
+            if let current = bestByBlock[key], current.score >= candidate.score {
+                continue
+            }
+            bestByBlock[key] = candidate
+        }
+
+        return bestByBlock.values.sorted { lhs, rhs in
+            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+            return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+        }
+    }
+
+    private func compactHelpDeskVaultContext(from sourceNotes: [HomePageSourceNote]) -> String {
+        var remainingBudget = Self.helpDeskContextCharacterBudget / 2
+        var chunks: [String] = []
+        for note in sourceNotes.sorted(by: { $0.updatedAt > $1.updatedAt }) {
+            guard remainingBudget > 0 else { break }
+            let preview = String(plainText(fromMarkdown: note.content).prefix(900))
+            let chunk = """
+            ### \(note.title)
+            \(preview)
+            """
+            let excerpt = promptExcerpt(chunk, characterLimit: remainingBudget)
+            remainingBudget -= excerpt.count
+            chunks.append(excerpt)
+        }
+        return chunks.joined(separator: "\n\n")
+    }
+
+    private func compactIndexedHelpDeskVaultContext() -> String {
+        var remainingBudget = Self.helpDeskContextCharacterBudget / 2
+        var chunks: [String] = []
+        for note in notes.sorted(by: { $0.updatedAt > $1.updatedAt }) {
+            guard remainingBudget > 0 else { break }
+            let preview = indexedBodyBlocks(for: note.id)
+                .map(\.displayText)
+                .joined(separator: " ")
+                .prefix(900)
+            guard !preview.isEmpty else { continue }
+            let chunk = """
+            ### \(note.title)
+            \(preview)
+            """
+            let excerpt = promptExcerpt(chunk, characterLimit: remainingBudget)
+            remainingBudget -= excerpt.count
+            chunks.append(excerpt)
+        }
+        return chunks.isEmpty ? nilIndexedHelpDeskContext() : chunks.joined(separator: "\n\n")
+    }
+
+    private func nilIndexedHelpDeskContext() -> String {
+        notes.isEmpty
+            ? "The vault has no pages yet."
+            : "Vault pages:\n\(notes.map { "- \($0.title)" }.joined(separator: "\n"))"
+    }
+
+    private func indexedBodyBlocks(for noteID: Note.ID) -> [NoteSearchIndexEntry] {
+        searchIndex
+            .filter { $0.noteID == noteID && $0.kind == "block" }
+            .sorted { lhs, rhs in
+                (lhs.blockIndex ?? Int.max) < (rhs.blockIndex ?? Int.max)
+            }
+    }
+
+    private func helpDeskAttachmentContext(_ attachment: PromptAttachment?) -> String {
+        guard let attachment else { return "None" }
+        let text = attachment.extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty {
+            return "\(attachment.fileName) (\(attachment.fileExtension.uppercased())) attached, but no readable text could be extracted."
+        }
+        return """
+        File: \(attachment.fileName)
+        Type: \(attachment.fileExtension.uppercased())
+        Text:
+        \(promptExcerpt(text, characterLimit: 12_000))
+        """
     }
 
     private func assistantPromptLinksContext(_ titles: [String]) -> String {
@@ -3442,11 +4460,13 @@ final class BrainStore: ObservableObject {
     }
 
     private func rebuildSearchIndex(from loadedNotes: [Note], in brain: BrainSummary) {
-        searchIndex = loadedNotes.flatMap { note in
+        let entries = loadedNotes.flatMap { note in
             let fileName = noteIdentityDatabase?.fileName(forNoteID: note.id)
                 ?? markdownFileName(for: note.title, id: note.id)
             return searchIndexEntries(for: note, fileName: fileName)
         }
+        searchIndex = entries
+        semanticSearchIndex = semanticSearchEntries(from: entries)
     }
 
     private func searchIndexEntries(for note: Note, fileName: String) -> [NoteSearchIndexEntry] {
@@ -3480,6 +4500,62 @@ final class BrainStore: ObservableObject {
         })
 
         return entries
+    }
+
+    private func semanticSearchEntries(from entries: [NoteSearchIndexEntry]) -> [SemanticSearchIndexEntry] {
+        guard semanticSearchEmbedding != nil else { return [] }
+        return entries.compactMap { entry in
+            let vectorSource = entry.kind == "title"
+                ? entry.normalizedText
+                : "\(entry.title) \(entry.displayText)"
+            guard let vector = semanticVector(for: vectorSource) else { return nil }
+            return SemanticSearchIndexEntry(
+                noteID: entry.noteID,
+                title: entry.title,
+                displayText: entry.displayText,
+                blockIndex: entry.blockIndex,
+                kind: entry.kind,
+                updatedAt: entry.updatedAt,
+                vector: vector
+            )
+        }
+    }
+
+    private func semanticVector(for text: String) -> [Double]? {
+        guard let embedding = semanticSearchEmbedding else { return nil }
+
+        var accumulator: [Double]?
+        var vectorCount = 0
+        let tokens = helpDeskRetrievalTokens(in: text)
+        for token in tokens.prefix(96) {
+            guard let tokenVector = embedding.vector(for: token) else { continue }
+            if accumulator == nil {
+                accumulator = Array(repeating: 0, count: tokenVector.count)
+            }
+            guard accumulator?.count == tokenVector.count else { continue }
+            for index in tokenVector.indices {
+                accumulator?[index] += tokenVector[index]
+            }
+            vectorCount += 1
+        }
+
+        guard var vector = accumulator, vectorCount > 0 else { return nil }
+        let scale = 1.0 / Double(vectorCount)
+        for index in vector.indices {
+            vector[index] *= scale
+        }
+        return normalizedVector(vector)
+    }
+
+    private func normalizedVector(_ vector: [Double]) -> [Double]? {
+        let magnitude = sqrt(vector.reduce(0) { $0 + ($1 * $1) })
+        guard magnitude > 0 else { return nil }
+        return vector.map { $0 / magnitude }
+    }
+
+    private func cosineSimilarity(_ lhs: [Double], _ rhs: [Double]) -> Double {
+        guard lhs.count == rhs.count else { return 0 }
+        return zip(lhs, rhs).reduce(0) { $0 + ($1.0 * $1.1) }
     }
 
     private func searchTokens(in query: String) -> [String] {
@@ -3737,6 +4813,24 @@ final class BrainStore: ObservableObject {
         brain.folderURL.appendingPathComponent("Notes", isDirectory: true)
     }
 
+    private func noteFileURLs(in brain: BrainSummary) throws -> [URL] {
+        let folder = notesFolderURL(for: brain)
+        guard FileManager.default.fileExists(atPath: folder.path) else { return [] }
+        guard let enumerator = FileManager.default.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        return enumerator.compactMap { item in
+            guard let url = item as? URL,
+                  url.pathExtension == "md" || url.pathExtension == "json",
+                  (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+            else { return nil }
+            return url
+        }
+    }
+
     private func imagesFolderURL(for brain: BrainSummary) -> URL {
         brain.folderURL.appendingPathComponent("Images", isDirectory: true)
     }
@@ -3779,6 +4873,108 @@ final class BrainStore: ObservableObject {
         brain.folderURL
             .appendingPathComponent(".zirn", isDirectory: true)
             .appendingPathComponent("Summaries", isDirectory: true)
+    }
+
+    private func hiddenHelpDeskFolderURL(for brain: BrainSummary) -> URL {
+        brain.folderURL
+            .appendingPathComponent(".zirn", isDirectory: true)
+            .appendingPathComponent("HelpDesk", isDirectory: true)
+    }
+
+    private func helpDeskDatabaseURL(for brain: BrainSummary) -> URL {
+        hiddenHelpDeskFolderURL(for: brain)
+            .appendingPathComponent("conversations.json")
+    }
+
+    private func loadHelpDeskDatabase() throws {
+        guard let brain = activeBrain else { return }
+        let sessionDatabase = try HelpDeskSessionDatabase(vaultFolderURL: brain.folderURL, vaultID: brain.id)
+        helpDeskSessionDatabase = sessionDatabase
+        helpDeskDatabase = try sessionDatabase.loadDatabase()
+
+        if helpDeskDatabase.conversations.isEmpty,
+           let legacyDatabase = try loadLegacyHelpDeskDatabase(for: brain),
+           !legacyDatabase.conversations.isEmpty {
+            helpDeskDatabase = legacyDatabase
+            try sessionDatabase.replaceAll(with: legacyDatabase)
+        }
+
+        syncHelpDeskConversations()
+        selectedHelpDeskConversationID = helpDeskConversations.first?.id
+    }
+
+    private func loadLegacyHelpDeskDatabase(for brain: BrainSummary) throws -> HelpDeskDatabase? {
+        let url = helpDeskDatabaseURL(for: brain)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let data = try Data(contentsOf: url)
+        var database = try decoder.decode(HelpDeskDatabase.self, from: data)
+        if let databaseVaultID = database.vaultID, databaseVaultID != brain.id {
+            return nil
+        }
+        database.vaultID = brain.id
+        return database
+    }
+
+    private func persistHelpDeskDatabaseQuietly() {
+        do {
+            try persistHelpDeskDatabase()
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    private func persistHelpDeskDatabase() throws {
+        guard let brain = activeBrain else { return }
+        let folder = hiddenHelpDeskFolderURL(for: brain)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        helpDeskDatabase.vaultID = brain.id
+        if helpDeskSessionDatabase == nil {
+            helpDeskSessionDatabase = try HelpDeskSessionDatabase(vaultFolderURL: brain.folderURL, vaultID: brain.id)
+        }
+        try helpDeskSessionDatabase?.replaceAll(with: helpDeskDatabase)
+    }
+
+    private func persistHelpDeskConversationQuietly(_ conversation: HelpDeskConversation) {
+        do {
+            if helpDeskSessionDatabase == nil, let brain = activeBrain {
+                helpDeskSessionDatabase = try HelpDeskSessionDatabase(vaultFolderURL: brain.folderURL, vaultID: brain.id)
+            }
+            try helpDeskSessionDatabase?.upsertConversation(conversation)
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    private func persistHelpDeskMessageQuietly(
+        _ message: HelpDeskMessage,
+        conversation: HelpDeskConversation
+    ) {
+        do {
+            if helpDeskSessionDatabase == nil, let brain = activeBrain {
+                helpDeskSessionDatabase = try HelpDeskSessionDatabase(vaultFolderURL: brain.folderURL, vaultID: brain.id)
+            }
+            try helpDeskSessionDatabase?.upsertConversation(conversation)
+            try helpDeskSessionDatabase?.insertMessage(message, conversationID: conversation.id)
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    private func deleteHelpDeskConversationFromStoreQuietly(id: HelpDeskConversation.ID) {
+        do {
+            try helpDeskSessionDatabase?.deleteConversation(id: id)
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    private func syncHelpDeskConversations() {
+        helpDeskDatabase.conversations.sort { $0.updatedAt > $1.updatedAt }
+        helpDeskConversations = helpDeskDatabase.conversations
+        if let selectedHelpDeskConversationID,
+           !helpDeskConversations.contains(where: { $0.id == selectedHelpDeskConversationID }) {
+            self.selectedHelpDeskConversationID = helpDeskConversations.first?.id
+        }
     }
 
     private func loadHighlightSummaries() throws {
@@ -3999,18 +5195,12 @@ final class BrainStore: ObservableObject {
             return markdownURL
         }
 
-        if let urls = try? FileManager.default.contentsOfDirectory(
-            at: folder,
-            includingPropertiesForKeys: nil
-        ) {
-            if let matchingMarkdown = urls.first(where: { url in
-                guard url.pathExtension == "md",
-                      let note = try? readNote(from: url)
-                else { return false }
-                return note.id == id
-            }) {
-                return matchingMarkdown
-            }
+        if let urls = try? noteFileURLs(in: brain),
+           let matchingMarkdown = urls.first(where: { url in
+               guard let note = try? readNote(from: url) else { return false }
+               return note.id == id
+           }) {
+            return matchingMarkdown
         }
 
         let jsonURL = folder.appendingPathComponent("\(id).json")
@@ -4021,9 +5211,189 @@ final class BrainStore: ObservableObject {
         return nil
     }
 
+    private func relativeNoteFileName(for url: URL, in brain: BrainSummary) -> String {
+        let folderPath = notesFolderURL(for: brain).standardizedFileURL.path
+        let filePath = url.standardizedFileURL.path
+        let prefix = folderPath.hasSuffix("/") ? folderPath : "\(folderPath)/"
+        guard filePath.hasPrefix(prefix) else { return url.lastPathComponent }
+        return String(filePath.dropFirst(prefix.count))
+    }
+
     private func markdownNoteURL(for note: Note, in brain: BrainSummary) -> URL {
         let fileName = markdownFileName(for: note.title, id: note.id)
-        return notesFolderURL(for: brain).appendingPathComponent(fileName)
+        let folder = sidebarGroupID(forNoteID: note.id)
+            .flatMap { sidebarGroup(for: $0) }
+            .map { sidebarGroupFolderURL(for: $0, in: brain) }
+            ?? notesFolderURL(for: brain)
+        return folder.appendingPathComponent(fileName)
+    }
+
+    private func sidebarGroup(for id: SidebarItem.ID) -> SidebarItem? {
+        sidebarItems.first { $0.id == id && $0.kind == .group }
+    }
+
+    private func sidebarGroupID(forNoteID noteID: Note.ID) -> SidebarItem.ID? {
+        sidebarItems.first { $0.kind == .note && $0.noteID == noteID }?.groupID
+    }
+
+    private func sidebarGroupFolderURL(for group: SidebarItem, in brain: BrainSummary) -> URL {
+        sidebarGroupFolderURL(forTitle: group.title, in: brain)
+    }
+
+    private func sidebarGroupFolderURL(forTitle title: String, in brain: BrainSummary) -> URL {
+        notesFolderURL(for: brain)
+            .appendingPathComponent(sidebarGroupFolderName(for: title), isDirectory: true)
+    }
+
+    private func sidebarGroupFolderName(for title: String) -> String {
+        let clean = title
+            .components(separatedBy: CharacterSet(charactersIn: "/:\\"))
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
+        return clean.isEmpty ? "Group" : clean
+    }
+
+    private func uniqueSidebarGroupTitle(_ title: String, excluding excludedID: SidebarItem.ID? = nil) -> String {
+        let baseTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedExisting = Set(
+            sidebarItems
+                .filter { $0.kind == .group && $0.id != excludedID }
+                .map { normalizedLinkTitle($0.title) }
+        )
+        guard normalizedExisting.contains(normalizedLinkTitle(baseTitle)) else {
+            return baseTitle
+        }
+
+        var suffix = 2
+        while true {
+            let candidate = "\(baseTitle) \(suffix)"
+            if !normalizedExisting.contains(normalizedLinkTitle(candidate)) {
+                return candidate
+            }
+            suffix += 1
+        }
+    }
+
+    private func persistSidebarLayoutAndFilesystem(for item: SidebarItem, in brain: BrainSummary) {
+        withSecurityScopedAccess(to: brain.folderURL) {
+            do {
+                if item.kind == .note, let noteID = item.noteID {
+                    try moveNoteFile(noteID: noteID, toGroupID: item.groupID, in: brain)
+                }
+                try persistSidebarLayoutNoAccess()
+                try loadNotes()
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    private func moveNotesInGroupToFilesystem(groupID: SidebarItem.ID, in brain: BrainSummary) throws {
+        let childNoteIDs = sidebarItems
+            .filter { $0.kind == .note && $0.groupID == groupID }
+            .compactMap(\.noteID)
+        for noteID in childNoteIDs {
+            try moveNoteFile(noteID: noteID, toGroupID: groupID, in: brain)
+        }
+    }
+
+    private func moveNoteFile(noteID: Note.ID, toGroupID groupID: SidebarItem.ID?, in brain: BrainSummary) throws {
+        guard let sourceURL = noteURL(for: noteID, in: brain),
+              FileManager.default.fileExists(atPath: sourceURL.path)
+        else { return }
+
+        let note = try readNote(from: sourceURL)
+        let destinationFolder: URL
+        if let groupID, let group = sidebarGroup(for: groupID) {
+            destinationFolder = sidebarGroupFolderURL(for: group, in: brain)
+        } else {
+            destinationFolder = notesFolderURL(for: brain)
+        }
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+
+        let destinationURL = uniqueFileURL(
+            named: sourceURL.lastPathComponent,
+            in: destinationFolder,
+            allowing: sourceURL
+        )
+        if sourceURL.standardizedFileURL != destinationURL.standardizedFileURL {
+            try FileManager.default.moveItem(at: sourceURL, to: destinationURL)
+            try removeEmptyNoteSubfolder(containing: sourceURL, in: brain)
+        }
+
+        try noteIdentityDatabase?.upsert(
+            noteID: note.id,
+            title: note.title,
+            fileName: relativeNoteFileName(for: destinationURL, in: brain),
+            updatedAt: note.updatedAt
+        )
+    }
+
+    private func moveSidebarGroupFolder(from oldURL: URL, to newURL: URL) throws {
+        if oldURL.standardizedFileURL == newURL.standardizedFileURL {
+            try FileManager.default.createDirectory(at: newURL, withIntermediateDirectories: true)
+            return
+        }
+
+        if FileManager.default.fileExists(atPath: oldURL.path) {
+            if FileManager.default.fileExists(atPath: newURL.path) {
+                try mergeDirectoryContents(from: oldURL, into: newURL)
+            } else {
+                try FileManager.default.createDirectory(
+                    at: newURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try FileManager.default.moveItem(at: oldURL, to: newURL)
+            }
+        } else {
+            try FileManager.default.createDirectory(at: newURL, withIntermediateDirectories: true)
+        }
+    }
+
+    private func mergeDirectoryContents(from source: URL, into destination: URL) throws {
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let children = try FileManager.default.contentsOfDirectory(at: source, includingPropertiesForKeys: nil)
+        for child in children {
+            let target = uniqueFileURL(named: child.lastPathComponent, in: destination, allowing: child)
+            try FileManager.default.moveItem(at: child, to: target)
+        }
+        try? FileManager.default.removeItem(at: source)
+    }
+
+    private func removeSidebarGroupFolderIfEmpty(title: String, in brain: BrainSummary) throws {
+        let folder = sidebarGroupFolderURL(forTitle: title, in: brain)
+        guard FileManager.default.fileExists(atPath: folder.path) else { return }
+        let children = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+        if children.isEmpty {
+            try FileManager.default.removeItem(at: folder)
+        }
+    }
+
+    private func removeEmptyNoteSubfolder(containing fileURL: URL, in brain: BrainSummary) throws {
+        let notesFolder = notesFolderURL(for: brain).standardizedFileURL
+        let parent = fileURL.deletingLastPathComponent().standardizedFileURL
+        guard parent != notesFolder,
+              parent.path.hasPrefix(notesFolder.path)
+        else { return }
+
+        let children = try FileManager.default.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil)
+        if children.isEmpty {
+            try FileManager.default.removeItem(at: parent)
+        }
+    }
+
+    private func uniqueFileURL(named fileName: String, in folder: URL, allowing existingURL: URL? = nil) -> URL {
+        let base = (fileName as NSString).deletingPathExtension
+        let ext = (fileName as NSString).pathExtension
+        var candidate = folder.appendingPathComponent(fileName)
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: candidate.path),
+              candidate.standardizedFileURL != existingURL?.standardizedFileURL {
+            let nextName = ext.isEmpty ? "\(base)-\(suffix)" : "\(base)-\(suffix).\(ext)"
+            candidate = folder.appendingPathComponent(nextName)
+            suffix += 1
+        }
+        return candidate
     }
 
     private func existingCreatedAt(for id: Note.ID) -> Date? {
@@ -4317,6 +5687,16 @@ private struct NoteSearchIndexEntry {
     let updatedAt: Date
 }
 
+private struct SemanticSearchIndexEntry {
+    let noteID: String
+    let title: String
+    let displayText: String
+    let blockIndex: Int?
+    let kind: String
+    let updatedAt: Date
+    let vector: [Double]
+}
+
 struct SearchHighlight: Equatable {
     let noteID: String
     let query: String
@@ -4332,6 +5712,41 @@ struct PromptAttachment: Equatable {
 struct PromptLinkedPage: Identifiable, Equatable {
     let id = UUID()
     let title: String
+}
+
+struct HelpDeskDatabase: Codable, Equatable {
+    var vaultID: String?
+    var conversations: [HelpDeskConversation]
+}
+
+struct HelpDeskConversation: Identifiable, Codable, Equatable {
+    let id: String
+    var title: String
+    var messages: [HelpDeskMessage]
+    let createdAt: Date
+    var updatedAt: Date
+}
+
+struct HelpDeskMessage: Identifiable, Codable, Equatable {
+    let id: String
+    let role: HelpDeskMessageRole
+    let content: String
+    let attachmentName: String?
+    let createdAt: Date
+}
+
+enum HelpDeskMessageRole: String, Codable, Equatable {
+    case user
+    case assistant
+
+    var chatRole: String {
+        switch self {
+        case .user:
+            return "user"
+        case .assistant:
+            return "assistant"
+        }
+    }
 }
 
 struct RecentVault: Identifiable, Codable, Equatable {
@@ -4434,6 +5849,14 @@ private struct HomePageSourceNote {
     let id: String
     let title: String
     let content: String
+    let updatedAt: Date
+}
+
+private struct HelpDeskContextCandidate {
+    let noteID: String
+    let title: String
+    let text: String
+    let score: Double
     let updatedAt: Date
 }
 
