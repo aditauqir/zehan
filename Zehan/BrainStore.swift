@@ -32,6 +32,8 @@ final class BrainStore: ObservableObject {
     @Published var graphLinks: [BrainLinkReference] = []
     @Published var selectedAssistantModel: AssistantModel = .mistral
     @Published var assistantPrompt = ""
+    @Published var assistantPromptLinkedPages: [PromptLinkedPage] = []
+    @Published var isAssistantWritingMode = false
     @Published var isGeneratingAssistantResponse = false
     @Published var isUsingWebSearch = false
     @Published var isShowingModelConfiguration = false
@@ -39,6 +41,7 @@ final class BrainStore: ObservableObject {
     @Published var isShowingUsedModelsConfiguration = false
     @Published var isShowingHighlightSummaryCompiler = false
     @Published var pendingAssistantPreview: AssistantPreview?
+    @Published var assistantConversationResponse: AssistantConversationResponse?
     @Published var activeSearchHighlight: SearchHighlight?
     @Published var assistantAttachment: PromptAttachment?
     @Published var generatedSummaries: [HighlightSummary] = []
@@ -76,6 +79,8 @@ final class BrainStore: ObservableObject {
     private var autosaveTask: Task<Void, Never>?
     private var homeCompilationTask: Task<Void, Never>?
     private var activeHomeGenerationID: UUID?
+    private var activeHighlightGenerationID: UUID?
+    private var assistantConversationMemory = LangChainConversationMemory()
     private var needsHomeRegenerationAfterCurrentCompile = false
     private var needsForcedHomeRegenerationAfterCurrentCompile = false
     private var pendingAssistantInsertion: PendingAssistantInsertion?
@@ -632,7 +637,7 @@ final class BrainStore: ObservableObject {
     }
 
     private func compileHomePageSummary(force: Bool = false) {
-        guard !isCompilingHighlightSummary else {
+        guard activeHighlightGenerationID == nil else {
             needsHomeRegenerationAfterCurrentCompile = true
             needsForcedHomeRegenerationAfterCurrentCompile = needsForcedHomeRegenerationAfterCurrentCompile || force
             if force {
@@ -642,6 +647,7 @@ final class BrainStore: ObservableObject {
         }
         homeCompilationTask?.cancel()
         homeCompilationTask = nil
+        activeHomeGenerationID = nil
         guard let activeBrain else {
             isGeneratingHomePage = false
             status = "Open or create a brain first"
@@ -703,6 +709,10 @@ final class BrainStore: ObservableObject {
     }
 
     private func startForcedHomePageGeneration() {
+        homeCompilationTask?.cancel()
+        homeCompilationTask = nil
+        activeHomeGenerationID = nil
+
         guard let activeBrain else {
             isGeneratingHomePage = false
             status = "Open or create a brain first"
@@ -758,6 +768,7 @@ final class BrainStore: ObservableObject {
         guard activeBrain != nil else { return }
         let delay = requestedDelay ?? Self.homeCompilationDebounceNanoseconds
         homeCompilationTask?.cancel()
+        activeHomeGenerationID = nil
         homeCompilationTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: delay)
             guard !Task.isCancelled else { return }
@@ -768,7 +779,7 @@ final class BrainStore: ObservableObject {
     }
 
     private func compileCurrentHighlightSummary(using model: HighlightSummaryModel) {
-        guard !isCompilingHighlightSummary else { return }
+        guard activeHighlightGenerationID == nil else { return }
         guard let sourceNoteID = currentNoteID else {
             status = "Open a page with highlights first"
             return
@@ -784,6 +795,8 @@ final class BrainStore: ObservableObject {
 
         selectedHighlightSummaryModel = model
         isShowingHighlightSummaryCompiler = false
+        let generationID = UUID()
+        activeHighlightGenerationID = generationID
         isCompilingHighlightSummary = true
         saveCurrentNote(statusText: "Highlights saved")
         openHomePage(regenerate: false)
@@ -795,7 +808,8 @@ final class BrainStore: ObservableObject {
                 sourceNoteID: sourceNoteID,
                 sourceTitle: sourceTitle,
                 highlights: highlights,
-                model: model
+                model: model,
+                generationID: generationID
             )
         }
     }
@@ -881,17 +895,55 @@ final class BrainStore: ObservableObject {
 
     func submitAssistantPrompt() {
         let prompt = assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (!prompt.isEmpty || assistantAttachment != nil), !isGeneratingAssistantResponse else { return }
+        let linkedPageTitles = assistantPromptLinkedPages.map(\.title)
+        guard (!prompt.isEmpty || assistantAttachment != nil || !linkedPageTitles.isEmpty), !isGeneratingAssistantResponse else { return }
 
-        assistantPrompt = ""
+        let intent = assistantIntent(for: prompt)
         pendingAssistantPreview = nil
+        if intent == .writing {
+            assistantConversationResponse = nil
+            assistantConversationMemory.clear()
+        }
         isGeneratingAssistantResponse = true
         isUsingWebSearch = selectedAssistantModel.supportsWebSearch && promptSuggestsWebSearch(prompt)
-        status = "\(selectedAssistantModel.title) is writing"
+        status = intent == .writing ? "\(selectedAssistantModel.title) is writing" : "\(selectedAssistantModel.title) is answering"
 
         Task {
-            await generateAssistantResponse(for: prompt)
+            switch intent {
+            case .writing:
+                await generateAssistantResponse(for: prompt, linkedPageTitles: linkedPageTitles)
+            case .conversation:
+                await generateAssistantConversationResponse(for: prompt, linkedPageTitles: linkedPageTitles)
+            }
         }
+    }
+
+    func addAssistantPromptLink(title: String) {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty,
+              !assistantPromptLinkedPages.contains(where: { normalizedLinkTitle($0.title) == normalizedLinkTitle(cleanTitle) })
+        else { return }
+
+        assistantPromptLinkedPages.append(PromptLinkedPage(title: cleanTitle))
+    }
+
+    func removeAssistantPromptLink(id: PromptLinkedPage.ID) {
+        assistantPromptLinkedPages.removeAll { $0.id == id }
+    }
+
+    func toggleAssistantWritingMode() {
+        isAssistantWritingMode.toggle()
+        if isAssistantWritingMode {
+            assistantConversationResponse = nil
+            assistantConversationMemory.clear()
+        }
+        status = isAssistantWritingMode ? "Writing mode on" : "Question mode on"
+    }
+
+    func exitAssistantConversation() {
+        assistantConversationResponse = nil
+        assistantConversationMemory.clear()
+        status = "Conversation closed"
     }
 
     func acceptAssistantPreview() {
@@ -1468,13 +1520,22 @@ final class BrainStore: ObservableObject {
         }
 
         guard let activeBrain else { return nil }
-        if path.hasPrefix("/") {
-            return URL(fileURLWithPath: path)
+        return resolvedMarkdownImageURL(for: path, brain: activeBrain)
+    }
+
+    func markdownImageData(for path: String) -> Data? {
+        guard let activeBrain else { return nil }
+
+        var imageData: Data?
+        withSecurityScopedAccess(to: activeBrain.folderURL) {
+            guard let url = resolvedMarkdownImageURL(for: path, brain: activeBrain),
+                  url.isFileURL
+            else { return }
+
+            imageData = try? Data(contentsOf: url)
         }
 
-        return notesFolderURL(for: activeBrain)
-            .appendingPathComponent(path)
-            .standardizedFileURL
+        return imageData
     }
 
     func removePromptAttachment() {
@@ -2213,7 +2274,7 @@ final class BrainStore: ObservableObject {
         }
     }
 
-    private func generateAssistantResponse(for prompt: String) async {
+    private func generateAssistantResponse(for prompt: String, linkedPageTitles: [String]) async {
         defer {
             isGeneratingAssistantResponse = false
             isUsingWebSearch = false
@@ -2224,13 +2285,13 @@ final class BrainStore: ObservableObject {
             let providerTitle = selectedAssistantModel.title
             switch selectedAssistantModel {
             case .mistral:
-                result = try await generateWithMistral(prompt: prompt)
+                result = try await generateWithMistral(prompt: prompt, linkedPageTitles: linkedPageTitles)
                 recordMistralUsage(
-                    inputTokens: result.inputTokens ?? estimatedTokenCount(for: assistantInput(for: prompt)),
+                    inputTokens: result.inputTokens ?? estimatedTokenCount(for: assistantInput(for: prompt, linkedPageTitles: linkedPageTitles)),
                     outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
                 )
             case .groq:
-                result = try await generateWithGroq(prompt: prompt)
+                result = try await generateWithGroq(prompt: prompt, linkedPageTitles: linkedPageTitles)
             }
             let output = result.content
 
@@ -2241,30 +2302,94 @@ final class BrainStore: ObservableObject {
             applyAssistantDocumentOutput(output, prompt: prompt)
             try? updateStyleMemory(with: content)
             pendingAssistantPreview = nil
+            clearSubmittedAssistantPromptIfUnchanged(prompt: prompt, linkedPageTitles: linkedPageTitles)
             status = "\(providerTitle) updated Markdown"
         } catch {
             status = error.localizedDescription
         }
     }
 
+    private func generateAssistantConversationResponse(for prompt: String, linkedPageTitles: [String]) async {
+        defer {
+            isGeneratingAssistantResponse = false
+            isUsingWebSearch = false
+        }
+
+        do {
+            let result: ChatCompletionResult
+            let providerTitle = selectedAssistantModel.title
+            let input = assistantConversationInput(for: prompt, linkedPageTitles: linkedPageTitles)
+            let messages = assistantConversationMessages(currentUserInput: input)
+            switch selectedAssistantModel {
+            case .mistral:
+                result = try await generateWithMistral(
+                    system: assistantConversationInstructions(),
+                    messages: messages,
+                    maxTokens: Self.maxAssistantOutputTokens
+                )
+                recordMistralUsage(
+                    inputTokens: result.inputTokens ?? estimatedTokenCount(for: input + assistantConversationTranscript()),
+                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+                )
+            case .groq:
+                result = try await generateWithGroq(
+                    system: assistantConversationInstructions(),
+                    messages: messages
+                )
+            }
+
+            let answer = cleanedAssistantMarkdown(result.content)
+            guard !answer.isEmpty else {
+                throw AssistantError.requestFailed("The model returned no answer.")
+            }
+
+            let response = AssistantConversationResponse(
+                prompt: prompt,
+                answer: answer,
+                providerTitle: providerTitle,
+                createdAt: Date()
+            )
+            assistantConversationResponse = response
+            assistantConversationMemory.append(response)
+            clearSubmittedAssistantPromptIfUnchanged(prompt: prompt, linkedPageTitles: linkedPageTitles)
+            status = "\(providerTitle) answered"
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    private func clearSubmittedAssistantPromptIfUnchanged(prompt: String, linkedPageTitles: [String]) {
+        let currentPrompt = assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentLinkedPageTitles = assistantPromptLinkedPages.map(\.title)
+        guard currentPrompt == prompt,
+              currentLinkedPageTitles == linkedPageTitles
+        else { return }
+
+        assistantPrompt = ""
+        assistantPromptLinkedPages = []
+    }
+
     private func generateHighlightSummary(
         sourceNoteID: Note.ID,
         sourceTitle: String,
         highlights: [String],
-        model: HighlightSummaryModel
+        model: HighlightSummaryModel,
+        generationID: UUID
     ) async {
         let startedAt = Date()
         defer {
-            isCompilingHighlightSummary = false
-            isGeneratingHomePage = false
-            if needsHomeRegenerationAfterCurrentCompile {
-                let shouldForce = needsForcedHomeRegenerationAfterCurrentCompile
-                needsHomeRegenerationAfterCurrentCompile = false
-                needsForcedHomeRegenerationAfterCurrentCompile = false
-                if shouldForce {
-                    compileHomePageSummary(force: true)
-                } else {
-                    scheduleLiveHomePageCompilation()
+            if activeHighlightGenerationID == generationID {
+                activeHighlightGenerationID = nil
+                isCompilingHighlightSummary = activeHomeGenerationID != nil
+                if needsHomeRegenerationAfterCurrentCompile {
+                    let shouldForce = needsForcedHomeRegenerationAfterCurrentCompile
+                    needsHomeRegenerationAfterCurrentCompile = false
+                    needsForcedHomeRegenerationAfterCurrentCompile = false
+                    if shouldForce {
+                        compileHomePageSummary(force: true)
+                    } else {
+                        scheduleLiveHomePageCompilation()
+                    }
                 }
             }
         }
@@ -2318,7 +2443,9 @@ final class BrainStore: ObservableObject {
             openHomePage(regenerate: false)
             status = "Summary compiled"
         } catch {
-            status = error.localizedDescription
+            if activeHighlightGenerationID == generationID {
+                status = error.localizedDescription
+            }
         }
     }
 
@@ -2332,7 +2459,7 @@ final class BrainStore: ObservableObject {
         let startedAt = Date()
         defer {
             if generationID == nil || activeHomeGenerationID == generationID {
-                isCompilingHighlightSummary = false
+                isCompilingHighlightSummary = activeHighlightGenerationID != nil
                 isGeneratingHomePage = false
                 if activeHomeGenerationID == generationID {
                     activeHomeGenerationID = nil
@@ -2429,10 +2556,10 @@ final class BrainStore: ObservableObject {
         )
     }
 
-    private func generateWithMistral(prompt: String) async throws -> ChatCompletionResult {
+    private func generateWithMistral(prompt: String, linkedPageTitles: [String]) async throws -> ChatCompletionResult {
         try await generateWithMistral(
             system: assistantInstructions(),
-            user: assistantInput(for: prompt),
+            user: assistantInput(for: prompt, linkedPageTitles: linkedPageTitles),
             maxTokens: Self.maxAssistantOutputTokens
         )
     }
@@ -2442,9 +2569,34 @@ final class BrainStore: ObservableObject {
         user: String,
         maxTokens: Int
     ) async throws -> ChatCompletionResult {
+        try await generateWithMistral(
+            system: system,
+            messages: [
+                [
+                    "role": "user",
+                    "content": user
+                ]
+            ],
+            maxTokens: maxTokens
+        )
+    }
+
+    private func generateWithMistral(
+        system: String,
+        messages: [[String: String]],
+        maxTokens: Int
+    ) async throws -> ChatCompletionResult {
         guard !mistralAPIKey.isEmpty else {
             throw AssistantError.missingConfiguration("Add a Mistral API key in Settings > Configure Model.")
         }
+
+        var requestMessages = [
+            [
+                "role": "system",
+                "content": system
+            ]
+        ]
+        requestMessages.append(contentsOf: messages)
 
         var request = URLRequest(url: URL(string: "https://api.mistral.ai/v1/chat/completions")!)
         request.httpMethod = "POST"
@@ -2452,16 +2604,7 @@ final class BrainStore: ObservableObject {
         request.setValue("Bearer \(mistralAPIKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": mistralModel,
-            "messages": [
-                [
-                    "role": "system",
-                    "content": system
-                ],
-                [
-                    "role": "user",
-                    "content": user
-                ]
-            ],
+            "messages": requestMessages,
             "temperature": 0.35,
             "max_tokens": maxTokens,
             "stream": false
@@ -2481,10 +2624,43 @@ final class BrainStore: ObservableObject {
         try validateHTTPResponse(response, data: data)
     }
 
-    private func generateWithGroq(prompt: String) async throws -> ChatCompletionResult {
+    private func generateWithGroq(prompt: String, linkedPageTitles: [String]) async throws -> ChatCompletionResult {
+        try await generateWithGroq(
+            system: assistantInstructions(),
+            user: assistantInput(for: prompt, linkedPageTitles: linkedPageTitles)
+        )
+    }
+
+    private func generateWithGroq(
+        system: String,
+        user: String
+    ) async throws -> ChatCompletionResult {
+        try await generateWithGroq(
+            system: system,
+            messages: [
+                [
+                    "role": "user",
+                    "content": user
+                ]
+            ]
+        )
+    }
+
+    private func generateWithGroq(
+        system: String,
+        messages: [[String: String]]
+    ) async throws -> ChatCompletionResult {
         guard !groqAPIKey.isEmpty else {
             throw AssistantError.missingConfiguration("Add a Groq API key in Settings > Configure Model.")
         }
+
+        var requestMessages = [
+            [
+                "role": "system",
+                "content": system
+            ]
+        ]
+        requestMessages.append(contentsOf: messages)
 
         var request = URLRequest(url: URL(string: "https://api.groq.com/openai/v1/chat/completions")!)
         request.httpMethod = "POST"
@@ -2492,16 +2668,7 @@ final class BrainStore: ObservableObject {
         request.setValue("Bearer \(groqAPIKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": groqModel,
-            "messages": [
-                [
-                    "role": "system",
-                    "content": assistantInstructions()
-                ],
-                [
-                    "role": "user",
-                    "content": assistantInput(for: prompt)
-                ]
-            ],
+            "messages": requestMessages,
             "temperature": 0.35,
             "max_completion_tokens": Self.maxAssistantOutputTokens,
             "stream": false
@@ -2567,6 +2734,16 @@ final class BrainStore: ObservableObject {
         Preserve the user's existing edits. Make the smallest useful change unless the user asks for a larger rewrite.
         Output polished Markdown with clear headings, short paragraphs, and useful lists only when lists are natural.
         Use Obsidian-style wiki links like [[Page Title]] only when linking is genuinely useful.
+        """
+    }
+
+    private func assistantConversationInstructions() -> String {
+        """
+        You are Zirn's conversational assistant. Answer the user's question without editing, rewriting, or replacing the Markdown document.
+        Use the current Markdown document and any attached document as context when relevant.
+        Return Markdown only. Do not claim you changed the file.
+        If the user asks you to edit the note, briefly tell them to turn on writing mode with the pen icon.
+        Keep answers concise, useful, and grounded in the supplied context.
         """
     }
 
@@ -2944,10 +3121,13 @@ final class BrainStore: ObservableObject {
         return "\(clean.prefix(characterLimit))\n..."
     }
 
-    private func assistantInput(for prompt: String) -> String {
+    private func assistantInput(for prompt: String, linkedPageTitles: [String]) -> String {
         """
         User request:
-        \(prompt.isEmpty ? "Use the attached document to update or extend the current Markdown document." : prompt)
+        \(prompt.isEmpty && linkedPageTitles.isEmpty ? "Use the attached document to update or extend the current Markdown document." : prompt)
+
+        Linked Markdown pages selected in the prompt:
+        \(assistantPromptLinksContext(linkedPageTitles))
 
         Attached document:
         \(assistantAttachmentContext())
@@ -2960,6 +3140,7 @@ final class BrainStore: ObservableObject {
 
         Required output:
         Return the complete revised Markdown document only.
+        When referring to any selected linked page, use its exact Obsidian wiki link form, such as [[Page Title]].
 
         Learned user writing samples:
         \(learnedStyleMemory())
@@ -2967,6 +3148,82 @@ final class BrainStore: ObservableObject {
         Correction-derived preferences, strongest first:
         \(learnedCorrectionMemory())
         """
+    }
+
+    private func assistantConversationInput(for prompt: String, linkedPageTitles: [String]) -> String {
+        return """
+        User question:
+        \(prompt.isEmpty && linkedPageTitles.isEmpty ? "Answer using the attached document and current note as context." : prompt)
+
+        Linked Markdown pages selected in the prompt:
+        \(assistantPromptLinksContext(linkedPageTitles))
+
+        Attached document:
+        \(assistantAttachmentContext())
+
+        Current document title:
+        \(title)
+
+        Current Markdown document:
+        \(promptExcerpt(content, characterLimit: 12_000))
+
+        Required output:
+        Answer the user. Do not rewrite the Markdown file.
+        """
+    }
+
+    private func assistantConversationMessages(currentUserInput: String) -> [[String: String]] {
+        var messages = assistantConversationMemory.chatMessages { promptExcerpt($0, characterLimit: 2_000) }
+        messages.append(
+            [
+                "role": "user",
+                "content": currentUserInput
+            ]
+        )
+        return messages
+    }
+
+    private func assistantPromptLinksContext(_ titles: [String]) -> String {
+        guard !titles.isEmpty else { return "None" }
+        return titles.map { "- [[\($0)]]" }.joined(separator: "\n")
+    }
+
+    private func assistantConversationTranscript() -> String {
+        assistantConversationMemory.transcript { promptExcerpt($0, characterLimit: 2_000) }
+    }
+
+    private func assistantIntent(for prompt: String) -> AssistantPromptIntent {
+        if isAssistantWritingMode {
+            return .writing
+        }
+
+        let cleanPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleanPrompt.isEmpty {
+            return assistantAttachment == nil ? .conversation : .writing
+        }
+
+        let lowercasedPrompt = cleanPrompt.lowercased()
+        let writingTerms = [
+            "write", "rewrite", "edit", "change", "replace", "insert", "add ",
+            "remove", "delete", "summarize this into", "turn this into",
+            "make this", "format", "fix grammar", "improve this", "continue writing",
+            "append", "draft", "create a section", "update the document"
+        ]
+        let questionStarters = [
+            "what", "why", "how", "when", "where", "who", "which",
+            "can you explain", "could you explain", "tell me", "do you know",
+            "is ", "are ", "does ", "did ", "should ", "would "
+        ]
+
+        if writingTerms.contains(where: { lowercasedPrompt.contains($0) }) {
+            return .writing
+        }
+
+        if cleanPrompt.hasSuffix("?") || questionStarters.contains(where: { lowercasedPrompt.hasPrefix($0) }) {
+            return .conversation
+        }
+
+        return .conversation
     }
 
     private func assistantAttachmentContext() -> String {
@@ -3484,6 +3741,34 @@ final class BrainStore: ObservableObject {
         brain.folderURL.appendingPathComponent("Images", isDirectory: true)
     }
 
+    private func resolvedMarkdownImageURL(for path: String, brain: BrainSummary) -> URL? {
+        let trimmedPath = path
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "<>"))
+        let decodedPath = trimmedPath.removingPercentEncoding ?? trimmedPath
+
+        if let url = URL(string: decodedPath),
+           let scheme = url.scheme,
+           scheme.hasPrefix("http") || scheme == "file" {
+            return url
+        }
+
+        if decodedPath.hasPrefix("/") {
+            return URL(fileURLWithPath: decodedPath)
+        }
+
+        let notesFolder = notesFolderURL(for: brain)
+        let imagesFolder = imagesFolderURL(for: brain)
+        let fileName = (decodedPath as NSString).lastPathComponent
+        let candidates = [
+            notesFolder.appendingPathComponent(decodedPath).standardizedFileURL,
+            brain.folderURL.appendingPathComponent(decodedPath).standardizedFileURL,
+            imagesFolder.appendingPathComponent(fileName).standardizedFileURL
+        ]
+
+        return candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) ?? candidates.first
+    }
+
     private func hiddenHighlightsFolderURL(for brain: BrainSummary) -> URL {
         brain.folderURL
             .appendingPathComponent(".zirn", isDirectory: true)
@@ -3606,7 +3891,10 @@ final class BrainStore: ObservableObject {
     }
 
     private func highlightedTextFragments(in markdown: String) -> [String] {
-        guard let regex = try? NSRegularExpression(pattern: #"==([^=]+)=="#) else { return [] }
+        guard let regex = try? NSRegularExpression(
+            pattern: #"==(.+?)=="#,
+            options: [.dotMatchesLineSeparators]
+        ) else { return [] }
         let nsMarkdown = markdown as NSString
         let fullRange = NSRange(location: 0, length: nsMarkdown.length)
 
@@ -4041,6 +4329,11 @@ struct PromptAttachment: Equatable {
     let extractedText: String
 }
 
+struct PromptLinkedPage: Identifiable, Equatable {
+    let id = UUID()
+    let title: String
+}
+
 struct RecentVault: Identifiable, Codable, Equatable {
     var id: String { brainPath }
 
@@ -4070,6 +4363,65 @@ struct AssistantPreview: Identifiable, Equatable {
     let markdown: String
     let providerTitle: String
     let createdAt: Date
+}
+
+struct AssistantConversationResponse: Identifiable, Equatable {
+    let id = UUID()
+    let prompt: String
+    let answer: String
+    let providerTitle: String
+    let createdAt: Date
+}
+
+private struct LangChainConversationMemory {
+    private var turns: [AssistantConversationResponse] = []
+    private let maxTurns = 8
+
+    mutating func append(_ turn: AssistantConversationResponse) {
+        turns.append(turn)
+        if turns.count > maxTurns {
+            turns.removeFirst(turns.count - maxTurns)
+        }
+    }
+
+    mutating func clear() {
+        turns.removeAll()
+    }
+
+    func transcript(clipping: (String) -> String) -> String {
+        guard !turns.isEmpty else { return "None" }
+
+        return turns.map { turn in
+            """
+            User:
+            \(turn.prompt)
+
+            Assistant:
+            \(clipping(turn.answer))
+            """
+        }
+        .joined(separator: "\n\n")
+    }
+
+    func chatMessages(clipping: (String) -> String) -> [[String: String]] {
+        turns.flatMap { turn in
+            [
+                [
+                    "role": "user",
+                    "content": turn.prompt
+                ],
+                [
+                    "role": "assistant",
+                    "content": clipping(turn.answer)
+                ]
+            ]
+        }
+    }
+}
+
+private enum AssistantPromptIntent {
+    case writing
+    case conversation
 }
 
 private struct ChatCompletionResult {

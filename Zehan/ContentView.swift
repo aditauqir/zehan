@@ -403,6 +403,9 @@ private struct WorkspaceView: View {
                     openNote: { noteID in
                         isEditingMarkdown = false
                         store.openNote(id: noteID)
+                        withAnimation(.easeInOut(duration: 0.22)) {
+                            isGraphExpanded = false
+                        }
                     },
                     close: {
                         withAnimation(.easeInOut(duration: 0.22)) {
@@ -476,14 +479,17 @@ private struct WorkspaceView: View {
                             ReadOnlyHomePageView(
                                 markdown: store.homeMarkdown,
                                 isGenerating: store.isGeneratingHomePage,
+                                generationDate: store.latestHomeSummary?.compiledAt,
                                 openLinkedNote: { store.openLinkedNote(named: $0) },
-                                imageURL: store.markdownImageURL
+                                imageURL: store.markdownImageURL,
+                                imageData: store.markdownImageData
                             )
                         } else if let summary = store.currentHighlightSummary {
                             ReadOnlyHighlightSummaryView(
                                 summary: summary,
                                 openLinkedNote: { store.openLinkedNote(named: $0) },
-                                imageURL: store.markdownImageURL
+                                imageURL: store.markdownImageURL,
+                                imageData: store.markdownImageData
                             )
                         } else {
                             MarkdownEditingSurface(
@@ -495,6 +501,7 @@ private struct WorkspaceView: View {
                                 openLinkedNote: { store.openLinkedNote(named: $0) },
                                 clearSearchHighlight: store.clearSearchHighlight,
                                 imageURL: store.markdownImageURL,
+                                imageData: store.markdownImageData,
                                 insertImageFile: store.insertMarkdownImage,
                                 insertImageData: store.insertMarkdownImage,
                                 typingStatus: $typingStatus
@@ -1229,6 +1236,7 @@ private struct NoteGraphView: View {
     let selectedNoteID: Note.ID?
     var maxVisibleNotes: Int? = 12
     var allowsScrolling = false
+    var opensOnSingleClick = true
     let openNote: (Note.ID) -> Void
     var expand: (() -> Void)?
     @State private var savedNodePositions: [String: CGPoint] = [:]
@@ -1321,8 +1329,13 @@ private struct NoteGraphView: View {
                     .position(point)
                     .zIndex(isDragging || note.id == selectedNoteID ? 3 : 1)
                     .allowsHitTesting(activeDraggedNodeID == nil || activeDraggedNodeID == note.id)
-                    .onTapGesture {
+                    .onTapGesture(count: 2) {
                         openNote(note.id)
+                    }
+                    .onTapGesture {
+                        if opensOnSingleClick {
+                            openNote(note.id)
+                        }
                     }
                     .highPriorityGesture(
                         DragGesture(minimumDistance: 1, coordinateSpace: .named("graphCanvas"))
@@ -1625,6 +1638,7 @@ private struct ExpandedGraphOverlay: View {
                     selectedNoteID: selectedNoteID,
                     maxVisibleNotes: nil,
                     allowsScrolling: true,
+                    opensOnSingleClick: false,
                     openNote: openNote,
                     expand: nil
                 )
@@ -1642,6 +1656,7 @@ private struct ExpandedGraphOverlay: View {
             .shadow(color: .black.opacity(0.34), radius: 34, y: 18)
             .padding(28)
         }
+        .onExitCommand(perform: close)
     }
 }
 
@@ -2179,6 +2194,7 @@ private struct ReadOnlyHighlightSummaryView: View {
     let summary: HighlightSummary
     let openLinkedNote: (String) -> Void
     let imageURL: (String) -> URL?
+    let imageData: (String) -> Data?
 
     var body: some View {
         ScrollView {
@@ -2186,7 +2202,8 @@ private struct ReadOnlyHighlightSummaryView: View {
                 content: summary.markdown,
                 searchHighlight: nil,
                 openLinkedNote: openLinkedNote,
-                imageURL: imageURL
+                imageURL: imageURL,
+                imageData: imageData
             )
             .padding(.vertical, 8)
             .textSelection(.enabled)
@@ -2199,8 +2216,10 @@ private struct ReadOnlyHighlightSummaryView: View {
 private struct ReadOnlyHomePageView: View {
     let markdown: String
     let isGenerating: Bool
+    let generationDate: Date?
     let openLinkedNote: (String) -> Void
     let imageURL: (String) -> URL?
+    let imageData: (String) -> Data?
 
     var body: some View {
         ScrollView {
@@ -2216,13 +2235,15 @@ private struct ReadOnlyHomePageView: View {
 
                 if isGenerating {
                     HomeGenerationInlineBlocks()
+                        .id(generationDate ?? Date.distantFuture)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 } else {
                     MarkdownPreview(
                         content: markdownWithoutHomeHeading,
                         searchHighlight: nil,
                         openLinkedNote: openLinkedNote,
-                        imageURL: imageURL
+                        imageURL: imageURL,
+                        imageData: imageData
                     )
                     .textSelection(.enabled)
                     .transition(.opacity)
@@ -2399,6 +2420,7 @@ private struct MarkdownEditingSurface: View {
     let openLinkedNote: (String) -> Void
     let clearSearchHighlight: () -> Void
     let imageURL: (String) -> URL?
+    let imageData: (String) -> Data?
     let insertImageFile: (URL) -> Void
     let insertImageData: (Data, String?) -> Void
     @Binding var typingStatus: MarkdownTypingStatus
@@ -2509,7 +2531,8 @@ private struct MarkdownEditingSurface: View {
                     content: content,
                     searchHighlight: searchHighlight,
                     openLinkedNote: openLinkedNote,
-                    imageURL: imageURL
+                    imageURL: imageURL,
+                    imageData: imageData
                 )
                     .padding(.horizontal, 26)
                     .padding(.top, 2)
@@ -3136,6 +3159,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
                 Self.applyInlineStyles(in: lineRange, rawText: rawText, textStorage: textStorage, baseFontSize: 15)
             }
 
+            Self.applyMultilineHighlightStyles(in: fullRange, rawText: rawText, textStorage: textStorage)
             textStorage.endEditing()
             textView.selectedRanges = selectedRanges.compactMap { value in
                 let range = value.rangeValue
@@ -3297,6 +3321,27 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
                     .foregroundColor: NSColor.systemTeal,
                     .font: NSFont.systemFont(ofSize: baseFontSize, weight: .medium)
                 ], range: matchRange)
+            }
+        }
+
+        private static func applyMultilineHighlightStyles(
+            in range: NSRange,
+            rawText: NSString,
+            textStorage: NSTextStorage
+        ) {
+            guard let regex = try? NSRegularExpression(
+                pattern: #"==(.+?)=="#,
+                options: [.dotMatchesLineSeparators]
+            ) else { return }
+
+            regex.enumerateMatches(in: rawText as String, range: range) { match, _, _ in
+                guard let match else { return }
+                textStorage.addAttributes([
+                    .backgroundColor: NSColor.systemYellow.withAlphaComponent(0.32),
+                    .foregroundColor: NSColor.labelColor
+                ], range: match.range)
+                hideSyntax(in: textStorage, range: NSRange(location: match.range.location, length: 2))
+                hideSyntax(in: textStorage, range: NSRange(location: match.range.upperBound - 2, length: 2))
             }
         }
 
@@ -3748,6 +3793,109 @@ private struct AssistantPreviewPanel: View {
     }
 }
 
+private struct AssistantConversationPanel: View {
+    let response: AssistantConversationResponse
+    let exitConversation: () -> Void
+    let openLinkedNote: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Label("\(response.providerTitle) Answer", systemImage: "bubble.left.and.text.bubble.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.78))
+
+                Spacer()
+
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.55))
+            }
+
+            ScrollView {
+                MarkdownPreview(
+                    content: response.answer,
+                    searchHighlight: nil,
+                    openLinkedNote: openLinkedNote
+                )
+                .padding(.trailing, 4)
+                .textSelection(.enabled)
+            }
+            .scrollIndicators(needsScrolling ? .visible : .hidden)
+            .frame(maxHeight: responseViewportHeight)
+
+            HStack {
+                Spacer()
+                exitConversationButton
+            }
+        }
+        .padding(14)
+        .frame(width: panelWidth, alignment: .leading)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.22), radius: 22, y: 10)
+    }
+
+    private var exitConversationButton: some View {
+        Button(action: exitConversation) {
+            Text("Exit Conversation")
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(.primary.opacity(0.86))
+                .padding(.horizontal, 15)
+                .frame(height: 30)
+                .background {
+                    Capsule()
+                        .fill(.ultraThinMaterial)
+                        .overlay {
+                            Capsule()
+                                .stroke(Color.primary.opacity(0.14), lineWidth: 0.8)
+                        }
+                }
+        }
+        .buttonStyle(.plain)
+        .help("Close this answer")
+    }
+
+    private var panelWidth: CGFloat {
+        min(620, max(360, CGFloat(response.answer.count) * 4.8))
+    }
+
+    private var responseViewportHeight: CGFloat {
+        min(responseMaxHeight, max(72, estimatedResponseHeight))
+    }
+
+    private var responseMaxHeight: CGFloat {
+        min(560, max(320, (NSScreen.main?.visibleFrame.height ?? 900) * 0.52))
+    }
+
+    private var estimatedResponseHeight: CGFloat {
+        CGFloat(estimatedLineCount) * 22 + 8
+    }
+
+    private var estimatedLineCount: Int {
+        let charactersPerLine = max(42, Int(panelWidth / 8.4))
+        return response.answer
+            .components(separatedBy: .newlines)
+            .reduce(0) { total, line in
+                total + max(1, Int(ceil(Double(line.count) / Double(charactersPerLine))))
+            }
+    }
+
+    private var needsScrolling: Bool {
+        estimatedResponseHeight > responseMaxHeight
+    }
+}
+
+private struct ConversationReadabilityBackdrop: View {
+    var body: some View {
+        EmptyView()
+    }
+}
+
 private struct ReadingModeToggle: View {
     @Binding var isOn: Bool
     let size: CGFloat
@@ -3802,6 +3950,269 @@ private struct PromptTextHeightPreferenceKey: PreferenceKey {
     }
 }
 
+private struct PromptTextInputView: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var selectionRange: NSRange
+    let placeholder: String
+    let fontSize: CGFloat
+    let linkTabCompletionTitle: String?
+    let suggestionRange: NSRange?
+    @Binding var suggestionAnchor: CGPoint?
+    let isExpanded: Bool
+    let submitOnReturn: Bool
+    let submit: () -> Void
+    let completeLink: (String) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            text: $text,
+            selectionRange: $selectionRange,
+            suggestionAnchor: $suggestionAnchor,
+            submit: submit,
+            completeLink: completeLink
+        )
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+
+        let textView = PromptNSTextView()
+        textView.commandHandler = context.coordinator
+        textView.delegate = context.coordinator
+        textView.string = text
+        textView.drawsBackground = false
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.textContainerInset = NSSize(width: 0, height: 0)
+        textView.font = NSFont.systemFont(ofSize: fontSize)
+        textView.textColor = .labelColor
+        textView.minSize = NSSize(width: 0, height: scrollView.contentSize.height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        context.coordinator.linkTabCompletionTitle = linkTabCompletionTitle
+        context.coordinator.suggestionRange = suggestionRange
+        context.coordinator.isExpanded = isExpanded
+        context.coordinator.submitOnReturn = submitOnReturn
+        context.coordinator.updateTextInsets(in: textView)
+        textView.setSelectedRange(clamped(selectionRange, in: text))
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? PromptNSTextView else { return }
+        context.coordinator.text = $text
+        context.coordinator.selectionRange = $selectionRange
+        context.coordinator.suggestionAnchor = $suggestionAnchor
+        context.coordinator.linkTabCompletionTitle = linkTabCompletionTitle
+        context.coordinator.suggestionRange = suggestionRange
+        context.coordinator.isExpanded = isExpanded
+        context.coordinator.submitOnReturn = submitOnReturn
+        context.coordinator.submit = submit
+        context.coordinator.completeLink = completeLink
+        context.coordinator.textView = textView
+        textView.font = NSFont.systemFont(ofSize: fontSize)
+        context.coordinator.updateTextInsets(in: textView)
+
+        if textView.string != text {
+            textView.string = text
+            textView.setSelectedRange(clamped(selectionRange, in: text))
+        }
+        context.coordinator.updateSuggestionAnchor()
+    }
+
+    private func clamped(_ range: NSRange, in text: String) -> NSRange {
+        let length = (text as NSString).length
+        let location = min(max(0, range.location), length)
+        return NSRange(location: location, length: min(range.length, max(0, length - location)))
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var text: Binding<String>
+        var selectionRange: Binding<NSRange>
+        var suggestionAnchor: Binding<CGPoint?>
+        var submit: () -> Void
+        var completeLink: (String) -> Void
+        var linkTabCompletionTitle: String?
+        var suggestionRange: NSRange?
+        var isExpanded = false
+        var submitOnReturn = true
+        weak var textView: NSTextView?
+
+        init(
+            text: Binding<String>,
+            selectionRange: Binding<NSRange>,
+            suggestionAnchor: Binding<CGPoint?>,
+            submit: @escaping () -> Void,
+            completeLink: @escaping (String) -> Void
+        ) {
+            self.text = text
+            self.selectionRange = selectionRange
+            self.suggestionAnchor = suggestionAnchor
+            self.submit = submit
+            self.completeLink = completeLink
+        }
+
+        func updateTextInsets(in textView: NSTextView) {
+            textView.textContainerInset = isExpanded
+                ? NSSize(width: 10, height: 8)
+                : NSSize(width: 0, height: 3)
+            textView.textContainer?.lineFragmentPadding = 0
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            text.wrappedValue = textView.string
+            publishSelection(from: textView)
+            updateSuggestionAnchor()
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            if let textView = notification.object as? NSTextView {
+                publishSelection(from: textView)
+            }
+            updateSuggestionAnchor()
+        }
+
+        func completeActiveLinkFromTab(in textView: NSTextView) -> Bool {
+            guard let title = linkTabCompletionTitle, !title.isEmpty,
+                  let suggestionRange,
+                  suggestionRange.location >= 0,
+                  suggestionRange.upperBound <= (textView.string as NSString).length
+            else { return false }
+
+            textView.replaceCharacters(in: suggestionRange, with: "")
+            let newSelection = NSRange(location: suggestionRange.location, length: 0)
+            textView.setSelectedRange(newSelection)
+            text.wrappedValue = textView.string
+            selectionRange.wrappedValue = newSelection
+            suggestionAnchor.wrappedValue = nil
+            completeLink(title)
+            return true
+        }
+
+        func handleReturn(in textView: NSTextView) -> Bool {
+            guard submitOnReturn else { return false }
+            submit()
+            return true
+        }
+
+        func updateSuggestionAnchor() {
+            guard let textView,
+                  let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer,
+                  let suggestionRange,
+                  suggestionRange.location <= (textView.string as NSString).length
+            else {
+                if suggestionAnchor.wrappedValue != nil {
+                    DispatchQueue.main.async {
+                        self.suggestionAnchor.wrappedValue = nil
+                    }
+                }
+                return
+            }
+
+            let textLength = (textView.string as NSString).length
+            let location = min(suggestionRange.upperBound, textLength)
+            let characterRange = NSRange(location: max(0, location - 1), length: min(1, textLength))
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: characterRange, actualCharacterRange: nil)
+            let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            let visibleOrigin = textView.enclosingScrollView?.contentView.bounds.origin ?? .zero
+            let inset = textView.textContainerInset
+            let anchor = CGPoint(
+                x: rect.maxX + inset.width - visibleOrigin.x,
+                y: rect.minY + inset.height - visibleOrigin.y
+            )
+
+            DispatchQueue.main.async {
+                self.suggestionAnchor.wrappedValue = anchor
+            }
+        }
+
+        private func publishSelection(from textView: NSTextView) {
+            let range = textView.selectedRange()
+            DispatchQueue.main.async {
+                self.selectionRange.wrappedValue = range
+            }
+        }
+    }
+}
+
+private final class PromptNSTextView: NSTextView {
+    weak var commandHandler: PromptTextInputView.Coordinator?
+
+    override func keyDown(with event: NSEvent) {
+        if event.charactersIgnoringModifiers == "\t",
+           commandHandler?.completeActiveLinkFromTab(in: self) == true {
+            return
+        }
+
+        if event.charactersIgnoringModifiers == "\r",
+           !event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift),
+           commandHandler?.handleReturn(in: self) == true {
+            return
+        }
+
+        super.keyDown(with: event)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.charactersIgnoringModifiers == "\t",
+           commandHandler?.completeActiveLinkFromTab(in: self) == true {
+            return true
+        }
+
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+private struct PromptLinkedPageChip: View {
+    let title: String
+    let remove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(title)
+                .font(.system(size: 11.5, weight: .bold))
+                .foregroundStyle(.black.opacity(0.86))
+                .lineLimit(1)
+
+            Button(action: remove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8.5, weight: .bold))
+                    .foregroundStyle(.black.opacity(0.62))
+                    .frame(width: 14, height: 14)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Remove linked page")
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 5)
+        .frame(height: 24)
+        .background(Color.white.opacity(0.86))
+        .clipShape(Capsule())
+        .shadow(color: .white.opacity(0.16), radius: 8)
+    }
+}
+
 private func measuredTextWidth(_ text: String, font: NSFont) -> CGFloat {
     ceil((text as NSString).size(withAttributes: [.font: font]).width)
 }
@@ -3813,10 +4224,48 @@ private struct AssistantFloatingPill: View {
     @FocusState private var isExpandedPromptFocused: Bool
     @State private var isSendHovered = false
     @State private var isAttachmentHovered = false
+    @State private var isWritingModeHovered = false
     @State private var measuredPromptHeight: CGFloat = 16
+    @State private var promptSelectionRange = NSRange(location: 0, length: 0)
+    @State private var promptSuggestionAnchor: CGPoint?
+
+    private var noteTitles: [String] {
+        store.notes.map(\.title)
+    }
+
+    private var promptLinkSuggestions: [String] {
+        guard let context = activePromptWikiLinkContext else { return [] }
+        let uniqueTitles = Array(NSOrderedSet(array: noteTitles)).compactMap { $0 as? String }
+        let normalizedQuery = normalizedPromptLinkSuggestionText(context.query)
+
+        guard !normalizedQuery.isEmpty else {
+            return Array(uniqueTitles.prefix(3))
+        }
+
+        let prefixMatches = uniqueTitles.filter {
+            normalizedPromptLinkSuggestionText($0).hasPrefix(normalizedQuery)
+        }
+        let containsMatches = uniqueTitles.filter {
+            !prefixMatches.contains($0)
+                && normalizedPromptLinkSuggestionText($0).contains(normalizedQuery)
+        }
+
+        return Array((prefixMatches + containsMatches).prefix(3))
+    }
 
     var body: some View {
         VStack(alignment: .center, spacing: 8) {
+            if let context = activePromptWikiLinkContext,
+               !promptLinkSuggestions.isEmpty {
+                LinkSuggestionMenu(
+                    query: context.query,
+                    suggestions: promptLinkSuggestions,
+                    select: { completePromptWikiLink(with: $0, context: context) }
+                )
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                .zIndex(8)
+            }
+
             if store.isUsingWebSearch {
                 WebSearchStatusPill()
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -3824,6 +4273,20 @@ private struct AssistantFloatingPill: View {
 
             if isThinking {
                 ThinkingStatusPill()
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            if let response = store.assistantConversationResponse {
+                AssistantConversationPanel(
+                    response: response,
+                    exitConversation: {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            store.exitAssistantConversation()
+                        }
+                    },
+                    openLinkedNote: { store.openLinkedNote(named: $0) }
+                )
+                .padding(.bottom, 4)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
@@ -3841,6 +4304,7 @@ private struct AssistantFloatingPill: View {
                             Spacer()
 
                             attachmentControl
+                            writingModeButton
                             expandToggle
                         }
 
@@ -3857,20 +4321,10 @@ private struct AssistantFloatingPill: View {
                             .fill(Color.primary.opacity(0.12))
                             .frame(width: 1, height: 18)
 
-                        TextField("Material?", text: $store.assistantPrompt, axis: .vertical)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 12.5))
-                            .lineLimit(1...4)
-                            .frame(width: textFieldWidth, height: textFieldHeight, alignment: .leading)
-                            .background(promptHeightReader)
-                            .focused($isPromptFocused)
-                            .onSubmit {
-                                submitOrPreviewThinking()
-                            }
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                isPromptFocused = true
-                            }
+                        writingModeButton
+                        promptLinkChips
+
+                        promptInput(width: textFieldWidth, height: textFieldHeight, isExpanded: false)
 
                         attachmentControl
                         expandToggle
@@ -3912,7 +4366,7 @@ private struct AssistantFloatingPill: View {
             }
             .overlay {
                 if isThinking {
-                    AnimatedThinkingBorder()
+                    AnimatedThinkingBorder(cornerRadius: pillCornerRadius)
                 }
             }
             .shadow(color: glowColor, radius: isPromptFocused ? 7 : 13, y: isPromptFocused ? 0 : 7)
@@ -3928,6 +4382,8 @@ private struct AssistantFloatingPill: View {
         .animation(.easeInOut(duration: 0.18), value: pillCornerRadius)
         .animation(.easeOut(duration: 0.18), value: isThinking)
         .animation(.easeInOut(duration: 0.18), value: store.assistantAttachment)
+        .animation(.easeInOut(duration: 0.18), value: store.assistantConversationResponse)
+        .animation(.easeInOut(duration: 0.16), value: store.isAssistantWritingMode)
         .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isExpandedComposerPresented)
         .onChange(of: store.assistantPrompt) { _, _ in
             expandComposerIfPromptNeedsRoom()
@@ -3937,6 +4393,33 @@ private struct AssistantFloatingPill: View {
         }
         .onPasteCommand(of: [.image, .fileURL]) { providers in
             pastePromptImages(from: providers)
+        }
+    }
+
+    private var writingModeButton: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.16)) {
+                store.toggleAssistantWritingMode()
+            }
+        } label: {
+            Image(systemName: store.isAssistantWritingMode ? "pencil.tip.crop.circle.fill" : "pencil.tip.crop.circle")
+                .font(.system(size: 14, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(store.isAssistantWritingMode ? .white : .primary.opacity(isWritingModeHovered ? 0.86 : 0.58))
+                .frame(width: 24, height: 24)
+                .background {
+                    Circle()
+                        .fill(store.isAssistantWritingMode ? Color.white.opacity(0.18) : Color.primary.opacity(isWritingModeHovered ? 0.10 : 0.035))
+                }
+                .overlay {
+                    Circle()
+                        .stroke(store.isAssistantWritingMode ? Color.white.opacity(0.34) : Color.primary.opacity(0.08), lineWidth: 0.8)
+                }
+        }
+        .buttonStyle(.plain)
+        .help(store.isAssistantWritingMode ? "Writing mode: AI edits the Markdown" : "Question mode: AI answers without editing")
+        .onHover { hovering in
+            isWritingModeHovered = hovering
         }
     }
 
@@ -4107,18 +4590,81 @@ private struct AssistantFloatingPill: View {
     }
 
     private var expandedPromptEditor: some View {
-        TextEditor(text: $store.assistantPrompt)
-            .font(.system(size: 14.5))
-            .scrollContentBackground(.hidden)
-            .focused($isExpandedPromptFocused)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .frame(width: expandedPillWidth - 10, height: 206)
+        VStack(alignment: .leading, spacing: 7) {
+            if !store.assistantPromptLinkedPages.isEmpty {
+                promptLinkChips
+                    .padding(.horizontal, 10)
+                    .padding(.top, 8)
+            }
+
+            promptInput(
+                width: expandedPillWidth - 10,
+                height: store.assistantPromptLinkedPages.isEmpty ? 206 : 174,
+                isExpanded: true
+            )
+        }
             .background(Color.primary.opacity(0.045))
             .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-            .onAppear {
-                isExpandedPromptFocused = true
+    }
+
+    private var promptLinkChips: some View {
+        HStack(spacing: 6) {
+            ForEach(store.assistantPromptLinkedPages) { link in
+                PromptLinkedPageChip(
+                    title: link.title,
+                    remove: {
+                        withAnimation(.easeInOut(duration: 0.14)) {
+                            store.removeAssistantPromptLink(id: link.id)
+                        }
+                    }
+                )
             }
+        }
+        .fixedSize(horizontal: true, vertical: true)
+    }
+
+    private func promptInput(width: CGFloat, height: CGFloat, isExpanded: Bool) -> some View {
+        ZStack(alignment: .topLeading) {
+            PromptTextInputView(
+                text: $store.assistantPrompt,
+                selectionRange: $promptSelectionRange,
+                placeholder: promptPlaceholder,
+                fontSize: isExpanded ? 14.5 : 12.5,
+                linkTabCompletionTitle: promptLinkSuggestions.first,
+                suggestionRange: activePromptSuggestionNSRange,
+                suggestionAnchor: $promptSuggestionAnchor,
+                isExpanded: isExpanded,
+                submitOnReturn: !isExpanded,
+                submit: submitOrPreviewThinking,
+                completeLink: { title in
+                    completePromptWikiLink(with: title)
+                }
+            )
+            .frame(width: width, height: height)
+            .background {
+                if !isExpanded {
+                    promptHeightReader
+                }
+            }
+            .onTapGesture {
+                if isExpanded {
+                    isExpandedPromptFocused = true
+                } else {
+                    isPromptFocused = true
+                }
+            }
+
+            if store.assistantPrompt.isEmpty {
+                Text(promptPlaceholder)
+                    .font(.system(size: isExpanded ? 14.5 : 12.5))
+                    .foregroundStyle(.secondary.opacity(0.68))
+                    .padding(.top, isExpanded ? 9 : 0)
+                    .padding(.leading, isExpanded ? 10 : 0)
+                    .frame(width: width, height: height, alignment: isExpanded ? .topLeading : .leading)
+                    .allowsHitTesting(false)
+            }
+
+        }
     }
 
     private var isThinking: Bool {
@@ -4134,7 +4680,7 @@ private struct AssistantFloatingPill: View {
     }
 
     private var textFieldHeight: CGFloat {
-        measuredPromptHeight
+        max(24, measuredPromptHeight)
     }
 
     private var promptNeedsExpandedComposer: Bool {
@@ -4147,7 +4693,11 @@ private struct AssistantFloatingPill: View {
 
     private var measuredPromptText: String {
         let prompt = store.assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        return prompt.isEmpty ? "Material?" : prompt
+        return prompt.isEmpty ? promptPlaceholder : prompt
+    }
+
+    private var promptPlaceholder: String {
+        store.isAssistantWritingMode ? "Write with AI" : "Ask question"
     }
 
     private var estimatedPromptWidth: CGFloat {
@@ -4164,7 +4714,7 @@ private struct AssistantFloatingPill: View {
     }
 
     private var promptHeightReader: some View {
-        Text(store.assistantPrompt.isEmpty ? "Material?" : store.assistantPrompt)
+        Text(store.assistantPrompt.isEmpty ? promptPlaceholder : store.assistantPrompt)
             .font(.system(size: 12.5))
             .lineLimit(1...4)
             .frame(width: textFieldWidth, alignment: .leading)
@@ -4177,6 +4727,71 @@ private struct AssistantFloatingPill: View {
             }
     }
 
+    private var activePromptSuggestionNSRange: NSRange? {
+        guard let context = activePromptWikiLinkContext else { return nil }
+        return NSRange(context.range, in: store.assistantPrompt)
+    }
+
+    private var activePromptWikiLinkContext: WikiLinkSuggestionContext? {
+        let prompt = store.assistantPrompt
+        guard !prompt.isEmpty else { return nil }
+
+        let utf16Length = (prompt as NSString).length
+        let caretOffset = min(max(0, promptSelectionRange.location + promptSelectionRange.length), utf16Length)
+        let caretIndex = String.Index(utf16Offset: caretOffset, in: prompt)
+        let lineStart = prompt[..<caretIndex].lastIndex(of: "\n").map { prompt.index(after: $0) } ?? prompt.startIndex
+        let lineEnd = prompt[caretIndex...].firstIndex(of: "\n") ?? prompt.endIndex
+
+        guard let openRange = prompt.range(of: "[[", options: .backwards, range: lineStart..<caretIndex) else {
+            return nil
+        }
+
+        let queryRange = openRange.upperBound..<caretIndex
+        let queryCandidate = prompt[queryRange]
+        guard !queryCandidate.contains("["),
+              !queryCandidate.contains("]"),
+              queryCandidate.count <= 80
+        else { return nil }
+
+        let closingRange = prompt.range(of: "]]", range: caretIndex..<lineEnd)
+        let replacementEnd = closingRange?.upperBound ?? caretIndex
+        let queryEnd = queryCandidate.firstIndex(of: "|") ?? queryCandidate.endIndex
+        let query = String(queryCandidate[..<queryEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return WikiLinkSuggestionContext(
+            range: openRange.lowerBound..<replacementEnd,
+            query: query
+        )
+    }
+
+    private func completePromptWikiLink(with title: String) {
+        guard let context = activePromptWikiLinkContext else {
+            store.addAssistantPromptLink(title: title)
+            return
+        }
+        completePromptWikiLink(with: title, context: context)
+    }
+
+    private func completePromptWikiLink(with title: String, context: WikiLinkSuggestionContext) {
+        var prompt = store.assistantPrompt
+        guard context.range.lowerBound >= prompt.startIndex,
+              context.range.upperBound <= prompt.endIndex
+        else { return }
+
+        let replacementLocation = NSRange(context.range, in: prompt).location
+        prompt.replaceSubrange(context.range, with: "")
+        store.assistantPrompt = prompt
+        store.addAssistantPromptLink(title: title)
+        promptSelectionRange = NSRange(location: replacementLocation, length: 0)
+        promptSuggestionAnchor = nil
+    }
+
+    private func normalizedPromptLinkSuggestionText(_ text: String) -> String {
+        text
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private var attachmentWidth: CGFloat {
         store.assistantAttachment == nil ? 22 : (isExpandedComposerPresented ? 154 : 134)
     }
@@ -4186,7 +4801,7 @@ private struct AssistantFloatingPill: View {
     }
 
     private var compactPillWidth: CGFloat {
-        modelMenuWidth + 1 + textFieldWidth + attachmentWidth + 22 + 24 + 25 + 18
+        modelMenuWidth + 1 + 24 + textFieldWidth + attachmentWidth + 22 + 24 + 25 + 18
     }
 
     private var modelMenuWidth: CGFloat {
@@ -4368,30 +4983,39 @@ private struct WebSearchStatusPill: View {
 
 private struct AnimatedThinkingBorder: View {
     var lineWidth: CGFloat = 0.85
+    var cornerRadius: CGFloat? = nil
     @State private var rotation = Angle.degrees(0)
 
     var body: some View {
-        Capsule()
-            .stroke(
-                AngularGradient(
-                    colors: [
-                        .white.opacity(0.12),
-                        .white.opacity(0.72),
-                        Color(red: 0.78, green: 0.93, blue: 0.30).opacity(0.84),
-                        .white.opacity(0.18),
-                        .white.opacity(0.12)
-                    ],
-                    center: .center,
-                    angle: rotation
-                ),
-                lineWidth: lineWidth
-            )
-            .onAppear {
-                rotation = .degrees(0)
-                withAnimation(.linear(duration: 1.35).repeatForever(autoreverses: false)) {
-                    rotation = .degrees(360)
-                }
+        Group {
+            if let cornerRadius {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(thinkingGradient, lineWidth: lineWidth)
+            } else {
+                Capsule()
+                    .strokeBorder(thinkingGradient, lineWidth: lineWidth)
             }
+        }
+        .onAppear {
+            rotation = .degrees(0)
+            withAnimation(.linear(duration: 1.35).repeatForever(autoreverses: false)) {
+                rotation = .degrees(360)
+            }
+        }
+    }
+
+    private var thinkingGradient: AngularGradient {
+        AngularGradient(
+            colors: [
+                .white.opacity(0.12),
+                .white.opacity(0.72),
+                Color(red: 0.78, green: 0.93, blue: 0.30).opacity(0.84),
+                .white.opacity(0.18),
+                .white.opacity(0.12)
+            ],
+            center: .center,
+            angle: rotation
+        )
     }
 }
 
@@ -4400,17 +5024,20 @@ private struct MarkdownPreview: View {
     let searchHighlight: SearchHighlight?
     let openLinkedNote: (String) -> Void
     let imageURL: (String) -> URL?
+    let imageData: (String) -> Data?
 
     init(
         content: String,
         searchHighlight: SearchHighlight?,
         openLinkedNote: @escaping (String) -> Void,
-        imageURL: @escaping (String) -> URL? = { _ in nil }
+        imageURL: @escaping (String) -> URL? = { _ in nil },
+        imageData: @escaping (String) -> Data? = { _ in nil }
     ) {
         self.content = content
         self.searchHighlight = searchHighlight
         self.openLinkedNote = openLinkedNote
         self.imageURL = imageURL
+        self.imageData = imageData
     }
 
     private var blocks: [MarkdownBlock] {
@@ -4484,7 +5111,7 @@ private struct MarkdownPreview: View {
         return LazyVGrid(columns: columns, alignment: .center, spacing: 12) {
             ForEach(blocks) { block in
                 if case .image(let alt, let path) = block.kind {
-                    MarkdownImageView(alt: alt, url: imageURL(path), maxWidth: 320, maxHeight: 240)
+                    MarkdownImageView(alt: alt, path: path, url: imageURL(path), imageData: imageData(path), maxWidth: 320, maxHeight: 240)
                         .frame(maxWidth: .infinity)
                         .highlightedSearchBlock(searchHighlight?.blockIndex == block.id)
                 }
@@ -4565,12 +5192,13 @@ private struct MarkdownPreview: View {
                 .highlightedSearchBlock(isHighlighted)
 
         case .image(let alt, let path):
-            MarkdownImageView(alt: alt, url: imageURL(path), maxWidth: 520, maxHeight: 360)
+            MarkdownImageView(alt: alt, path: path, url: imageURL(path), imageData: imageData(path), maxWidth: 520, maxHeight: 360)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .highlightedSearchBlock(isHighlighted)
 
         case .table(let table):
             tableView(table, highlighted: isHighlighted)
+                .frame(maxWidth: .infinity, alignment: .center)
                 .highlightedSearchBlock(isHighlighted)
 
         case .divider:
@@ -4678,15 +5306,15 @@ private struct MarkdownPreview: View {
         let highlightMatches = highlightedTextMatches(in: normalized)
         let normalizedWithoutUnderlineTags = normalized
             .replacingOccurrences(of: #"</?u>"#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: #"==([^=]+)=="#, with: "$1", options: .regularExpression)
+        let normalizedWithoutInlineMarkers = markdownRemovingHighlightMarkers(normalizedWithoutUnderlineTags)
 
-        if var attributed = try? AttributedString(markdown: normalizedWithoutUnderlineTags) {
+        if var attributed = try? AttributedString(markdown: normalizedWithoutInlineMarkers) {
             applyUnderline(matches: underlineMatches, to: &attributed)
             applyHighlight(matches: highlightMatches, to: &attributed)
             return Text(attributed)
         }
 
-        return Text(normalizedWithoutUnderlineTags)
+        return Text(normalizedWithoutInlineMarkers)
     }
 
     private func underlinedTextMatches(in markdown: String) -> [String] {
@@ -4699,12 +5327,25 @@ private struct MarkdownPreview: View {
     }
 
     private func highlightedTextMatches(in markdown: String) -> [String] {
-        guard let regex = try? NSRegularExpression(pattern: #"==([^=]+)=="#) else { return [] }
+        guard let regex = try? NSRegularExpression(
+            pattern: #"==(.+?)=="#,
+            options: [.dotMatchesLineSeparators]
+        ) else { return [] }
         let nsMarkdown = markdown as NSString
         return regex.matches(in: markdown, range: NSRange(location: 0, length: nsMarkdown.length)).compactMap { match in
             guard match.numberOfRanges > 1 else { return nil }
             return nsMarkdown.substring(with: match.range(at: 1))
         }
+    }
+
+    private func markdownRemovingHighlightMarkers(_ markdown: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"==(.+?)=="#,
+            options: [.dotMatchesLineSeparators]
+        ) else { return markdown }
+
+        let fullRange = NSRange(location: 0, length: (markdown as NSString).length)
+        return regex.stringByReplacingMatches(in: markdown, range: fullRange, withTemplate: "$1")
     }
 
     private func applyUnderline(matches: [String], to attributed: inout AttributedString) {
@@ -4786,17 +5427,20 @@ private struct MarkdownPreview: View {
 
 private struct MarkdownImageView: View {
     let alt: String
+    let path: String
     let url: URL?
+    let imageData: Data?
     let maxWidth: CGFloat
     let maxHeight: CGFloat
 
     var body: some View {
         Group {
-            if let url, url.isFileURL, let image = NSImage(contentsOf: url) {
+            if let imageData,
+               let image = NSImage(data: imageData) {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
-            } else if let url {
+            } else if let url, !url.isFileURL {
                 AsyncImage(url: url) { phase in
                     switch phase {
                     case .success(let image):
@@ -4816,8 +5460,17 @@ private struct MarkdownImageView: View {
                 missingImage
             }
         }
+        .id(imageIdentity)
         .frame(maxWidth: maxWidth, maxHeight: maxHeight, alignment: .center)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private var imageIdentity: String {
+        if let imageData {
+            return "\(path)-\(imageData.count)"
+        }
+
+        return url?.absoluteString ?? path
     }
 
     private var missingImage: some View {
@@ -4994,13 +5647,16 @@ private struct MarkdownBlock: Identifiable {
         let separatorLine = lines[index + 1].trimmingCharacters(in: .whitespaces)
         guard headerLine.contains("|") else { return nil }
 
-        let headers = splitTableRow(headerLine)
-        let separatorCells = splitTableRow(separatorLine)
-        guard headers.count >= 2,
-              separatorCells.count == headers.count,
-              separatorCells.allSatisfy(isTableSeparatorCell)
+        let rawHeaders = splitTableRow(headerLine)
+        let rawSeparatorCells = splitTableRow(separatorLine)
+        let columnCount = max(rawHeaders.count, rawSeparatorCells.count)
+        guard columnCount >= 2,
+              rawSeparatorCells.count >= 2,
+              rawSeparatorCells.allSatisfy(isTableSeparatorCell)
         else { return nil }
 
+        let headers = normalizedTableCells(rawHeaders, columnCount: columnCount)
+        let separatorCells = normalizedTableCells(rawSeparatorCells, columnCount: columnCount)
         let alignments = separatorCells.map { tableAlignment(for: $0) }
         var rows: [[String]] = []
         var cursor = index + 2
@@ -5012,14 +5668,14 @@ private struct MarkdownBlock: Identifiable {
                   splitTableRow(rowLine).count >= 2
             else { break }
 
-            rows.append(normalizedTableCells(splitTableRow(rowLine), columnCount: headers.count))
+            rows.append(normalizedTableCells(splitTableRow(rowLine), columnCount: columnCount))
             cursor += 1
         }
 
         return (
             MarkdownTable(
-                headers: normalizedTableCells(headers, columnCount: headers.count),
-                alignments: normalizedTableAlignments(alignments, columnCount: headers.count),
+                headers: headers,
+                alignments: normalizedTableAlignments(alignments, columnCount: columnCount),
                 rows: rows
             ),
             cursor - index
