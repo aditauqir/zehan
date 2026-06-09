@@ -3294,6 +3294,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         context.coordinator.textView = textView
         textView.setSelectedRange(Self.clamped(selectionRange, in: text))
         context.coordinator.applyMarkdownStyling()
+        context.coordinator.focusEditorOnce()
 
         return scrollView
     }
@@ -3321,12 +3322,6 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             context.coordinator.applyMarkdownStyling()
         }
         context.coordinator.updateSuggestionAnchor()
-
-        if textView.window?.firstResponder !== textView {
-            DispatchQueue.main.async {
-                textView.window?.makeFirstResponder(textView)
-            }
-        }
     }
 
     private static func clamped(_ range: NSRange, in text: String) -> NSRange {
@@ -3349,6 +3344,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         weak var textView: NSTextView?
         private var isApplyingMarkdownStyling = false
         private var pendingStylingWorkItem: DispatchWorkItem?
+        private var didAutoFocusEditor = false
         private var activeInlineCommands: Set<MarkdownInlineCommand> = []
 
         init(
@@ -3365,10 +3361,25 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             self.insertImageData = insertImageData
         }
 
+        func focusEditorOnce() {
+            guard !didAutoFocusEditor else { return }
+            didAutoFocusEditor = true
+
+            DispatchQueue.main.async { [weak self] in
+                guard let textView = self?.textView,
+                      let window = textView.window,
+                      window.firstResponder == nil || window.firstResponder === textView.enclosingScrollView
+                else { return }
+
+                window.makeFirstResponder(textView)
+            }
+        }
+
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             text.wrappedValue = textView.string
             publishSelection(from: textView)
+            updateTypingAttributesForCurrentLine(in: textView)
             scheduleMarkdownStyling()
             updateSuggestionAnchor()
         }
@@ -3376,6 +3387,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         func textViewDidChangeSelection(_ notification: Notification) {
             if let textView = notification.object as? NSTextView {
                 publishSelection(from: textView)
+                updateTypingAttributesForCurrentLine(in: textView)
             }
             updateSuggestionAnchor()
         }
@@ -3697,7 +3709,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             let selectedRanges = textView.selectedRanges
             let baseAttributes = Self.baseAttributes()
 
-            textView.typingAttributes = baseAttributes
+            updateTypingAttributesForCurrentLine(in: textView)
 
             guard fullRange.length > 0 else {
                 return
@@ -3773,6 +3785,31 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
         }
 
+        private func updateTypingAttributesForCurrentLine(in textView: NSTextView) {
+            let rawText = textView.string as NSString
+            let selectedRange = textView.selectedRange()
+            let location = min(selectedRange.location, rawText.length)
+            let lineRange = rawText.lineRange(for: NSRange(location: location, length: 0))
+            let rawLine = rawText.substring(with: NSRange(location: lineRange.location, length: min(lineRange.length, rawText.length - lineRange.location)))
+            let trimmedLine = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            var attributes = Self.baseAttributes()
+
+            if let headingLevel = Self.headingLevel(in: rawLine) {
+                attributes[.font] = NSFont.systemFont(ofSize: Self.headingFontSize(for: headingLevel), weight: .bold)
+                attributes[.paragraphStyle] = Self.paragraphStyle(for: trimmedLine, isCode: false)
+            } else if trimmedLine.hasPrefix(">") {
+                attributes[.font] = Self.italicFont(size: 15)
+                attributes[.foregroundColor] = NSColor.secondaryLabelColor
+            } else if Self.isListLine(trimmedLine) {
+                attributes[.font] = NSFont.systemFont(ofSize: 15, weight: .regular)
+            } else if trimmedLine == "---" || trimmedLine == "***" {
+                attributes[.font] = NSFont.systemFont(ofSize: 15, weight: .semibold)
+                attributes[.foregroundColor] = NSColor.tertiaryLabelColor
+            }
+
+            textView.typingAttributes = attributes
+        }
+
         func updateSuggestionAnchor() {
             guard let textView,
                   let layoutManager = textView.layoutManager,
@@ -3823,22 +3860,9 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         }
 
         private static func applyHeadingStyle(to rawLine: String, in lineRange: NSRange, textStorage: NSTextStorage) -> Bool {
+            guard let headingLevel = headingLevel(in: rawLine) else { return false }
             let leadingWhitespace = rawLine.prefix { $0 == " " || $0 == "\t" }.count
-            let candidate = rawLine.dropFirst(leadingWhitespace)
-            let headingLevel = candidate.prefix { $0 == "#" }.count
-
-            guard (1...6).contains(headingLevel),
-                  candidate.dropFirst(headingLevel).first?.isWhitespace == true
-            else { return false }
-
-            let fontSize: CGFloat
-            switch headingLevel {
-            case 1: fontSize = 30
-            case 2: fontSize = 24
-            case 3: fontSize = 20
-            case 4: fontSize = 17
-            default: fontSize = 15.5
-            }
+            let fontSize = headingFontSize(for: headingLevel)
 
             textStorage.addAttributes([
                 .font: NSFont.systemFont(ofSize: fontSize, weight: .bold),
@@ -3850,6 +3874,28 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             hideSyntax(in: textStorage, range: markerRange)
 
             return true
+        }
+
+        private static func headingLevel(in rawLine: String) -> Int? {
+            let leadingWhitespace = rawLine.prefix { $0 == " " || $0 == "\t" }.count
+            let candidate = rawLine.dropFirst(leadingWhitespace)
+            let headingLevel = candidate.prefix { $0 == "#" }.count
+
+            guard (1...6).contains(headingLevel),
+                  candidate.dropFirst(headingLevel).first?.isWhitespace == true
+            else { return nil }
+
+            return headingLevel
+        }
+
+        private static func headingFontSize(for headingLevel: Int) -> CGFloat {
+            switch headingLevel {
+            case 1: return 30
+            case 2: return 24
+            case 3: return 20
+            case 4: return 17
+            default: return 15.5
+            }
         }
 
         private static func styleCodeLine(in textStorage: NSTextStorage, range: NSRange) {
@@ -4013,7 +4059,6 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             else { return }
 
             textStorage.addAttributes([
-                .font: NSFont.systemFont(ofSize: 1),
                 .foregroundColor: NSColor.clear
             ], range: range)
         }
@@ -5857,16 +5902,30 @@ private struct MarkdownPreview: View {
     }
 
     private func tableView(_ table: MarkdownTable, highlighted: Bool) -> some View {
-        ScrollView(.horizontal) {
+        let columnWidths = tableColumnWidths(for: table)
+
+        return ScrollView(.horizontal) {
             VStack(alignment: .leading, spacing: 0) {
-                tableRowView(table.headers, alignments: table.alignments, isHeader: true, highlighted: highlighted)
+                tableRowView(
+                    table.headers,
+                    alignments: table.alignments,
+                    columnWidths: columnWidths,
+                    isHeader: true,
+                    highlighted: highlighted
+                )
 
                 Rectangle()
                     .fill(Color.primary.opacity(0.16))
                     .frame(height: 1)
 
                 ForEach(Array(table.rows.enumerated()), id: \.offset) { index, row in
-                    tableRowView(row, alignments: table.alignments, isHeader: false, highlighted: highlighted)
+                    tableRowView(
+                        row,
+                        alignments: table.alignments,
+                        columnWidths: columnWidths,
+                        isHeader: false,
+                        highlighted: highlighted
+                    )
                         .background(index.isMultiple(of: 2) ? Color.primary.opacity(0.025) : Color.clear)
                 }
             }
@@ -5884,9 +5943,25 @@ private struct MarkdownPreview: View {
         .frame(maxWidth: .infinity, alignment: .center)
     }
 
+    private func tableColumnWidths(for table: MarkdownTable) -> [CGFloat] {
+        let columnCount = max(table.headers.count, table.rows.map(\.count).max() ?? 0)
+        guard columnCount > 0 else { return [] }
+
+        return (0..<columnCount).map { index in
+            let values = [table.headers[safe: index] ?? ""] + table.rows.map { $0[safe: index] ?? "" }
+            let longest = values
+                .map { $0.replacingOccurrences(of: #"[*_`=<>\[\]\(\)!]"#, with: "", options: .regularExpression) }
+                .map(\.count)
+                .max() ?? 0
+            let estimatedWidth = CGFloat(longest) * 7.8 + 34
+            return min(620, max(150, estimatedWidth))
+        }
+    }
+
     private func tableRowView(
         _ cells: [String],
         alignments: [MarkdownTableAlignment],
+        columnWidths: [CGFloat],
         isHeader: Bool,
         highlighted: Bool
     ) -> some View {
@@ -5895,10 +5970,10 @@ private struct MarkdownPreview: View {
                 inlineText(cells[index], highlighted: highlighted)
                     .font(.system(size: isHeader ? 13.5 : 13, weight: isHeader ? .semibold : .regular))
                     .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(textAlignment(for: alignments[safe: index] ?? .left))
                     .frame(
-                        minWidth: 118,
-                        maxWidth: 210,
+                        width: columnWidths[safe: index] ?? 150,
                         alignment: frameAlignment(for: alignments[safe: index] ?? .left)
                     )
                     .padding(.horizontal, 12)

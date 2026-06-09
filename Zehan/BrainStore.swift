@@ -441,7 +441,9 @@ final class BrainStore: ObservableObject {
     func updateContentFromEditor(_ newContent: String) {
         if let documentTitle = markdownDocumentTitle(in: newContent) {
             let uniqueTitle = uniqueTitle(for: documentTitle, excluding: currentNoteID)
-            content = contentBySettingDocumentTitle(uniqueTitle, in: newContent)
+            content = uniqueTitle == documentTitle
+                ? newContent
+                : contentBySettingDocumentTitle(uniqueTitle, in: newContent)
             if uniqueTitle != title {
                 title = uniqueTitle
                 updateCurrentNoteSummaryTitle(to: uniqueTitle)
