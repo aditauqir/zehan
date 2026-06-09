@@ -505,6 +505,7 @@ private struct WorkspaceView: View {
                                 content: contentBinding,
                                 isEditing: $isEditingMarkdown,
                                 isReadOnly: isReadingMode,
+                                editorBottomInset: editorInputAvoidanceInset,
                                 searchHighlight: store.activeSearchHighlight,
                                 noteTitles: store.notes.map(\.title),
                                 openLinkedNote: { store.openLinkedNote(named: $0) },
@@ -651,6 +652,11 @@ private struct WorkspaceView: View {
 
     private var readingToggleSize: CGFloat {
         min(44, max(38, promptPillHeight))
+    }
+
+    private var editorInputAvoidanceInset: CGFloat {
+        guard isEditingMarkdown, !isReadingMode, !store.isViewingGeneratedPage else { return 0 }
+        return promptPillHeight + 92
     }
 
     private func handleDocumentDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -1008,12 +1014,14 @@ private struct MarkdownHelpView: View {
                 }
 
                 HelpSection("App Commands") {
-                    HelpRow("Create New Brain", "Command Shift N")
-                    HelpRow("Open Brain Vault", "Command K")
-                    HelpRow("Save Vault Metadata", "Command Shift S")
-                    HelpRow("New Page", "Command N")
-                    HelpRow("Search Pages", "Command O")
-                    HelpRow("Delete Selected Page", "Command Backspace")
+                    HelpRow("Create New Brain", "⇧⌘N")
+                    HelpRow("Open Brain Vault", "⌘K")
+                    HelpRow("Save Vault Metadata", "⇧⌘S")
+                    HelpRow("New Page", "⌘N")
+                    HelpRow("New Folder", "⌘G")
+                    HelpRow("Search Pages", "⌘O")
+                    HelpRow("Delete Selected Item", "⌘Delete")
+                    HelpRow("Open Zirn Help", "⇧⌘/")
                 }
 
                 HelpSection("Editor Flow") {
@@ -1023,10 +1031,19 @@ private struct MarkdownHelpView: View {
                     HelpRow("Autosave", "Changes save automatically after a short pause.")
                 }
 
+                HelpSection("Editor Shortcuts") {
+                    HelpRow("Bold", "⌘B")
+                    HelpRow("Italic", "⌘I")
+                    HelpRow("Underline", "⌘U")
+                    HelpRow("Highlight", "⇧⌘H")
+                    HelpRow("Complete page link suggestion", "Tab")
+                    HelpRow("Paste image into page", "⌘V")
+                }
+
                 HelpSection("Link Pages") {
                     HelpCode("[[Research Project]]")
                     HelpCode("[[Research Project|project notes]]")
-                    Text("Links become highlighted in the rendered view. Clicking one opens the matching page title. Linked pages also appear in the graph.")
+                    Text("Type [[ to search page titles while editing. Press Tab to accept the suggested page link. Links become highlighted in the rendered view, open matching pages, and appear in the graph.")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
@@ -1821,7 +1838,7 @@ private struct SidebarGroupRow: View {
                     .onSubmit(commitRename)
                     .onExitCommand(perform: cancelRename)
             } else {
-                Text(item.title)
+                Text(displayTitle)
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
             }
@@ -1871,16 +1888,16 @@ private struct SidebarGroupRow: View {
         }
         .onChange(of: item.title) { _, newTitle in
             if !isRenaming {
-                draftTitle = newTitle
+                draftTitle = editableTitle(for: newTitle)
             }
         }
         .task {
-            draftTitle = item.title
+            draftTitle = editableTitle(for: item.title)
         }
     }
 
     private func beginRename() {
-        draftTitle = item.title
+        draftTitle = editableTitle(for: item.title)
         isRenaming = true
         DispatchQueue.main.async {
             isRenameFocused = true
@@ -1896,8 +1913,28 @@ private struct SidebarGroupRow: View {
     }
 
     private func cancelRename() {
-        draftTitle = item.title
+        draftTitle = editableTitle(for: item.title)
         isRenaming = false
+    }
+
+    private var displayTitle: String {
+        editableTitle(for: item.title)
+    }
+
+    private func editableTitle(for title: String) -> String {
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, !Self.looksLikeGeneratedID(clean) else {
+            return "Group"
+        }
+        return clean
+    }
+
+    private static func looksLikeGeneratedID(_ title: String) -> Bool {
+        let uuidPattern = #"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#
+        if title.range(of: uuidPattern, options: .regularExpression) != nil {
+            return true
+        }
+        return title.hasPrefix("group-") && title.count > 18
     }
 
     private var rowFill: Color {
@@ -2960,6 +2997,7 @@ private struct MarkdownEditingSurface: View {
     @Binding var content: String
     @Binding var isEditing: Bool
     let isReadOnly: Bool
+    let editorBottomInset: CGFloat
     let searchHighlight: SearchHighlight?
     let noteTitles: [String]
     let openLinkedNote: (String) -> Void
@@ -3022,6 +3060,7 @@ private struct MarkdownEditingSurface: View {
                     text: $content,
                     selectionRange: $editorSelectionRange,
                     typingStatus: $typingStatus,
+                    bottomContentInset: editorBottomInset,
                     linkTabCompletionTitle: linkSuggestions.first,
                     suggestionRange: activeSuggestionNSRange,
                     suggestionAnchor: $suggestionAnchor,
@@ -3204,6 +3243,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var selectionRange: NSRange
     @Binding var typingStatus: MarkdownTypingStatus
+    let bottomContentInset: CGFloat
     let linkTabCompletionTitle: String?
     let suggestionRange: NSRange?
     @Binding var suggestionAnchor: CGPoint?
@@ -3226,6 +3266,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
+        scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: bottomContentInset, right: 0)
 
         let textView = MarkdownNSTextView()
         textView.commandHandler = context.coordinator
@@ -3265,16 +3306,20 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         context.coordinator.insertImageData = insertImageData
         context.coordinator.linkTabCompletionTitle = linkTabCompletionTitle
         context.coordinator.suggestionRange = suggestionRange
+        scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: bottomContentInset, right: 0)
 
         guard let textView = scrollView.documentView as? NSTextView else { return }
         context.coordinator.textView = textView
 
-        if textView.string != text {
+        let didReplaceText = textView.string != text
+        if didReplaceText {
             textView.string = text
             textView.setSelectedRange(Self.clamped(selectionRange, in: text))
         }
 
-        context.coordinator.applyMarkdownStyling()
+        if didReplaceText {
+            context.coordinator.applyMarkdownStyling()
+        }
         context.coordinator.updateSuggestionAnchor()
 
         if textView.window?.firstResponder !== textView {
@@ -3303,6 +3348,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         var suggestionRange: NSRange?
         weak var textView: NSTextView?
         private var isApplyingMarkdownStyling = false
+        private var pendingStylingWorkItem: DispatchWorkItem?
         private var activeInlineCommands: Set<MarkdownInlineCommand> = []
 
         init(
@@ -3323,7 +3369,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             guard let textView = notification.object as? NSTextView else { return }
             text.wrappedValue = textView.string
             publishSelection(from: textView)
-            applyMarkdownStyling()
+            scheduleMarkdownStyling()
             updateSuggestionAnchor()
         }
 
@@ -3641,6 +3687,8 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             guard !isApplyingMarkdownStyling, let textView else { return }
             guard let textStorage = textView.textStorage else { return }
 
+            pendingStylingWorkItem?.cancel()
+            pendingStylingWorkItem = nil
             isApplyingMarkdownStyling = true
             defer { isApplyingMarkdownStyling = false }
 
@@ -3714,6 +3762,15 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
                     length: min(range.length, max(0, rawText.length - range.location))
                 ))
             }
+        }
+
+        func scheduleMarkdownStyling() {
+            pendingStylingWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                self?.applyMarkdownStyling()
+            }
+            pendingStylingWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
         }
 
         func updateSuggestionAnchor() {
@@ -5726,9 +5783,7 @@ private struct MarkdownPreview: View {
                 .highlightedSearchBlock(isHighlighted)
 
         case .paragraph(let text):
-            inlineText(text, highlighted: isHighlighted)
-                .font(.system(size: 15.5))
-                .lineSpacing(4)
+            paragraphText(text, highlighted: isHighlighted)
                 .highlightedSearchBlock(isHighlighted)
 
         case .bullet(let text):
@@ -5879,6 +5934,24 @@ private struct MarkdownPreview: View {
             return .center
         case .right:
             return .trailing
+        }
+    }
+
+    @ViewBuilder
+    private func paragraphText(_ markdown: String, highlighted: Bool = false) -> some View {
+        let lines = markdown.components(separatedBy: "\n")
+        if lines.count <= 1 {
+            inlineText(markdown, highlighted: highlighted)
+                .font(.system(size: 15.5))
+                .lineSpacing(4)
+        } else {
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                    inlineText(line, highlighted: highlighted)
+                        .font(.system(size: 15.5))
+                        .lineSpacing(4)
+                }
+            }
         }
     }
 
@@ -6126,7 +6199,7 @@ private struct MarkdownBlock: Identifiable {
 
         func flushParagraph() {
             guard !paragraph.isEmpty else { return }
-            append(.paragraph(paragraph.joined(separator: " ")))
+            append(.paragraph(paragraph.joined(separator: "\n")))
             paragraph.removeAll()
         }
 

@@ -1241,7 +1241,8 @@ final class BrainStore: ObservableObject {
             do {
                 let oldGroup = sidebarItems[index]
                 let oldFolderURL = sidebarGroupFolderURL(for: oldGroup, in: activeBrain)
-                let uniqueTitle = uniqueSidebarGroupTitle(cleanTitle, excluding: id)
+                let requestedTitle = sanitizedSidebarGroupTitle(cleanTitle)
+                let uniqueTitle = uniqueSidebarGroupTitle(requestedTitle, excluding: id)
                 sidebarItems[index] = SidebarItem(
                     id: oldGroup.id,
                     kind: .group,
@@ -1255,7 +1256,7 @@ final class BrainStore: ObservableObject {
                 try moveNotesInGroupToFilesystem(groupID: id, in: activeBrain)
                 try persistSidebarLayoutNoAccess()
                 try loadNotes()
-                status = uniqueTitle == cleanTitle ? "Group renamed" : "Group renamed to \(uniqueTitle)"
+                status = uniqueTitle == requestedTitle ? "Group renamed" : "Group renamed to \(uniqueTitle)"
             } catch {
                 status = error.localizedDescription
             }
@@ -2148,7 +2149,9 @@ final class BrainStore: ObservableObject {
         for item in storedItems {
             switch item.kind {
             case .group:
-                mergedItems.append(item)
+                var groupItem = item
+                groupItem.title = sanitizedSidebarGroupTitle(groupItem.title)
+                mergedItems.append(groupItem)
             case .note:
                 guard let noteID = item.noteID,
                       let note = notesByID[noteID],
@@ -2215,10 +2218,10 @@ final class BrainStore: ObservableObject {
     private func nextSidebarGroupTitle() -> String {
         let existingTitles = Set(sidebarItems.filter { $0.kind == .group }.map { $0.title.lowercased() })
         var counter = 1
-        while existingTitles.contains("group \(counter)") {
+        while existingTitles.contains("Group \(counter)".lowercased()) {
             counter += 1
         }
-        return "group \(counter)"
+        return "Group \(counter)"
     }
 
     private func syncBrainMetadata() throws {
@@ -5251,6 +5254,22 @@ final class BrainStore: ObservableObject {
             .joined(separator: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
         return clean.isEmpty ? "Group" : clean
+    }
+
+    private func sanitizedSidebarGroupTitle(_ title: String) -> String {
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, !looksLikeGeneratedSidebarID(clean) else {
+            return nextSidebarGroupTitle()
+        }
+        return clean
+    }
+
+    private func looksLikeGeneratedSidebarID(_ title: String) -> Bool {
+        let uuidPattern = #"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#
+        if title.range(of: uuidPattern, options: .regularExpression) != nil {
+            return true
+        }
+        return title.hasPrefix("group-") && title.count > 18
     }
 
     private func uniqueSidebarGroupTitle(_ title: String, excluding excludedID: SidebarItem.ID? = nil) -> String {
