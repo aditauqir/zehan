@@ -62,8 +62,8 @@ private struct SplashView: View {
     var body: some View {
         VStack(spacing: 62) {
             Text(greeting)
-                .font(.custom(AppFont.ptSerifRegular, size: 40))
-                .foregroundStyle(.white.opacity(0.78))
+                .font(.custom(AppFont.ptSerifRegular, size: AppFont.welcomeGreetingSize))
+                .foregroundStyle(.white.opacity(0.74))
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 720)
 

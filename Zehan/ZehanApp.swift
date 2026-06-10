@@ -17,10 +17,12 @@ struct ZirnApp: App {
     }
 
     private static func registerBundledFonts() {
-        guard let url = Bundle.main.url(forResource: "PT_Serif-Web-Regular", withExtension: "ttf") else {
-            return
+        for fontName in ["PT_Serif-Web-Regular", "PT_Serif-Web-Italic"] {
+            guard let url = Bundle.main.url(forResource: fontName, withExtension: "ttf") else {
+                continue
+            }
+            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
         }
-        CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
     }
 
     var body: some Scene {

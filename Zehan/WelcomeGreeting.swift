@@ -29,4 +29,6 @@ enum WelcomeGreeting {
 
 enum AppFont {
     static let ptSerifRegular = "PTSerif-Regular"
+    static let ptSerifItalic = "PTSerif-Italic"
+    static let welcomeGreetingSize: CGFloat = 38
 }
