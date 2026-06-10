@@ -16,6 +16,7 @@ struct ContentView: View {
         Group {
             if store.activeBrain == nil {
                 SplashView(
+                    greeting: WelcomeGreeting.message(userName: store.userName),
                     recentVaults: store.recentVaults,
                     isBusy: store.isBusy,
                     newBrain: store.createBrainVaultFromUser,
@@ -42,10 +43,16 @@ struct ContentView: View {
                 .frame(width: 500)
                 .presentationBackground(.regularMaterial)
         }
+        .sheet(isPresented: $store.isShowingUsernameConfiguration) {
+            UsernameConfigurationView(store: store)
+                .frame(width: 460)
+                .presentationBackground(.regularMaterial)
+        }
     }
 }
 
 private struct SplashView: View {
+    let greeting: String
     let recentVaults: [RecentVault]
     let isBusy: Bool
     let newBrain: () -> Void
@@ -54,9 +61,11 @@ private struct SplashView: View {
 
     var body: some View {
         VStack(spacing: 62) {
-            Text("Welcome to your second brain")
-                .font(.system(size: 40, weight: .light, design: .default).italic())
+            Text(greeting)
+                .font(.custom(AppFont.ptSerifRegular, size: 40))
                 .foregroundStyle(.white.opacity(0.78))
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 720)
 
             VStack(spacing: 34) {
                 HStack(spacing: 34) {
@@ -6652,6 +6661,65 @@ private enum APIKeyVerificationState: Equatable {
     case verifying
     case verified
     case failed(String)
+}
+
+private struct UsernameConfigurationView: View {
+    @ObservedObject var store: BrainStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var userName: String
+
+    init(store: BrainStore) {
+        self.store = store
+        _userName = State(initialValue: store.userName)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(alignment: .center, spacing: 16) {
+                Image(systemName: "person.crop.circle")
+                    .font(.system(size: 34, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.78))
+                    .frame(width: 64, height: 64)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Configure Username")
+                        .font(.system(size: 24, weight: .bold))
+
+                    Text("Your name appears in the welcome greeting on the start page.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            ConfigurationField(title: "Username") {
+                TextField("Your name", text: $userName)
+            }
+
+            HStack(spacing: 12) {
+                Button {
+                    store.isShowingUsernameConfiguration = false
+                    dismiss()
+                } label: {
+                    Text("Cancel")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+
+                Button {
+                    store.saveUserName(userName)
+                    dismiss()
+                } label: {
+                    Text("Save")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(.top, 4)
+        }
+        .padding(28)
+    }
 }
 
 private struct ModelConfigurationView: View {

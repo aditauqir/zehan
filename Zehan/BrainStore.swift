@@ -40,6 +40,8 @@ final class BrainStore: ObservableObject {
     @Published var isShowingModelConfiguration = false
     @Published var isShowingMarkdownHelp = false
     @Published var isShowingUsedModelsConfiguration = false
+    @Published var isShowingUsernameConfiguration = false
+    @Published var userName = ""
     @Published var isShowingHighlightSummaryCompiler = false
     @Published var pendingAssistantPreview: AssistantPreview?
     @Published var assistantConversationResponse: AssistantConversationResponse?
@@ -77,6 +79,7 @@ final class BrainStore: ObservableObject {
     private let selectedHighlightSummaryModelKey = "Assistant.HighlightSummaryModel"
     private let ollamaModelKey = "Assistant.OllamaModel"
     private let ollamaURLKey = "Assistant.OllamaURL"
+    private let userNameKey = "User.Name"
     private let homeSummaryID = "home-summary"
     private var mistralAPIKey = ""
     private var mistralModel = BrainStore.defaultMistralModel
@@ -86,6 +89,7 @@ final class BrainStore: ObservableObject {
     private var ollamaURL = BrainStore.defaultOllamaURL
     private var autosaveTask: Task<Void, Never>?
     private var homeCompilationTask: Task<Void, Never>?
+    private var lastHomeSourceTextForSimilarityCheck: String?
     private var activeHomeGenerationID: UUID?
     private var activeHighlightGenerationID: UUID?
     private var assistantConversationMemory = LangChainConversationMemory()
@@ -117,6 +121,8 @@ final class BrainStore: ObservableObject {
     private static let helpDeskRelevantBlockLimit = 10
     private static let helpDeskHistoryMessageLimit = 8
     private static let semanticSearchMinimumSimilarity = 0.22
+    // Cosine similarity cutoff for skipping Mistral home regeneration; raise to save tokens, lower to refresh more often.
+    private static let homePageUpdateSkipSimilarityThreshold = 0.92
     private static let estimatedCharactersPerToken = 4
     private static let mistralOCRModel = "mistral-ocr-latest"
     private static let mistralOCRPageLimit = 100
@@ -354,8 +360,9 @@ final class BrainStore: ObservableObject {
                 resetDraft()
                 try loadNotes()
                 try loadHighlightSummaries()
+                syncHomeSourceSimilarityCache()
                 try loadHelpDeskDatabase()
-                openHomePage()
+                openHomePageAndCompile()
                 recordRecentVault(note: notes.first)
                 status = "\(brain.vault.name) opened"
             } catch {
@@ -372,6 +379,7 @@ final class BrainStore: ObservableObject {
         autosaveTask = nil
         homeCompilationTask?.cancel()
         homeCompilationTask = nil
+        lastHomeSourceTextForSimilarityCheck = nil
         needsHomeRegenerationAfterCurrentCompile = false
         pendingAssistantInsertion = nil
         pendingAssistantPreview = nil
@@ -594,11 +602,26 @@ final class BrainStore: ObservableObject {
         isShowingUsedModelsConfiguration = true
     }
 
+    func configureUsernameFromUser() {
+        isShowingUsernameConfiguration = true
+    }
+
+    func saveUserName(_ name: String) {
+        userName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        UserDefaults.standard.set(userName, forKey: userNameKey)
+        isShowingUsernameConfiguration = false
+        status = userName.isEmpty ? "Username cleared" : "Username saved"
+    }
+
     func showHighlightSummaryCompiler() {
         compileCurrentHighlightSummary()
     }
 
     func openHomePage() {
+        openHomePage(regenerate: false)
+    }
+
+    func openHomePageAndCompile() {
         openHomePage(regenerate: true)
     }
 
@@ -838,13 +861,30 @@ final class BrainStore: ObservableObject {
             }
 
             let sourceFingerprint = homeSourceFingerprint(for: sourceNotes)
+            let currentSourceText = homeSourceText(for: sourceNotes)
             if !force, latestHomeSummary?.sourceFingerprint == sourceFingerprint {
+                lastHomeSourceTextForSimilarityCheck = currentSourceText
                 if isShowingHomePage {
                     title = "Home"
                     content = homeMarkdown
                 }
                 isGeneratingHomePage = false
                 status = "Home is up to date"
+                return
+            }
+
+            if !force,
+               let previousSourceText = lastHomeSourceTextForSimilarityCheck,
+               let similarity = homeSourceTextSimilarity(previousSourceText, currentSourceText),
+               similarity >= Self.homePageUpdateSkipSimilarityThreshold {
+                refreshHomeSummarySourceFingerprint(sourceFingerprint)
+                lastHomeSourceTextForSimilarityCheck = currentSourceText
+                if isShowingHomePage {
+                    title = "Home"
+                    content = homeMarkdown
+                }
+                isGeneratingHomePage = false
+                status = "Home is up to date (source similarity \(Int(similarity * 100))%)"
                 return
             }
 
@@ -2997,6 +3037,7 @@ final class BrainStore: ObservableObject {
 
             try persistHighlightSummary(summary)
             upsertHighlightSummary(summary)
+            lastHomeSourceTextForSimilarityCheck = homeSourceText(for: sourceNotes)
             if isShowingHomePage {
                 title = "Home"
                 content = markdown
@@ -3552,6 +3593,57 @@ final class BrainStore: ObservableObject {
             }
             .joined(separator: "\u{1E}")
         return stableFingerprint(for: source)
+    }
+
+    private func homeSourceText(for sourceNotes: [HomePageSourceNote]) -> String {
+        sourceNotes
+            .sorted { $0.id < $1.id }
+            .map { note in
+                "\(note.title)\n\(plainText(fromMarkdown: note.content))"
+            }
+            .joined(separator: "\n\n")
+    }
+
+    private func homeSourceTextSimilarity(_ previous: String, _ current: String) -> Double? {
+        guard let previousVector = semanticVector(for: previous),
+              let currentVector = semanticVector(for: current) else { return nil }
+        return cosineSimilarity(previousVector, currentVector)
+    }
+
+    private func syncHomeSourceSimilarityCache() {
+        guard activeBrain != nil,
+              let sourceNotes = try? loadHomePageSourceNotes() else {
+            lastHomeSourceTextForSimilarityCheck = nil
+            return
+        }
+
+        let fingerprint = homeSourceFingerprint(for: sourceNotes)
+        if latestHomeSummary?.sourceFingerprint == fingerprint {
+            lastHomeSourceTextForSimilarityCheck = homeSourceText(for: sourceNotes)
+        } else {
+            lastHomeSourceTextForSimilarityCheck = nil
+        }
+    }
+
+    private func refreshHomeSummarySourceFingerprint(_ fingerprint: String) {
+        guard let existing = latestHomeSummary else { return }
+        let updated = HighlightSummary(
+            id: existing.id,
+            sourceNoteID: existing.sourceNoteID,
+            sourceTitle: existing.sourceTitle,
+            title: existing.title,
+            markdown: existing.markdown,
+            compiledAt: existing.compiledAt,
+            compileDuration: existing.compileDuration,
+            modelTitle: existing.modelTitle,
+            sourceFingerprint: fingerprint
+        )
+        do {
+            try persistHighlightSummary(updated)
+            upsertHighlightSummary(updated)
+        } catch {
+            status = error.localizedDescription
+        }
     }
 
     private func stableFingerprint(for text: String) -> String {
@@ -4403,6 +4495,7 @@ final class BrainStore: ObservableObject {
         groqModel = defaults.string(forKey: groqModelKey) ?? Self.defaultGroqModel
         ollamaModel = defaults.string(forKey: ollamaModelKey) ?? Self.defaultOllamaModel
         ollamaURL = cleanOllamaURL(defaults.string(forKey: ollamaURLKey) ?? Self.defaultOllamaURL)
+        userName = defaults.string(forKey: userNameKey) ?? ""
     }
 
     private func saveAssistantConfiguration() throws {

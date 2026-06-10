@@ -5,11 +5,23 @@
 //  Created by Adi Tauqir on 5/15/26.
 //
 
+import CoreText
 import SwiftUI
 
 @main
 struct ZirnApp: App {
     @StateObject private var store = BrainStore()
+
+    init() {
+        Self.registerBundledFonts()
+    }
+
+    private static func registerBundledFonts() {
+        guard let url = Bundle.main.url(forResource: "PT_Serif-Web-Regular", withExtension: "ttf") else {
+            return
+        }
+        CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+    }
 
     var body: some Scene {
         Window("Zirn", id: "main") {
@@ -102,6 +114,12 @@ struct ZirnApp: App {
 
                 Button("Show All") {
                     NSApp.unhideAllApplications(nil)
+                }
+            }
+
+            CommandMenu("User Settings") {
+                Button("Configure Username") {
+                    store.configureUsernameFromUser()
                 }
             }
 
