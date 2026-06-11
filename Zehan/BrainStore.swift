@@ -42,6 +42,7 @@ final class BrainStore: ObservableObject {
     @Published var isShowingUsedModelsConfiguration = false
     @Published var isShowingUsernameConfiguration = false
     @Published var userName = ""
+    @Published var userProfile = UserProfile()
     @Published var isShowingHighlightSummaryCompiler = false
     @Published var pendingAssistantPreview: AssistantPreview?
     @Published var assistantConversationResponse: AssistantConversationResponse?
@@ -61,6 +62,8 @@ final class BrainStore: ObservableObject {
     @Published var helpDeskAttachment: PromptAttachment?
     @Published var isGeneratingHelpDeskResponse = false
     @Published var isShowingHelpDeskConversationBrowser = false
+    @Published var helpDeskMarkdownSuggestions: [HelpDeskMarkdownSuggestion] = []
+    @Published private(set) var helpDeskSuggestionsDisabledConversationIDs: Set<HelpDeskConversation.ID> = []
     @Published private(set) var mistralBudgetSpentUSD = 0.0
     @Published private(set) var mistralOCRPagesUsed = 0
 
@@ -73,18 +76,15 @@ final class BrainStore: ObservableObject {
     private let mistralModelKey = "Assistant.MistralModel"
     private let mistralBudgetSpentUSDKey = "Assistant.MistralBudgetSpentUSD"
     private let mistralOCRPagesUsedKey = "Assistant.MistralOCRPagesUsed"
-    private let groqAPIKeyKey = "Assistant.GroqAPIKey"
-    private let groqModelKey = "Assistant.GroqModel"
     private let selectedAssistantModelKey = "Assistant.SelectedModel"
     private let selectedHighlightSummaryModelKey = "Assistant.HighlightSummaryModel"
     private let ollamaModelKey = "Assistant.OllamaModel"
     private let ollamaURLKey = "Assistant.OllamaURL"
     private let userNameKey = "User.Name"
+    private let userProfileKey = "User.Profile"
     private let homeSummaryID = "home-summary"
     private var mistralAPIKey = ""
     private var mistralModel = BrainStore.defaultMistralModel
-    private var groqAPIKey = ""
-    private var groqModel = BrainStore.defaultGroqModel
     private var ollamaModel = BrainStore.defaultOllamaModel
     private var ollamaURL = BrainStore.defaultOllamaURL
     private var autosaveTask: Task<Void, Never>?
@@ -105,7 +105,6 @@ final class BrainStore: ObservableObject {
     private var helpDeskSessionDatabase: HelpDeskSessionDatabase?
 
     static let defaultMistralModel = "mistral-large-latest"
-    static let defaultGroqModel = "llama-3.3-70b-versatile"
     static let defaultOllamaModel = "llama3.1"
     static let defaultOllamaURL = "http://localhost:11434"
 
@@ -179,12 +178,7 @@ final class BrainStore: ObservableObject {
     }
 
     var assistantConnectionStatus: AssistantConnectionStatus {
-        switch selectedAssistantModel {
-        case .mistral:
-            return mistralAPIKey.isEmpty ? .offline : .online
-        case .groq:
-            return groqAPIKey.isEmpty ? .offline : .online
-        }
+        mistralAPIKey.isEmpty ? .offline : .online
     }
 
     var isViewingHighlightSummary: Bool {
@@ -211,22 +205,50 @@ final class BrainStore: ObservableObject {
         return """
         # Home
 
-        ## Vault Summary
+        ## Summary
 
         No Home summary generated yet.
 
-        ## Pages
+        ## Page Summaries
 
         \(pageList)
 
-        ## Highlighted Text Summary
+        ## Highlight Flashcards
 
-        No highlighted text has been compiled yet.
+        No highlighted text has been added yet.
         """
     }
 
     var latestHomeSummary: HighlightSummary? {
         generatedSummaries.first { $0.id == homeSummaryID }
+    }
+
+    var homePagePresentation: HomePagePresentation {
+        var presentation = parseHomePagePresentation(from: homeMarkdown)
+        if let sourceNotes = try? loadHomePageSourceNotes() {
+            if presentation.pageCards.isEmpty {
+                presentation = HomePagePresentation(
+                    vaultSummary: presentation.vaultSummary,
+                    pageCards: localPageCards(from: sourceNotes),
+                    flashcardGroups: presentation.flashcardGroups
+                )
+            }
+            if presentation.flashcardGroups.isEmpty {
+                presentation = HomePagePresentation(
+                    vaultSummary: presentation.vaultSummary,
+                    pageCards: presentation.pageCards,
+                    flashcardGroups: localFlashcardGroups(from: sourceNotes)
+                )
+            }
+            if presentation.vaultSummary.isEmpty {
+                presentation = HomePagePresentation(
+                    vaultSummary: lineLimited(localVaultSummary(from: sourceNotes), maxLines: 7),
+                    pageCards: presentation.pageCards,
+                    flashcardGroups: presentation.flashcardGroups
+                )
+            }
+        }
+        return enrichHomePagePresentation(presentation)
     }
 
     private var estimatedMistralBudgetUSD: Double {
@@ -307,7 +329,6 @@ final class BrainStore: ObservableObject {
                     ai: BrainAIPreferences(
                         provider: "mistral",
                         mistralModel: Self.defaultMistralModel,
-                        groqModel: Self.defaultGroqModel,
                         ollamaModel: nil,
                         ollamaURL: nil,
                         appleModel: nil
@@ -396,6 +417,8 @@ final class BrainStore: ObservableObject {
         helpDeskAttachment = nil
         isGeneratingHelpDeskResponse = false
         isShowingHelpDeskConversationBrowser = false
+        helpDeskMarkdownSuggestions = []
+        helpDeskSuggestionsDisabledConversationIDs = []
         activeBrain = nil
         notes = []
         sidebarItems = []
@@ -606,11 +629,26 @@ final class BrainStore: ObservableObject {
         isShowingUsernameConfiguration = true
     }
 
-    func saveUserName(_ name: String) {
-        userName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    func loginWithICloudInDevelopment() {
+        // Placeholder for future iCloud sign-in.
+    }
+
+    func saveUserProfile(_ profile: UserProfile) {
+        userProfile = profile
+        userName = profile.greetingName
         UserDefaults.standard.set(userName, forKey: userNameKey)
+        if let data = try? encoder.encode(profile) {
+            UserDefaults.standard.set(data, forKey: userProfileKey)
+        }
         isShowingUsernameConfiguration = false
-        status = userName.isEmpty ? "Username cleared" : "Username saved"
+        status = profile.greetingName.isEmpty ? "Profile cleared" : "Profile saved"
+    }
+
+    func saveUserName(_ name: String) {
+        var profile = userProfile
+        profile.firstName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.lastName = ""
+        saveUserProfile(profile)
     }
 
     func showHighlightSummaryCompiler() {
@@ -663,6 +701,7 @@ final class BrainStore: ObservableObject {
         selectedHelpDeskConversationID = conversation.id
         helpDeskInput = ""
         helpDeskAttachment = nil
+        helpDeskMarkdownSuggestions = []
         persistHelpDeskConversationQuietly(conversation)
         status = "New Zirn Chat conversation"
     }
@@ -754,6 +793,159 @@ final class BrainStore: ObservableObject {
         helpDeskAttachment = nil
     }
 
+    func deleteHelpDeskExchange(assistantMessageID: String) {
+        guard !isGeneratingHelpDeskResponse,
+              let conversationID = selectedHelpDeskConversationID,
+              let conversationIndex = helpDeskDatabase.conversations.firstIndex(where: { $0.id == conversationID })
+        else { return }
+
+        let messages = helpDeskDatabase.conversations[conversationIndex].messages
+        guard let assistantIndex = messages.firstIndex(where: { $0.id == assistantMessageID }),
+              messages[assistantIndex].role == .assistant,
+              assistantIndex > 0
+        else { return }
+
+        var userIndex = assistantIndex - 1
+        while userIndex >= 0, messages[userIndex].role != .user {
+            userIndex -= 1
+        }
+        guard userIndex >= 0, messages[userIndex].role == .user else { return }
+
+        let userMessageID = messages[userIndex].id
+        var updatedMessages = messages
+        updatedMessages.remove(at: assistantIndex)
+        updatedMessages.remove(at: userIndex)
+        helpDeskDatabase.conversations[conversationIndex].messages = updatedMessages
+        syncHelpDeskConversations()
+
+        helpDeskMarkdownSuggestions.removeAll { $0.messageID == assistantMessageID }
+
+        do {
+            try helpDeskSessionDatabase?.deleteMessages(
+                in: conversationID,
+                withIDs: [userMessageID, assistantMessageID]
+            )
+            status = "Message deleted"
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    func regenerateHelpDeskResponse(assistantMessageID: String) {
+        guard !isGeneratingHelpDeskResponse,
+              let brainID = activeBrain?.id,
+              let conversationID = selectedHelpDeskConversationID,
+              let conversationIndex = helpDeskDatabase.conversations.firstIndex(where: { $0.id == conversationID })
+        else { return }
+
+        let messages = helpDeskDatabase.conversations[conversationIndex].messages
+        guard let assistantIndex = messages.firstIndex(where: { $0.id == assistantMessageID }),
+              messages[assistantIndex].role == .assistant,
+              assistantIndex > 0
+        else { return }
+
+        var userIndex = assistantIndex - 1
+        while userIndex >= 0, messages[userIndex].role != .user {
+            userIndex -= 1
+        }
+        guard userIndex >= 0, messages[userIndex].role == .user else { return }
+
+        let userMessage = messages[userIndex]
+        helpDeskDatabase.conversations[conversationIndex].messages = Array(messages.prefix(assistantIndex))
+        syncHelpDeskConversations()
+        helpDeskMarkdownSuggestions.removeAll { $0.messageID == assistantMessageID }
+
+        do {
+            try helpDeskSessionDatabase?.deleteMessages(
+                in: conversationID,
+                startingFromMessageID: assistantMessageID
+            )
+        } catch {
+            status = error.localizedDescription
+            return
+        }
+
+        isGeneratingHelpDeskResponse = true
+        status = "\(selectedAssistantModel.title) is regenerating"
+
+        Task {
+            await generateHelpDeskResponse(
+                for: userMessage,
+                attachment: nil,
+                vaultID: brainID,
+                conversationID: conversationID
+            )
+        }
+    }
+
+    func addHelpDeskMessageToMarkdown(messageID: String) {
+        guard activeBrain != nil,
+              let conversationID = selectedHelpDeskConversationID,
+              let message = helpDeskMessages(for: conversationID).first(where: { $0.id == messageID }),
+              message.role == .assistant,
+              !isGeneratingHelpDeskResponse
+        else { return }
+
+        if let suggestion = helpDeskMarkdownSuggestion(for: messageID), !suggestion.isLoading {
+            applyHelpDeskMarkdownSuggestion(messageID: messageID)
+            return
+        }
+
+        Task {
+            await resolveAndApplyHelpDeskMarkdown(
+                assistantMessage: message,
+                conversationID: conversationID
+            )
+        }
+    }
+
+    func applyHelpDeskMarkdownSuggestion(messageID: String) {
+        guard let suggestion = helpDeskMarkdownSuggestion(for: messageID),
+              !suggestion.isLoading
+        else { return }
+
+        do {
+            switch suggestion.action {
+            case .appendToExisting:
+                guard let note = noteSummary(matchingTitle: suggestion.pageTitle) else {
+                    throw AssistantError.requestFailed("Could not find page \"\(suggestion.pageTitle)\".")
+                }
+                try withActiveBrainAccessThrowing {
+                    try appendMarkdownToNote(noteID: note.id, markdown: suggestion.formattedMarkdown)
+                }
+                status = "Added to \(note.title)"
+            case .createNew:
+                let note = try withActiveBrainAccessThrowing {
+                    try createNoteFromHelpDesk(
+                        title: suggestion.pageTitle,
+                        bodyMarkdown: suggestion.formattedMarkdown
+                    )
+                }
+                status = "Created \(note.title)"
+            }
+            helpDeskMarkdownSuggestions.removeAll { $0.messageID == messageID }
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    func dismissHelpDeskMarkdownSuggestion(messageID: String) {
+        helpDeskMarkdownSuggestions.removeAll { $0.messageID == messageID }
+        status = "Suggestion dismissed"
+    }
+
+    func areHelpDeskSuggestionsEnabled(for conversationID: HelpDeskConversation.ID?) -> Bool {
+        guard let conversationID else { return true }
+        return !helpDeskSuggestionsDisabledConversationIDs.contains(conversationID)
+    }
+
+    func disableHelpDeskSuggestionsForCurrentSession() {
+        guard let conversationID = selectedHelpDeskConversationID else { return }
+        helpDeskSuggestionsDisabledConversationIDs.insert(conversationID)
+        helpDeskMarkdownSuggestions.removeAll { $0.conversationID == conversationID }
+        status = "Suggestions turned off for this conversation"
+    }
+
     func regenerateHomePage() {
         if currentNoteID != nil, currentHighlightSummary == nil, !isShowingHomePage {
             saveCurrentNote(statusText: "Autosaved")
@@ -820,7 +1012,23 @@ final class BrainStore: ObservableObject {
     }
 
     func openLatestHighlightSummaryOrCompiler() {
-        openHomePage()
+        if let noteID = currentNoteID,
+           let summary = generatedSummaries.first(where: { $0.sourceNoteID == noteID && $0.id != homeSummaryID }) {
+            openHighlightSummary(id: summary.id)
+            return
+        }
+
+        if canCompileCurrentHighlights {
+            compileCurrentHighlightSummary()
+            return
+        }
+
+        if let latestSummary = generatedSummaries.first(where: { $0.id != homeSummaryID }) {
+            openHighlightSummary(id: latestSummary.id)
+            return
+        }
+
+        status = "Highlight text on a page, then compile a summary"
     }
 
     func compileCurrentHighlightSummary() {
@@ -1007,9 +1215,13 @@ final class BrainStore: ObservableObject {
         activeHighlightGenerationID = generationID
         isCompilingHighlightSummary = true
         saveCurrentNote(statusText: "Highlights saved")
-        openHomePage(regenerate: false)
-        isCompilingHighlightSummary = true
-        status = "\(model.title) is generating Home page"
+
+        let summaryID = "summary-\(sourceNoteID)"
+        if let existingSummary = generatedSummaries.first(where: { $0.id == summaryID }) {
+            openHighlightSummary(id: existingSummary.id)
+        }
+
+        status = "\(model.title) is compiling highlight summary"
 
         Task {
             await generateHighlightSummary(
@@ -1025,9 +1237,7 @@ final class BrainStore: ObservableObject {
     var assistantConfigurationSnapshot: AssistantConfiguration {
         AssistantConfiguration(
             mistralAPIKey: mistralAPIKey,
-            mistralModel: mistralModel,
-            groqAPIKey: groqAPIKey,
-            groqModel: groqModel
+            mistralModel: mistralModel
         )
     }
 
@@ -1061,17 +1271,12 @@ final class BrainStore: ObservableObject {
 
     func saveModelConfiguration(
         mistralAPIKey: String,
-        mistralModel: String,
-        groqAPIKey: String,
-        groqModel: String
+        mistralModel: String
     ) {
         self.mistralAPIKey = mistralAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         self.mistralModel = mistralModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.groqAPIKey = groqAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.groqModel = groqModel.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if self.mistralModel.isEmpty { self.mistralModel = Self.defaultMistralModel }
-        if self.groqModel.isEmpty { self.groqModel = Self.defaultGroqModel }
 
         do {
             try saveAssistantConfiguration()
@@ -2410,6 +2615,31 @@ final class BrainStore: ObservableObject {
         )
     }
 
+    private func userPersonalizationContext() -> String {
+        userProfile.personalizationContext()
+    }
+
+    private func userPersonalizationPromptSection() -> String {
+        let context = userPersonalizationContext()
+        guard !context.isEmpty else { return "" }
+        return """
+
+        User personalization:
+        \(context)
+        """
+    }
+
+    private func personalizedSystemInstructions(_ base: String) -> String {
+        let context = userPersonalizationContext()
+        guard !context.isEmpty else { return base }
+        return """
+        \(base)
+
+        User personalization:
+        \(context)
+        """
+    }
+
     private func buildGraphLinks(from loadedNotes: [Note]) -> [BrainLinkReference] {
         var notesByTitle: [String: [Note.ID]] = [:]
         for note in loadedNotes {
@@ -2691,18 +2921,12 @@ final class BrainStore: ObservableObject {
         }
 
         do {
-            let result: ChatCompletionResult
+            let result = try await generateWithMistral(prompt: prompt, linkedPageTitles: linkedPageTitles)
+            recordMistralUsage(
+                inputTokens: result.inputTokens ?? estimatedTokenCount(for: assistantInput(for: prompt, linkedPageTitles: linkedPageTitles)),
+                outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+            )
             let providerTitle = selectedAssistantModel.title
-            switch selectedAssistantModel {
-            case .mistral:
-                result = try await generateWithMistral(prompt: prompt, linkedPageTitles: linkedPageTitles)
-                recordMistralUsage(
-                    inputTokens: result.inputTokens ?? estimatedTokenCount(for: assistantInput(for: prompt, linkedPageTitles: linkedPageTitles)),
-                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
-                )
-            case .groq:
-                result = try await generateWithGroq(prompt: prompt, linkedPageTitles: linkedPageTitles)
-            }
             let output = result.content
 
             guard !cleanedAssistantMarkdown(output).isEmpty else {
@@ -2726,27 +2950,18 @@ final class BrainStore: ObservableObject {
         }
 
         do {
-            let result: ChatCompletionResult
             let providerTitle = selectedAssistantModel.title
             let input = assistantConversationInput(for: prompt, linkedPageTitles: linkedPageTitles)
             let messages = assistantConversationMessages(currentUserInput: input)
-            switch selectedAssistantModel {
-            case .mistral:
-                result = try await generateWithMistral(
-                    system: assistantConversationInstructions(),
-                    messages: messages,
-                    maxTokens: Self.maxAssistantOutputTokens
-                )
-                recordMistralUsage(
-                    inputTokens: result.inputTokens ?? estimatedTokenCount(for: input + assistantConversationTranscript()),
-                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
-                )
-            case .groq:
-                result = try await generateWithGroq(
-                    system: assistantConversationInstructions(),
-                    messages: messages
-                )
-            }
+            let result = try await generateWithMistral(
+                system: assistantConversationInstructions(),
+                messages: messages,
+                maxTokens: Self.maxAssistantOutputTokens
+            )
+            recordMistralUsage(
+                inputTokens: result.inputTokens ?? estimatedTokenCount(for: input + assistantConversationTranscript()),
+                outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+            )
 
             let answer = cleanedAssistantMarkdown(result.content)
             guard !answer.isEmpty else {
@@ -2817,36 +3032,28 @@ final class BrainStore: ObservableObject {
                 ]
             )
 
-            let result: ChatCompletionResult
-            switch selectedAssistantModel {
-            case .mistral:
-                result = try await generateWithMistral(
-                    system: helpDeskInstructions(),
-                    messages: messages,
-                    maxTokens: Self.maxAssistantOutputTokens
-                )
-                let estimatedInput = messages.reduce(helpDeskInstructions().count) { total, message in
-                    total + (message["content"]?.count ?? 0)
-                }
-                recordMistralUsage(
-                    inputTokens: result.inputTokens ?? estimatedTokenCount(forCharacterCount: estimatedInput),
-                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
-                )
-            case .groq:
-                result = try await generateWithGroq(
-                    system: helpDeskInstructions(),
-                    messages: messages
-                )
+            let result = try await generateWithMistral(
+                system: helpDeskInstructions(),
+                messages: messages,
+                maxTokens: Self.maxAssistantOutputTokens
+            )
+            let estimatedInput = messages.reduce(helpDeskInstructions().count) { total, message in
+                total + (message["content"]?.count ?? 0)
             }
+            recordMistralUsage(
+                inputTokens: result.inputTokens ?? estimatedTokenCount(forCharacterCount: estimatedInput),
+                outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+            )
 
             let answer = cleanedAssistantMarkdown(result.content)
             guard !answer.isEmpty else {
                 throw AssistantError.requestFailed("The model returned no answer.")
             }
 
+            let assistantMessageID = UUID().uuidString
             appendHelpDeskMessage(
                 HelpDeskMessage(
-                    id: UUID().uuidString,
+                    id: assistantMessageID,
                     role: .assistant,
                     content: answer,
                     attachmentName: nil,
@@ -2856,6 +3063,11 @@ final class BrainStore: ObservableObject {
             )
             updateHelpDeskConversationTitleIfNeeded(conversationID: conversationID, prompt: userMessage.content)
             status = "\(selectedAssistantModel.title) answered Zirn Chat"
+            beginHelpDeskMarkdownSuggestion(
+                messageID: assistantMessageID,
+                conversationID: conversationID,
+                answer: answer
+            )
         } catch {
             appendHelpDeskMessage(
                 HelpDeskMessage(
@@ -2953,7 +3165,7 @@ final class BrainStore: ObservableObject {
 
             try persistHighlightSummary(summary)
             upsertHighlightSummary(summary)
-            openHomePage(regenerate: false)
+            openHighlightSummary(id: summary.id)
             status = "Summary compiled"
         } catch {
             if activeHighlightGenerationID == generationID {
@@ -3139,61 +3351,6 @@ final class BrainStore: ObservableObject {
         try validateHTTPResponse(response, data: data)
     }
 
-    private func generateWithGroq(prompt: String, linkedPageTitles: [String]) async throws -> ChatCompletionResult {
-        try await generateWithGroq(
-            system: assistantInstructions(),
-            user: assistantInput(for: prompt, linkedPageTitles: linkedPageTitles)
-        )
-    }
-
-    private func generateWithGroq(
-        system: String,
-        user: String
-    ) async throws -> ChatCompletionResult {
-        try await generateWithGroq(
-            system: system,
-            messages: [
-                [
-                    "role": "user",
-                    "content": user
-                ]
-            ]
-        )
-    }
-
-    private func generateWithGroq(
-        system: String,
-        messages: [[String: String]]
-    ) async throws -> ChatCompletionResult {
-        guard !groqAPIKey.isEmpty else {
-            throw AssistantError.missingConfiguration("Add a Groq API key in Settings > Configure Model.")
-        }
-
-        var requestMessages = [
-            [
-                "role": "system",
-                "content": system
-            ]
-        ]
-        requestMessages.append(contentsOf: messages)
-
-        var request = URLRequest(url: URL(string: "https://api.groq.com/openai/v1/chat/completions")!)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(groqAPIKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": groqModel,
-            "messages": requestMessages,
-            "temperature": 0.35,
-            "max_completion_tokens": Self.maxAssistantOutputTokens,
-            "stream": false
-        ])
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validateHTTPResponse(response, data: data)
-        return try extractChatCompletionResult(from: data)
-    }
-
     private func generateWithOllama(system: String, user: String) async throws -> ChatCompletionResult {
         let base = cleanOllamaURL(ollamaURL)
         guard let url = URL(string: base)?.appendingPathComponent("api/chat") else {
@@ -3235,63 +3392,86 @@ final class BrainStore: ObservableObject {
     }
 
     private func assistantInstructions() -> String {
-        """
-        You are Zirn's writing assistant. You edit the user's current Markdown document in place.
-        You will receive the full current document and a user request. Return the complete revised Markdown document, not a patch, diff, explanation, or separate suggestion.
-        The user may type quickly and make spelling mistakes, missing spaces, or phonetic typos. Infer the intended meaning from context instead of rejecting the request for spelling.
-        If the user asks to add, include the original document plus the addition in the best location.
-        If the user asks to edit, rewrite only the needed parts and preserve everything else.
-        If the user asks to delete, remove the requested text or section and keep the remaining document coherent.
-        If the user asks to organize, restructure the whole document cleanly while preserving meaning.
-        Do not wrap the answer in code fences unless the user specifically asks for code.
-        Do not include meta commentary, apologies, or explanations of what you changed.
-        Match the user's writing pattern, vocabulary, rhythm, heading style, and density when possible.
-        Treat correction-derived preferences as stronger than passive style samples.
-        Preserve the user's existing edits. Make the smallest useful change unless the user asks for a larger rewrite.
-        Output polished Markdown with clear headings, short paragraphs, and useful lists only when lists are natural.
-        Use Obsidian-style wiki links like [[Page Title]] only when linking is genuinely useful.
-        """
+        personalizedSystemInstructions(
+            """
+            You are Zirn's writing assistant. You edit the user's current Markdown document in place.
+            You will receive the full current document and a user request. Return the complete revised Markdown document, not a patch, diff, explanation, or separate suggestion.
+            The user may type quickly and make spelling mistakes, missing spaces, or phonetic typos. Infer the intended meaning from context instead of rejecting the request for spelling.
+            If the user asks to add, include the original document plus the addition in the best location.
+            If the user asks to edit, rewrite only the needed parts and preserve everything else.
+            If the user asks to delete, remove the requested text or section and keep the remaining document coherent.
+            If the user asks to organize, restructure the whole document cleanly while preserving meaning.
+            Do not wrap the answer in code fences unless the user specifically asks for code.
+            Do not include meta commentary, apologies, or explanations of what you changed.
+            Match the user's writing pattern, vocabulary, rhythm, heading style, and density when possible.
+            Treat correction-derived preferences as stronger than passive style samples.
+            Preserve the user's existing edits. Make the smallest useful change unless the user asks for a larger rewrite.
+            Output polished Markdown with clear headings, short paragraphs, and useful lists only when lists are natural.
+            Use Obsidian-style wiki links like [[Page Title]] only when linking is genuinely useful.
+            """
+        )
     }
 
     private func assistantConversationInstructions() -> String {
-        """
-        You are Zirn's conversational assistant. Answer the user's question without editing, rewriting, or replacing the Markdown document.
-        Use the current Markdown document and any attached document as context when relevant.
-        The user may type quickly and make spelling mistakes, missing spaces, or phonetic typos. Infer the intended meaning from context instead of rejecting the question for spelling.
-        Return Markdown only. Do not claim you changed the file.
-        If the user asks you to edit the note, briefly tell them to turn on writing mode with the pen icon.
-        Keep answers concise, useful, and grounded in the supplied context.
-        """
+        personalizedSystemInstructions(
+            """
+            You are Zirn's conversational assistant. Answer the user's question without editing, rewriting, or replacing the Markdown document.
+            Use the current Markdown document and any attached document as context when relevant.
+            The user may type quickly and make spelling mistakes, missing spaces, or phonetic typos. Infer the intended meaning from context instead of rejecting the question for spelling.
+            Return Markdown only. Do not claim you changed the file.
+            If the user asks you to edit the note, briefly tell them to turn on writing mode with the pen icon.
+            Keep answers concise, useful, and grounded in the supplied context.
+            """
+        )
     }
 
     private func helpDeskInstructions() -> String {
+        personalizedSystemInstructions(
+            """
+            You are Zirn Chat, a ChatGPT-style assistant for the user's entire vault.
+            Answer questions using the supplied vault context and the prior conversation turns.
+            The user may type quickly and make spelling mistakes, missing spaces, or phonetic typos. Infer the intended meaning from vault titles, page content, and conversation history instead of rejecting the question for spelling.
+            Resolve pronouns and follow-up phrases like "it", "that", and "what was it" from conversation history.
+            Be direct, useful, and grounded. If the vault does not contain enough information, say what is missing.
+            Return Markdown only. Do not edit the user's Markdown files.
+            """
+        )
+    }
+
+    private func helpDeskMarkdownPlacementInstructions() -> String {
         """
-        You are Zirn Chat, a ChatGPT-style assistant for the user's entire vault.
-        Answer questions using the supplied vault context and the prior conversation turns.
-        The user may type quickly and make spelling mistakes, missing spaces, or phonetic typos. Infer the intended meaning from vault titles, page content, and conversation history instead of rejecting the question for spelling.
-        Resolve pronouns and follow-up phrases like "it", "that", and "what was it" from conversation history.
-        Be direct, useful, and grounded. If the vault does not contain enough information, say what is missing.
-        Return Markdown only. Do not edit the user's Markdown files.
+        You place Zirn Chat answers into the user's vault pages.
+        Return JSON only with these keys: action, noteTitle, suggestedPageTitle, formattedMarkdown.
+        action must be "append" when an existing page is the best fit, or "create" when no page matches.
+        noteTitle must exactly match one supplied vault page title when action is append.
+        suggestedPageTitle is required when action is create.
+        formattedMarkdown is the Markdown body to append or use for the new page, without a top-level H1.
         """
     }
 
     private func highlightSummaryInstructions() -> String {
-        """
-        You are Zirn's highlight compiler. You turn selected highlighted excerpts into one coherent non-editable Markdown summary.
-        Use only the supplied highlighted excerpts as factual source material.
-        Preserve the user's writing style, rhythm, density, and vocabulary when possible.
-        Return Markdown only. Do not include meta commentary, apologies, or code fences.
-        """
+        personalizedSystemInstructions(
+            """
+            You are Zirn's highlight compiler. You turn selected highlighted excerpts into one coherent non-editable Markdown summary.
+            Use only the supplied highlighted excerpts as factual source material.
+            Preserve the user's writing style, rhythm, density, and vocabulary when possible.
+            Return Markdown only. Do not include meta commentary, apologies, or code fences.
+            """
+        )
     }
 
     private func homePageSummaryInstructions() -> String {
-        """
-        You are Zirn's Home page compiler. You synthesize every page in the user's vault into one read-only Markdown Home document.
-        Use the supplied page contents or condensed page notes for the vault summary, then use every supplied highlighted excerpt for the highlighted text summary.
-        Preserve the user's writing style, rhythm, density, and vocabulary when possible.
-        Every sentence and bullet must be complete. Remove fragments, dangling clauses, placeholder text, artifacts, and unfinished thoughts before returning.
-        Return Markdown only. Do not include meta commentary, apologies, or code fences.
-        """
+        personalizedSystemInstructions(
+            """
+            You are Zirn's Home page compiler. You synthesize every page in the user's vault into one read-only Home document.
+            Use the supplied page contents or condensed page notes for summaries and highlighted excerpts for flashcards.
+            Preserve the user's writing style, rhythm, density, and vocabulary when possible.
+            Every sentence must be complete. Remove fragments, dangling clauses, placeholder text, artifacts, and unfinished thoughts.
+            Strict length limits: Summary max 7 lines. Each page summary max 5 lines when previewed. Each flashcard answer max 4 lines.
+            Page summaries must be plain prose only. Do not use tables, bullet lists, numbered lists, code blocks, or other markdown formatting in page summaries.
+            Return Markdown only. Do not include meta commentary, apologies, or code fences.
+            """
+        )
     }
 
     private func homePageCondenseInstructions() -> String {
@@ -3323,7 +3503,7 @@ final class BrainStore: ObservableObject {
         \(learnedStyleMemory())
 
         Correction-derived preferences, strongest first:
-        \(learnedCorrectionMemory())
+        \(learnedCorrectionMemory())\(userPersonalizationPromptSection())
         """
     }
 
@@ -3343,6 +3523,7 @@ final class BrainStore: ObservableObject {
         let highlightBody = highlightChunks.isEmpty
             ? "No highlighted text was found."
             : highlightChunks.joined(separator: "\n\n")
+        let groupBody = homePageSidebarGroupsDescription(sourceNotes: sourceNotes)
 
         return """
         Vault:
@@ -3351,11 +3532,24 @@ final class BrainStore: ObservableObject {
         Required structure:
         # Home
 
-        ## Vault Summary
-        Summarize all pages in the vault into a coherent, proper text overview. Combine related ideas across pages instead of summarizing page-by-page. Explain what is going on in the vault.
+        ## Summary
+        Write a coherent vault overview in at most 7 lines. Combine related ideas across pages instead of listing pages one by one.
 
-        ## Highlighted Text Summary
-        Summarize the assembled highlighted data across the vault into a coherent section. Each page's highlights have already been grouped into one chunk, so do not duplicate page titles or repeat the same label for every item. Then add concise bullet points or flashcards for the most useful highlighted ideas. If there are no highlights, say that no highlights have been added yet.
+        ## Page Summaries
+        For each page, add a ### heading with the exact page title, then a plain-text summary paragraph. No tables, lists, code, or markdown formatting.
+
+        ## Highlight Flashcards
+        Create question-and-answer flashcards from highlighted excerpts, grouped by sidebar group.
+        Use this exact format for every group that has highlights:
+        ### Group: Group Name
+        Q: question
+        A: answer
+
+        Q: question
+        A: answer
+
+        Sidebar groups and pages:
+        \(groupBody)
 
         Page contents or condensed page notes:
         \(pageBody)
@@ -3367,8 +3561,38 @@ final class BrainStore: ObservableObject {
         \(learnedStyleMemory())
 
         Correction-derived preferences, strongest first:
-        \(learnedCorrectionMemory())
+        \(learnedCorrectionMemory())\(userPersonalizationPromptSection())
         """
+    }
+
+    private func homePageSidebarGroupsDescription(sourceNotes: [HomePagePreparedNote]) -> String {
+        var grouped: [String: [String]] = [:]
+        var order: [String] = []
+
+        for note in sourceNotes {
+            let groupTitle = sidebarGroupTitle(forNoteID: note.id)
+            if grouped[groupTitle] == nil {
+                order.append(groupTitle)
+                grouped[groupTitle] = []
+            }
+            grouped[groupTitle]?.append(note.title)
+        }
+
+        if order.isEmpty {
+            return "No sidebar groups yet."
+        }
+
+        return order.map { groupTitle in
+            let pages = grouped[groupTitle]?.joined(separator: ", ") ?? ""
+            return "- \(groupTitle): \(pages.isEmpty ? "No pages" : pages)"
+        }.joined(separator: "\n")
+    }
+
+    private func sidebarGroupTitle(forNoteID noteID: Note.ID) -> String {
+        guard let groupID = sidebarGroupID(forNoteID: noteID),
+              let group = sidebarGroup(for: groupID)
+        else { return "Ungrouped" }
+        return group.title
     }
 
     private func preparedHomePageNotes(
@@ -3489,42 +3713,50 @@ final class BrainStore: ObservableObject {
     }
 
     private func localHomePageMarkdown(vaultName: String, sourceNotes: [HomePageSourceNote]) -> String {
-        let pageSummaries = sourceNotes.map { note -> String in
-            let summary = localPageSummary(for: note)
-            return """
-            ### \(note.title)
+        let vaultSummary = lineLimited(localVaultSummary(from: sourceNotes), maxLines: 7)
+        let pageSummarySection = localPageCards(from: sourceNotes)
+            .map { card in
+                """
+                ### \(card.title)
 
-            \(summary)
-            """
-        }
-        .joined(separator: "\n\n")
-        let pageSummarySection = pageSummaries.isEmpty
+                \(card.summary)
+                """
+            }
+            .joined(separator: "\n\n")
+        let pageCardsBody = pageSummarySection.isEmpty
             ? "No pages yet. Press Cmd N to start a new page."
-            : pageSummaries
+            : pageSummarySection
 
-        let highlightChunks = sourceNotes.compactMap { note in
-            pageHighlightChunk(title: note.title, highlights: highlightedTextFragments(in: note.content))
-        }
-        let highlightedSummary = highlightChunks.isEmpty
-            ? "No highlighted text has been compiled yet."
-            : highlightChunks.joined(separator: "\n\n")
+        let flashcardSection = localFlashcardGroups(from: sourceNotes)
+            .map { group in
+                let cards = group.cards
+                    .map { "Q: \($0.question)\nA: \($0.answer)" }
+                    .joined(separator: "\n\n")
+                return """
+                ### Group: \(group.title)
 
-        let vaultSummary = localVaultSummary(from: sourceNotes)
+                \(cards)
+                """
+            }
+            .joined(separator: "\n\n")
+        let flashcardBody = flashcardSection.isEmpty
+            ? "No highlighted text has been added yet."
+            : flashcardSection
 
         return """
         # Home
 
-        ## Vault Summary
+        ## Summary
 
         \(vaultSummary)
 
         ## Page Summaries
 
-        \(pageSummarySection)
+        \(pageCardsBody)
 
-        ## Highlighted Text Summary
+        ## Highlight Flashcards
 
-        \(highlightedSummary)
+        \(flashcardBody)
         """
     }
 
@@ -3543,7 +3775,7 @@ final class BrainStore: ObservableObject {
         return "This vault has \(pageCount) page\(pageCount == 1 ? "" : "s"): \(titles). \(combinedPreview)"
     }
 
-    private func localPageSummary(for note: HomePageSourceNote, sentenceLimit: Int = 2) -> String {
+    private func localPageSummary(for note: HomePageSourceNote, sentenceLimit: Int = 4) -> String {
         let plain = plainText(fromMarkdown: note.content)
         let withoutTitle = plain
             .replacingOccurrences(of: note.title, with: "", options: [.caseInsensitive])
@@ -3565,6 +3797,245 @@ final class BrainStore: ObservableObject {
 
         let clean = selected.trimmingCharacters(in: .whitespacesAndNewlines)
         return clean.hasSuffix(".") ? clean : "\(clean)."
+    }
+
+    private func localPageCards(from sourceNotes: [HomePageSourceNote]) -> [HomePagePageCard] {
+        sourceNotes.map { note in
+            HomePagePageCard(
+                id: note.id,
+                title: note.title,
+                summary: plainHomePageSummaryText(localPageSummary(for: note, sentenceLimit: 8)),
+                noteID: note.id
+            )
+        }
+    }
+
+    private func localFlashcardGroups(from sourceNotes: [HomePageSourceNote]) -> [HomePageFlashcardGroup] {
+        var groupedCards: [String: [HomePageFlashcard]] = [:]
+        var order: [String] = []
+
+        for note in sourceNotes {
+            let highlights = highlightedTextFragments(in: note.content)
+            guard !highlights.isEmpty else { continue }
+
+            let groupTitle = sidebarGroupTitle(forNoteID: note.id)
+            if groupedCards[groupTitle] == nil {
+                order.append(groupTitle)
+                groupedCards[groupTitle] = []
+            }
+
+            for (index, highlight) in highlights.enumerated() {
+                groupedCards[groupTitle]?.append(
+                    HomePageFlashcard(
+                        id: "\(note.id)-\(index)",
+                        question: localFlashcardQuestion(for: highlight, pageTitle: note.title),
+                        answer: highlight
+                    )
+                )
+            }
+        }
+
+        return order.compactMap { title in
+            guard let cards = groupedCards[title], !cards.isEmpty else { return nil }
+            return HomePageFlashcardGroup(id: title, title: title, cards: cards)
+        }
+    }
+
+    private func localFlashcardQuestion(for highlight: String, pageTitle: String) -> String {
+        let trimmed = highlight.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.count <= 100 {
+            return "What key idea from \(pageTitle) is captured here?"
+        }
+        let preview = String(trimmed.prefix(90)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return "Explain the highlighted concept from \(pageTitle): \"\(preview)...\""
+    }
+
+    private func lineLimited(_ text: String, maxLines: Int) -> String {
+        let lines = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+        guard !lines.isEmpty else { return text }
+        guard lines.count > maxLines else { return lines.joined(separator: "\n") }
+        return lines.prefix(maxLines).joined(separator: "\n")
+    }
+
+    private func plainHomePageSummaryText(_ markdown: String) -> String {
+        let withoutTables = markdown
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { line in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return true }
+                if trimmed.contains("|") {
+                    let pipeCount = trimmed.filter { $0 == "|" }.count
+                    if pipeCount >= 2 || trimmed.hasPrefix("|") {
+                        return false
+                    }
+                }
+                if trimmed.hasPrefix("```") {
+                    return false
+                }
+                return true
+            }
+            .joined(separator: "\n")
+
+        return withoutTables
+            .split(separator: "\n\n", omittingEmptySubsequences: true)
+            .map { plainText(fromMarkdown: String($0)) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+    }
+
+    private func extractHomeSummarySection(from markdown: String) -> String? {
+        extractHomeSection("Summary", from: markdown)
+            ?? extractHomeSection("Vault Summary", from: markdown)
+    }
+
+    private func parseHomePagePresentation(from markdown: String) -> HomePagePresentation {
+        let vaultSummary = lineLimited(
+            extractHomeSummarySection(from: markdown) ?? "",
+            maxLines: 7
+        )
+        let pageCards = parsePageSummaryCards(from: extractHomeSection("Page Summaries", from: markdown) ?? "")
+        let flashcardGroups = parseFlashcardGroups(from: extractHomeSection("Highlight Flashcards", from: markdown) ?? "")
+
+        return HomePagePresentation(
+            vaultSummary: vaultSummary.trimmingCharacters(in: .whitespacesAndNewlines),
+            pageCards: pageCards,
+            flashcardGroups: flashcardGroups
+        )
+    }
+
+    private func enrichHomePagePresentation(_ presentation: HomePagePresentation) -> HomePagePresentation {
+        let enrichedCards = presentation.pageCards.map { card in
+            HomePagePageCard(
+                id: card.id,
+                title: card.title,
+                summary: plainHomePageSummaryText(card.summary),
+                noteID: card.noteID ?? notes.first(where: {
+                    normalizedLinkTitle($0.title) == normalizedLinkTitle(card.title)
+                })?.id
+            )
+        }
+
+        return HomePagePresentation(
+            vaultSummary: lineLimited(presentation.vaultSummary, maxLines: 7),
+            pageCards: enrichedCards,
+            flashcardGroups: presentation.flashcardGroups
+        )
+    }
+
+    private func extractHomeSection(_ name: String, from markdown: String) -> String? {
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let heading = "## \(name)"
+        guard let startIndex = lines.firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines) == heading
+        }) else {
+            return nil
+        }
+
+        var endIndex = lines.count
+        for index in (startIndex + 1)..<lines.count {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("## ") {
+                endIndex = index
+                break
+            }
+        }
+
+        let body = lines[(startIndex + 1)..<endIndex].joined(separator: "\n")
+        return body.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func parsePageSummaryCards(from section: String) -> [HomePagePageCard] {
+        guard !section.isEmpty else { return [] }
+
+        var cards: [HomePagePageCard] = []
+        var currentTitle: String?
+        var currentLines: [String] = []
+
+        func flushCard() {
+            guard let title = currentTitle else { return }
+            let summary = plainHomePageSummaryText(
+                currentLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+            guard !summary.isEmpty else { return }
+            cards.append(
+                HomePagePageCard(
+                    id: title,
+                    title: title,
+                    summary: summary,
+                    noteID: nil
+                )
+            )
+        }
+
+        for line in section.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("### ") {
+                flushCard()
+                currentTitle = String(trimmed.dropFirst(4)).trimmingCharacters(in: .whitespacesAndNewlines)
+                currentLines = []
+            } else if currentTitle != nil {
+                currentLines.append(line)
+            }
+        }
+
+        flushCard()
+        return cards
+    }
+
+    private func parseFlashcardGroups(from section: String) -> [HomePageFlashcardGroup] {
+        guard !section.isEmpty else { return [] }
+
+        var groups: [HomePageFlashcardGroup] = []
+        let chunks = section.components(separatedBy: "### Group:")
+        for chunk in chunks.dropFirst() {
+            let lines = chunk.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            guard let firstLine = lines.first else { continue }
+            let groupTitle = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            let body = lines.dropFirst().joined(separator: "\n")
+            let cards = parseFlashcards(from: body, groupID: groupTitle)
+            guard !cards.isEmpty else { continue }
+            groups.append(
+                HomePageFlashcardGroup(
+                    id: groupTitle,
+                    title: groupTitle,
+                    cards: cards
+                )
+            )
+        }
+        return groups
+    }
+
+    private func parseFlashcards(from body: String, groupID: String) -> [HomePageFlashcard] {
+        var cards: [HomePageFlashcard] = []
+        var currentQuestion: String?
+        var cardIndex = 0
+
+        for line in body.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("Q:") {
+                currentQuestion = String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+            } else if trimmed.hasPrefix("A:"), let question = currentQuestion {
+                let answer = lineLimited(
+                    String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines),
+                    maxLines: 4
+                )
+                cards.append(
+                    HomePageFlashcard(
+                        id: "\(groupID)-\(cardIndex)",
+                        question: question,
+                        answer: answer
+                    )
+                )
+                cardIndex += 1
+                currentQuestion = nil
+            }
+        }
+
+        return cards
     }
 
     private func pageHighlightChunk(title: String, highlights: [String]) -> String? {
@@ -3674,13 +4145,17 @@ final class BrainStore: ObservableObject {
             return fallbackMarkdown ?? """
             # Home
 
-            ## Vault Summary
+            ## Summary
 
             No Home summary generated yet.
 
-            ## Highlighted Text Summary
+            ## Page Summaries
 
-            No highlighted text has been compiled yet.
+            No pages yet.
+
+            ## Highlight Flashcards
+
+            No highlighted text has been added yet.
             """
         }
 
@@ -3724,8 +4199,15 @@ final class BrainStore: ObservableObject {
         }
 
         let text = sanitized.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        let requiredSections = ["## Vault Summary", "## Highlighted Text Summary"]
-        guard requiredSections.allSatisfy({ text.contains($0) }) else { return "" }
+        let requiredSections = ["## Summary", "## Page Summaries", "## Highlight Flashcards"]
+        let legacySections = [
+            ["## Summary", "## Page Summaries", "## Highlight Flashcards"],
+            ["## Vault Summary", "## Page Summaries", "## Highlight Flashcards"],
+            ["## Vault Summary", "## Highlighted Text Summary"]
+        ]
+        guard requiredSections.allSatisfy({ text.contains($0) })
+            || legacySections.contains(where: { sections in sections.allSatisfy { text.contains($0) } })
+        else { return "" }
         return text
     }
 
@@ -3770,7 +4252,7 @@ final class BrainStore: ObservableObject {
         \(learnedStyleMemory())
 
         Correction-derived preferences, strongest first:
-        \(learnedCorrectionMemory())
+        \(learnedCorrectionMemory())\(userPersonalizationPromptSection())
         """
     }
 
@@ -3793,7 +4275,7 @@ final class BrainStore: ObservableObject {
 
         Required output:
         Answer the user. Do not rewrite the Markdown file.
-        If the question has typos or missing spaces, silently infer the intended words from context.
+        If the question has typos or missing spaces, silently infer the intended words from context.\(userPersonalizationPromptSection())
         """
     }
 
@@ -3810,6 +4292,260 @@ final class BrainStore: ObservableObject {
 
     private func helpDeskMessages(for conversationID: HelpDeskConversation.ID) -> [HelpDeskMessage] {
         helpDeskDatabase.conversations.first { $0.id == conversationID }?.messages ?? []
+    }
+
+    private func helpDeskMarkdownSuggestion(for messageID: String) -> HelpDeskMarkdownSuggestion? {
+        helpDeskMarkdownSuggestions.first { $0.messageID == messageID }
+    }
+
+    private func upsertHelpDeskMarkdownSuggestion(_ suggestion: HelpDeskMarkdownSuggestion) {
+        helpDeskMarkdownSuggestions.removeAll { $0.messageID == suggestion.messageID }
+        helpDeskMarkdownSuggestions.append(suggestion)
+    }
+
+    private func beginHelpDeskMarkdownSuggestion(
+        messageID: String,
+        conversationID: HelpDeskConversation.ID,
+        answer: String
+    ) {
+        guard areHelpDeskSuggestionsEnabled(for: conversationID) else { return }
+
+        upsertHelpDeskMarkdownSuggestion(
+            HelpDeskMarkdownSuggestion(
+                messageID: messageID,
+                conversationID: conversationID,
+                action: .appendToExisting,
+                pageTitle: "",
+                formattedMarkdown: "",
+                isLoading: true
+            )
+        )
+
+        Task {
+            await refreshHelpDeskMarkdownSuggestion(
+                messageID: messageID,
+                conversationID: conversationID,
+                answer: answer
+            )
+        }
+    }
+
+    private func refreshHelpDeskMarkdownSuggestion(
+        messageID: String,
+        conversationID: HelpDeskConversation.ID,
+        answer: String
+    ) async {
+        do {
+            guard activeBrain != nil,
+                  areHelpDeskSuggestionsEnabled(for: conversationID),
+                  helpDeskMessages(for: conversationID).contains(where: { $0.id == messageID })
+            else {
+                helpDeskMarkdownSuggestions.removeAll { $0.messageID == messageID }
+                return
+            }
+
+            let resolution = try await resolveHelpDeskMarkdownPlacement(for: answer)
+            let suggestion: HelpDeskMarkdownSuggestion
+            switch resolution.action {
+            case .append:
+                guard let noteTitle = resolution.noteTitle else {
+                    throw AssistantError.requestFailed("The model did not name a page to append to.")
+                }
+                suggestion = HelpDeskMarkdownSuggestion(
+                    messageID: messageID,
+                    conversationID: conversationID,
+                    action: .appendToExisting,
+                    pageTitle: noteTitle,
+                    formattedMarkdown: resolution.formattedMarkdown,
+                    isLoading: false
+                )
+            case .create:
+                suggestion = HelpDeskMarkdownSuggestion(
+                    messageID: messageID,
+                    conversationID: conversationID,
+                    action: .createNew,
+                    pageTitle: resolution.suggestedPageTitle ?? "Untitled",
+                    formattedMarkdown: resolution.formattedMarkdown,
+                    isLoading: false
+                )
+            }
+            upsertHelpDeskMarkdownSuggestion(suggestion)
+        } catch {
+            helpDeskMarkdownSuggestions.removeAll { $0.messageID == messageID }
+        }
+    }
+
+    private func resolveAndApplyHelpDeskMarkdown(
+        assistantMessage: HelpDeskMessage,
+        conversationID: HelpDeskConversation.ID
+    ) async {
+        await refreshHelpDeskMarkdownSuggestion(
+            messageID: assistantMessage.id,
+            conversationID: conversationID,
+            answer: assistantMessage.content
+        )
+        applyHelpDeskMarkdownSuggestion(messageID: assistantMessage.id)
+    }
+
+    private func resolveHelpDeskMarkdownPlacement(
+        for assistantAnswer: String
+    ) async throws -> HelpDeskMarkdownPlacementResolution {
+        let pageTitles = notes.map(\.title)
+        let prompt = """
+        Vault pages:
+        \(pageTitles.isEmpty ? "No pages yet." : pageTitles.map { "- \($0)" }.joined(separator: "\n"))
+
+        Zirn Chat answer to place in the vault:
+        \(assistantAnswer)
+
+        Task:
+        Pick the best existing page to append this answer to, or recommend creating a new page.
+        Format the content so it fits naturally in Markdown.
+        """
+
+        let result = try await generateWithMistral(
+            system: helpDeskMarkdownPlacementInstructions(),
+            user: prompt,
+            maxTokens: Self.maxAssistantOutputTokens
+        )
+        recordMistralUsage(
+            inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
+            outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+        )
+
+        return try parseHelpDeskMarkdownPlacementResolution(from: result.content)
+    }
+
+    private func parseHelpDeskMarkdownPlacementResolution(
+        from rawResponse: String
+    ) throws -> HelpDeskMarkdownPlacementResolution {
+        let cleaned = cleanedAssistantMarkdown(rawResponse)
+        let jsonCandidate: String
+        if let start = cleaned.firstIndex(of: "{"),
+           let end = cleaned.lastIndex(of: "}") {
+            jsonCandidate = String(cleaned[start...end])
+        } else {
+            jsonCandidate = cleaned
+        }
+
+        guard let data = jsonCandidate.data(using: .utf8),
+              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let actionRaw = (json["action"] as? String)?.lowercased(),
+              let formattedMarkdown = json["formattedMarkdown"] as? String,
+              !formattedMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw AssistantError.requestFailed("The model did not return a valid page placement.")
+        }
+
+        switch actionRaw {
+        case "append":
+            guard let noteTitle = json["noteTitle"] as? String,
+                  !noteTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                throw AssistantError.requestFailed("The model did not name a page to append to.")
+            }
+            return HelpDeskMarkdownPlacementResolution(
+                action: .append,
+                noteTitle: noteTitle,
+                suggestedPageTitle: nil,
+                formattedMarkdown: formattedMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        case "create":
+            let suggestedTitle = (json["suggestedPageTitle"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return HelpDeskMarkdownPlacementResolution(
+                action: .create,
+                noteTitle: nil,
+                suggestedPageTitle: suggestedTitle?.isEmpty == false ? suggestedTitle : "Untitled",
+                formattedMarkdown: formattedMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        default:
+            throw AssistantError.requestFailed("The model returned an unknown placement action.")
+        }
+    }
+
+    private func noteSummary(matchingTitle title: String) -> NoteSummary? {
+        let normalized = normalizedLinkTitle(title)
+        return notes.first { normalizedLinkTitle($0.title) == normalized }
+    }
+
+    private func appendMarkdownToNote(noteID: Note.ID, markdown: String) throws {
+        guard let brain = activeBrain,
+              let noteURL = noteURL(for: noteID, in: brain)
+        else {
+            throw AssistantError.requestFailed("Could not open the target page.")
+        }
+
+        var note = try readNote(from: noteURL)
+        let trimmedExisting = note.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let separator = trimmedExisting.isEmpty ? "" : "\n\n"
+        let updatedContent = trimmedExisting + separator + markdown
+        let now = Date()
+        note = Note(
+            id: note.id,
+            title: note.title,
+            content: updatedContent,
+            createdAt: note.createdAt,
+            updatedAt: now
+        )
+
+        try writeMarkdownNote(note, to: noteURL)
+        try noteIdentityDatabase?.upsert(
+            noteID: note.id,
+            title: note.title,
+            fileName: noteURL.lastPathComponent,
+            updatedAt: note.updatedAt
+        )
+        try loadNotes()
+        try syncBrainMetadata()
+        scheduleLiveHomePageCompilation(delay: Self.homeCompilationAfterAutosaveNanoseconds)
+    }
+
+    private func createNoteFromHelpDesk(title: String, bodyMarkdown: String) throws -> Note {
+        guard let brain = activeBrain else {
+            throw AssistantError.missingConfiguration("Open or create a brain first")
+        }
+
+        let id = UUID().uuidString
+        let resolvedTitle = uniqueTitle(for: title)
+        let now = Date()
+        let content = contentBySettingDocumentTitle(resolvedTitle, in: bodyMarkdown)
+        let note = Note(
+            id: id,
+            title: resolvedTitle,
+            content: content,
+            createdAt: now,
+            updatedAt: now
+        )
+
+        try FileManager.default.createDirectory(
+            at: notesFolderURL(for: brain),
+            withIntermediateDirectories: true
+        )
+        let targetURL = markdownNoteURL(for: note, in: brain)
+        try FileManager.default.createDirectory(
+            at: targetURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try writeMarkdownNote(note, to: targetURL)
+        try noteIdentityDatabase?.upsert(
+            noteID: note.id,
+            title: note.title,
+            fileName: targetURL.lastPathComponent,
+            updatedAt: note.updatedAt
+        )
+        try loadNotes()
+        try syncBrainMetadata()
+        try updateStyleMemory(with: note.content)
+        recordRecentVault(
+            note: NoteSummary(
+                id: note.id,
+                title: note.title,
+                updatedAt: note.updatedAt
+            )
+        )
+        scheduleLiveHomePageCompilation(delay: Self.homeCompilationAfterAutosaveNanoseconds)
+        return note
     }
 
     private func appendHelpDeskMessage(
@@ -4474,7 +5210,8 @@ final class BrainStore: ObservableObject {
     private func loadAssistantConfiguration() {
         let defaults = UserDefaults.standard
         if let rawModel = defaults.string(forKey: selectedAssistantModelKey),
-           let model = AssistantModel(rawValue: rawModel) {
+           let model = AssistantModel(rawValue: rawModel),
+           model == .mistral {
             selectedAssistantModel = model
         } else {
             selectedAssistantModel = .mistral
@@ -4485,29 +5222,39 @@ final class BrainStore: ObservableObject {
         } else {
             selectedHighlightSummaryModel = .mistral
         }
-        mistralAPIKey = defaults.string(forKey: mistralAPIKeyKey) ?? ""
+        MistralKeychainStore.migrateMistralAPIKeyFromUserDefaults(key: mistralAPIKeyKey)
+        mistralAPIKey = MistralKeychainStore.loadMistralAPIKey() ?? ""
         mistralModel = defaults.string(forKey: mistralModelKey) ?? Self.defaultMistralModel
         mistralBudgetSpentUSD = defaults.double(forKey: mistralBudgetSpentUSDKey)
         mistralOCRPagesUsed = min(Self.mistralOCRPageLimit, defaults.integer(forKey: mistralOCRPagesUsedKey))
         defaults.removeObject(forKey: openAIAPIKeyKey)
         defaults.removeObject(forKey: openAIModelKey)
-        groqAPIKey = defaults.string(forKey: groqAPIKeyKey) ?? ""
-        groqModel = defaults.string(forKey: groqModelKey) ?? Self.defaultGroqModel
+        defaults.removeObject(forKey: mistralAPIKeyKey)
+        defaults.removeObject(forKey: "Assistant.GroqAPIKey")
+        defaults.removeObject(forKey: "Assistant.GroqModel")
         ollamaModel = defaults.string(forKey: ollamaModelKey) ?? Self.defaultOllamaModel
         ollamaURL = cleanOllamaURL(defaults.string(forKey: ollamaURLKey) ?? Self.defaultOllamaURL)
         userName = defaults.string(forKey: userNameKey) ?? ""
+        if let data = defaults.data(forKey: userProfileKey),
+           let profile = try? decoder.decode(UserProfile.self, from: data) {
+            userProfile = profile
+            if !profile.greetingName.isEmpty {
+                userName = profile.greetingName
+            }
+        } else if !userName.isEmpty {
+            userProfile.firstName = userName
+        }
     }
 
     private func saveAssistantConfiguration() throws {
         let defaults = UserDefaults.standard
         defaults.set(selectedAssistantModel.rawValue, forKey: selectedAssistantModelKey)
         defaults.set(selectedHighlightSummaryModel.rawValue, forKey: selectedHighlightSummaryModelKey)
-        defaults.set(mistralAPIKey, forKey: mistralAPIKeyKey)
         defaults.set(mistralModel, forKey: mistralModelKey)
         defaults.set(mistralBudgetSpentUSD, forKey: mistralBudgetSpentUSDKey)
         defaults.set(mistralOCRPagesUsed, forKey: mistralOCRPagesUsedKey)
-        defaults.set(groqAPIKey, forKey: groqAPIKeyKey)
-        defaults.set(groqModel, forKey: groqModelKey)
+        try MistralKeychainStore.saveMistralAPIKey(mistralAPIKey)
+        defaults.removeObject(forKey: mistralAPIKeyKey)
         defaults.set(ollamaModel, forKey: ollamaModelKey)
         defaults.set(cleanOllamaURL(ollamaURL), forKey: ollamaURLKey)
         defaults.removeObject(forKey: openAIAPIKeyKey)
@@ -4520,7 +5267,6 @@ final class BrainStore: ObservableObject {
         var brain = try readBrain(from: activeBrain.brainURL)
         brain.ai.provider = selectedAssistantModel.rawValue
         brain.ai.mistralModel = mistralModel
-        brain.ai.groqModel = groqModel
         brain.ai.ollamaModel = ollamaModel
         brain.ai.ollamaURL = cleanOllamaURL(ollamaURL)
         brain.vault.updatedAt = Date()
@@ -5686,6 +6432,18 @@ final class BrainStore: ObservableObject {
         }
     }
 
+    private func withActiveBrainAccessThrowing<T>(_ action: () throws -> T) throws -> T {
+        guard let folderURL = activeBrain?.folderURL else {
+            throw AssistantError.missingConfiguration("Open or create a brain first")
+        }
+
+        var result: Result<T, Error>?
+        withSecurityScopedAccess(to: folderURL) {
+            result = Result { try action() }
+        }
+        return try result!.get()
+    }
+
     private func withSecurityScopedAccess(to url: URL, _ action: () -> Void) {
         let didStart = url.startAccessingSecurityScopedResource()
         defer {
@@ -5849,6 +6607,34 @@ struct HelpDeskMessage: Identifiable, Codable, Equatable {
     let createdAt: Date
 }
 
+struct HelpDeskMarkdownSuggestion: Identifiable, Equatable {
+    let messageID: String
+    let conversationID: String
+    let action: Action
+    let pageTitle: String
+    let formattedMarkdown: String
+    let isLoading: Bool
+
+    var id: String { messageID }
+
+    enum Action: Equatable {
+        case appendToExisting
+        case createNew
+    }
+}
+
+private struct HelpDeskMarkdownPlacementResolution {
+    enum Action {
+        case append
+        case create
+    }
+
+    let action: Action
+    let noteTitle: String?
+    let suggestedPageTitle: String?
+    let formattedMarkdown: String
+}
+
 enum HelpDeskMessageRole: String, Codable, Equatable {
     case user
     case assistant
@@ -5877,8 +6663,6 @@ struct RecentVault: Identifiable, Codable, Equatable {
 struct AssistantConfiguration: Equatable {
     let mistralAPIKey: String
     let mistralModel: String
-    let groqAPIKey: String
-    let groqModel: String
 }
 
 struct OllamaConfiguration: Equatable {
@@ -5981,6 +6765,31 @@ private struct HomePagePreparedNote {
     let highlights: [String]
 }
 
+struct HomePagePresentation: Equatable {
+    let vaultSummary: String
+    let pageCards: [HomePagePageCard]
+    let flashcardGroups: [HomePageFlashcardGroup]
+}
+
+struct HomePagePageCard: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let summary: String
+    let noteID: Note.ID?
+}
+
+struct HomePageFlashcardGroup: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let cards: [HomePageFlashcard]
+}
+
+struct HomePageFlashcard: Identifiable, Equatable {
+    let id: String
+    let question: String
+    let answer: String
+}
+
 struct HighlightSummary: Identifiable, Equatable {
     let id: String
     let sourceNoteID: String
@@ -6031,17 +6840,11 @@ enum HighlightSummaryModel: String, CaseIterable, Identifiable {
 
 enum AssistantModel: String, CaseIterable, Identifiable {
     case mistral
-    case groq
 
     var id: String { rawValue }
 
     var title: String {
-        switch self {
-        case .mistral:
-            return "Mistral"
-        case .groq:
-            return "Groq"
-        }
+        "Mistral"
     }
 
     var supportsWebSearch: Bool {
@@ -6213,7 +7016,6 @@ struct BrainAIPreferences: Codable {
     var provider: String
     var mistralModel: String? = nil
     var openaiModel: String? = nil
-    var groqModel: String? = nil
     var ollamaModel: String? = nil
     var ollamaURL: String? = nil
     var appleModel: String? = nil

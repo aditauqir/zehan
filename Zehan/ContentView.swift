@@ -16,7 +16,11 @@ struct ContentView: View {
         Group {
             if store.activeBrain == nil {
                 SplashView(
-                    greeting: WelcomeGreeting.message(userName: store.userName),
+                    greeting: WelcomeGreeting.message(
+                        userName: store.userProfile.firstName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            ? store.userName
+                            : store.userProfile.firstName
+                    ),
                     recentVaults: store.recentVaults,
                     isBusy: store.isBusy,
                     newBrain: store.createBrainVaultFromUser,
@@ -494,13 +498,12 @@ private struct WorkspaceView: View {
                         if store.isShowingHelpDesk {
                             HelpDeskView(store: store)
                         } else if store.isShowingHomePage {
-                            ReadOnlyHomePageView(
-                                markdown: store.homeMarkdown,
+                            HomePageView(
+                                store: store,
+                                presentation: store.homePagePresentation,
                                 isGenerating: store.isGeneratingHomePage,
                                 generationDate: store.latestHomeSummary?.compiledAt,
-                                openLinkedNote: { store.openLinkedNote(named: $0) },
-                                imageURL: store.markdownImageURL,
-                                imageData: store.markdownImageData
+                                openNote: { store.openNote(id: $0) }
                             )
                         } else if let summary = store.currentHighlightSummary {
                             ReadOnlyHighlightSummaryView(
@@ -2280,7 +2283,31 @@ private struct HelpDeskView: View {
                                     message: message,
                                     openLinkedNote: { store.openLinkedNote(named: $0) },
                                     imageURL: store.markdownImageURL,
-                                    imageData: store.markdownImageData
+                                    imageData: store.markdownImageData,
+                                    isActionDisabled: store.isGeneratingHelpDeskResponse,
+                                    markdownSuggestion: store.areHelpDeskSuggestionsEnabled(
+                                        for: selectedConversation.id
+                                    )
+                                    ? store.helpDeskMarkdownSuggestions.first { $0.messageID == message.id }
+                                    : nil,
+                                    onRegenerate: {
+                                        store.regenerateHelpDeskResponse(assistantMessageID: message.id)
+                                    },
+                                    onAddToMarkdown: {
+                                        store.addHelpDeskMessageToMarkdown(messageID: message.id)
+                                    },
+                                    onApplyMarkdownSuggestion: {
+                                        store.applyHelpDeskMarkdownSuggestion(messageID: message.id)
+                                    },
+                                    onDismissMarkdownSuggestion: {
+                                        store.dismissHelpDeskMarkdownSuggestion(messageID: message.id)
+                                    },
+                                    onDisableSuggestionsForSession: {
+                                        store.disableHelpDeskSuggestionsForCurrentSession()
+                                    },
+                                    onDeleteExchange: {
+                                        store.deleteHelpDeskExchange(assistantMessageID: message.id)
+                                    }
                                 )
                                 .id(message.id)
                             }
@@ -2637,6 +2664,29 @@ private struct HelpDeskMessageBubble: View {
     let openLinkedNote: (String) -> Void
     let imageURL: (String) -> URL?
     let imageData: (String) -> Data?
+    let isActionDisabled: Bool
+    let markdownSuggestion: HelpDeskMarkdownSuggestion?
+    let onRegenerate: () -> Void
+    let onAddToMarkdown: () -> Void
+    let onApplyMarkdownSuggestion: () -> Void
+    let onDismissMarkdownSuggestion: () -> Void
+    let onDisableSuggestionsForSession: () -> Void
+    let onDeleteExchange: () -> Void
+    @State private var isRegenerateHovered = false
+    @State private var isAddToMarkdownHovered = false
+    @State private var isDeleteHovered = false
+    @State private var isCopyHovered = false
+    @State private var didCopyMessage = false
+
+    private var isFollowUpStatusMessage: Bool {
+        let text = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.hasPrefix("Added to ")
+            || text.hasPrefix("Created **")
+            || text.hasPrefix("I could not add")
+            || text.hasPrefix("I could not create")
+            || text.hasPrefix("Okay —")
+            || text.hasPrefix("I could not find an existing page")
+    }
 
     var body: some View {
         HStack(alignment: .top) {
@@ -2656,8 +2706,24 @@ private struct HelpDeskMessageBubble: View {
                     searchHighlight: nil,
                     openLinkedNote: openLinkedNote,
                     imageURL: imageURL,
-                    imageData: imageData
+                    imageData: imageData,
+                    showsCodeCopyButton: message.role == .assistant
                 )
+                .textSelection(.enabled)
+
+                if message.role == .assistant, let markdownSuggestion {
+                    HelpDeskMarkdownSuggestionBox(
+                        suggestion: markdownSuggestion,
+                        isActionDisabled: isActionDisabled,
+                        onApply: onApplyMarkdownSuggestion,
+                        onDismiss: onDismissMarkdownSuggestion,
+                        onDisableForSession: onDisableSuggestionsForSession
+                    )
+                }
+
+                if message.role == .assistant {
+                    assistantActions
+                }
             }
             .padding(.horizontal, message.role == .user ? 14 : 0)
             .padding(.vertical, message.role == .user ? 10 : 0)
@@ -2672,6 +2738,174 @@ private struct HelpDeskMessageBubble: View {
             if message.role == .assistant {
                 Spacer(minLength: 90)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var assistantActions: some View {
+        HStack(spacing: 10) {
+            if !isFollowUpStatusMessage {
+                Button(action: onRegenerate) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary.opacity(isRegenerateHovered ? 0.95 : 0.72))
+                        .frame(width: 28, height: 28)
+                        .background {
+                            Circle()
+                                .fill(Color.primary.opacity(isRegenerateHovered ? 0.08 : 0.04))
+                        }
+                }
+                .buttonStyle(.plain)
+                .disabled(isActionDisabled)
+                .help("Regenerate")
+                .onHover { isRegenerateHovered = $0 }
+
+                Button(action: onAddToMarkdown) {
+                    Image(systemName: "doc.badge.plus")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary.opacity(isAddToMarkdownHovered ? 0.95 : 0.72))
+                        .frame(width: 28, height: 28)
+                        .background {
+                            Circle()
+                                .fill(Color.primary.opacity(isAddToMarkdownHovered ? 0.08 : 0.04))
+                        }
+                }
+                .buttonStyle(.plain)
+                .disabled(isActionDisabled)
+                .help("Add to markdown document")
+                .onHover { isAddToMarkdownHovered = $0 }
+
+                Button {
+                    copyTextToPasteboard(message.content)
+                    didCopyMessage = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                        didCopyMessage = false
+                    }
+                } label: {
+                    Image(systemName: didCopyMessage ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary.opacity(isCopyHovered ? 0.95 : 0.72))
+                        .frame(width: 28, height: 28)
+                        .background {
+                            Circle()
+                                .fill(Color.primary.opacity(isCopyHovered ? 0.08 : 0.04))
+                        }
+                }
+                .buttonStyle(.plain)
+                .help("Copy answer")
+                .onHover { isCopyHovered = $0 }
+
+                Button(action: onDeleteExchange) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary.opacity(isDeleteHovered ? 0.95 : 0.72))
+                        .frame(width: 28, height: 28)
+                        .background {
+                            Circle()
+                                .fill(Color.primary.opacity(isDeleteHovered ? 0.08 : 0.04))
+                        }
+                }
+                .buttonStyle(.plain)
+                .disabled(isActionDisabled)
+                .help("Delete question and answer")
+                .onHover { isDeleteHovered = $0 }
+            }
+        }
+        .padding(.top, 2)
+    }
+}
+
+private func copyTextToPasteboard(_ text: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+}
+
+private struct HelpDeskMarkdownSuggestionBox: View {
+    let suggestion: HelpDeskMarkdownSuggestion
+    let isActionDisabled: Bool
+    let onApply: () -> Void
+    let onDismiss: () -> Void
+    let onDisableForSession: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Suggested page", systemImage: "sparkles")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary.opacity(0.78))
+
+            if suggestion.isLoading {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Finding the best page in your vault...")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Button("Don't suggest in this session", action: onDisableForSession)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .disabled(isActionDisabled)
+                }
+            } else {
+                Group {
+                    switch suggestion.action {
+                    case .appendToExisting:
+                        Text("Add this answer to ") +
+                            Text(suggestion.pageTitle).fontWeight(.semibold) +
+                            Text("?")
+                    case .createNew:
+                        Text("No matching page found. Create ") +
+                            Text(suggestion.pageTitle).fontWeight(.semibold) +
+                            Text(" with this answer?")
+                    }
+                }
+                .font(.system(size: 13))
+                .foregroundStyle(.primary.opacity(0.9))
+                .fixedSize(horizontal: false, vertical: true)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Button(primaryActionTitle, action: onApply)
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .disabled(isActionDisabled)
+
+                        Button("Dismiss", action: onDismiss)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(isActionDisabled)
+                    }
+
+                    Button("Don't suggest in this session", action: onDisableForSession)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .disabled(isActionDisabled)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.yellow.opacity(0.22))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.yellow.opacity(0.44), lineWidth: 1)
+        }
+        .padding(.top, 4)
+    }
+
+    private var primaryActionTitle: String {
+        switch suggestion.action {
+        case .appendToExisting:
+            return "Add to page"
+        case .createNew:
+            return "Create page"
         }
     }
 }
@@ -2804,58 +3038,317 @@ private struct ReadOnlyHighlightSummaryView: View {
     }
 }
 
-private struct ReadOnlyHomePageView: View {
-    let markdown: String
+private struct HomePageView: View {
+    @ObservedObject var store: BrainStore
+    let presentation: HomePagePresentation
     let isGenerating: Bool
     let generationDate: Date?
-    let openLinkedNote: (String) -> Void
-    let imageURL: (String) -> URL?
-    let imageData: (String) -> Data?
+    let openNote: (Note.ID) -> Void
+    @State private var isGraphExpanded = false
+    @State private var expandedFlashcardGroups: Set<String> = []
+
+    private let pageCardColumns = [
+        GridItem(.flexible(minimum: 220), spacing: 14),
+        GridItem(.flexible(minimum: 220), spacing: 14)
+    ]
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 10) {
+        ZStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
                     Text("Home")
                         .font(.system(size: 52, weight: .bold))
                         .foregroundStyle(.primary)
+                        .padding(.top, 8)
 
-                    Spacer(minLength: 0)
+                    if isGenerating {
+                        HomeGenerationInlineBlocks()
+                            .id(generationDate ?? Date.distantFuture)
+                    } else {
+                        vaultSummarySection
+                        vaultGraphSection
+                        pageCardsSection
+                        flashcardSection
+                    }
                 }
-                .padding(.top, 8)
-
-                if isGenerating {
-                    HomeGenerationInlineBlocks()
-                        .id(generationDate ?? Date.distantFuture)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                } else {
-                    MarkdownPreview(
-                        content: markdownWithoutHomeHeading,
-                        searchHighlight: nil,
-                        openLinkedNote: openLinkedNote,
-                        imageURL: imageURL,
-                        imageData: imageData
-                    )
-                    .textSelection(.enabled)
-                    .transition(.opacity)
-                }
+                .padding(.vertical, 8)
             }
-            .padding(.vertical, 8)
+            .scrollContentBackground(.hidden)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .animation(.easeInOut(duration: 0.24), value: isGenerating)
+
+            if isGraphExpanded {
+                ExpandedGraphOverlay(
+                    notes: store.notes,
+                    links: store.graphLinks,
+                    selectedNoteID: store.currentNoteID,
+                    openNote: { noteID in
+                        openNote(noteID)
+                        withAnimation(.easeInOut(duration: 0.22)) {
+                            isGraphExpanded = false
+                        }
+                    },
+                    close: {
+                        withAnimation(.easeInOut(duration: 0.22)) {
+                            isGraphExpanded = false
+                        }
+                    }
+                )
+                .transition(.scale(scale: 0.985).combined(with: .opacity))
+                .zIndex(2)
+            }
         }
-        .scrollContentBackground(.hidden)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .animation(.easeInOut(duration: 0.24), value: isGenerating)
+        .animation(.easeInOut(duration: 0.24), value: isGraphExpanded)
     }
 
-    private var markdownWithoutHomeHeading: String {
-        var lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        if lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) == "# Home" {
-            lines.removeFirst()
-            while lines.first?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
-                lines.removeFirst()
+    private var vaultSummarySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Summary")
+                .font(.system(size: 22, weight: .bold))
+
+            Text(presentation.vaultSummary.isEmpty ? "No summary yet." : presentation.vaultSummary)
+                .font(.system(size: 15))
+                .foregroundStyle(.primary.opacity(0.88))
+                .lineLimit(7)
+                .multilineTextAlignment(.leading)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var vaultGraphSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Vault Map")
+                .font(.system(size: 22, weight: .bold))
+
+            NoteGraphView(
+                notes: store.notes,
+                links: store.graphLinks,
+                selectedNoteID: store.currentNoteID,
+                maxVisibleNotes: nil,
+                openNote: openNote,
+                expand: {
+                    withAnimation(.easeInOut(duration: 0.24)) {
+                        isGraphExpanded = true
+                    }
+                }
+            )
+            .frame(height: 240)
+        }
+    }
+
+    @ViewBuilder
+    private var pageCardsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Page Summaries")
+                .font(.system(size: 22, weight: .bold))
+
+            if presentation.pageCards.isEmpty {
+                Text("No pages yet. Press ⌘N to start a new page.")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+            } else {
+                LazyVGrid(columns: pageCardColumns, alignment: .leading, spacing: 14) {
+                    ForEach(presentation.pageCards) { card in
+                        HomePageSummaryCard(card: card, openNote: openNote)
+                    }
+                }
             }
         }
-        return lines.joined(separator: "\n")
+    }
+
+    @ViewBuilder
+    private var flashcardSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Highlight Flashcards")
+                .font(.system(size: 22, weight: .bold))
+
+            if presentation.flashcardGroups.isEmpty {
+                Text("Highlight text on your pages to generate flashcards.")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 10) {
+                    ForEach(presentation.flashcardGroups) { group in
+                        HomeFlashcardGroupAccordion(
+                            group: group,
+                            isExpanded: expandedFlashcardGroups.contains(group.id),
+                            toggle: {
+                                if expandedFlashcardGroups.contains(group.id) {
+                                    expandedFlashcardGroups.remove(group.id)
+                                } else {
+                                    expandedFlashcardGroups.insert(group.id)
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct HomePageSummaryCard: View {
+    let card: HomePagePageCard
+    let openNote: (Note.ID) -> Void
+    @State private var isExpanded = false
+    @State private var isHovered = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .top) {
+                        Text(card.title)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.leading)
+
+                        Spacer(minLength: 0)
+
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.secondary)
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    }
+
+                    Text(card.summary)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(isExpanded ? nil : 5)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, minHeight: isExpanded ? nil : 120, alignment: .topLeading)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.primary.opacity(isHovered ? 0.14 : 0.08), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(isHovered ? 0.10 : 0.04), radius: isHovered ? 10 : 4, y: 3)
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovered = $0 }
+            .help(isExpanded ? "Collapse summary" : "Show full summary")
+
+            if isExpanded, card.noteID != nil {
+                Button("Open \(card.title)") {
+                    if let noteID = card.noteID {
+                        openNote(noteID)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 4)
+            }
+        }
+    }
+}
+
+private struct HomeFlashcardGroupAccordion: View {
+    let group: HomePageFlashcardGroup
+    let isExpanded: Bool
+    let toggle: () -> Void
+    @State private var isHeaderHovered = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Button(action: toggle) {
+                HStack(spacing: 10) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+
+                    Text(group.title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.primary)
+
+                    Spacer()
+
+                    Text("\(group.cards.count) cards")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .background(Color.yellow.opacity(isHeaderHovered ? 0.18 : 0.12))
+            }
+            .buttonStyle(.plain)
+            .onHover { isHeaderHovered = $0 }
+
+            if isExpanded {
+                VStack(spacing: 10) {
+                    ForEach(group.cards) { card in
+                        HomeFlashcardView(card: card)
+                    }
+                }
+                .padding(14)
+                .background(Color.yellow.opacity(0.08))
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.yellow.opacity(0.34), lineWidth: 1)
+        }
+        .animation(.easeOut(duration: 0.16), value: isExpanded)
+    }
+}
+
+private struct HomeFlashcardView: View {
+    let card: HomePageFlashcard
+    @State private var showsAnswer = false
+    @State private var isHovered = false
+
+    var body: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.14)) {
+                showsAnswer.toggle()
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Question")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Text(card.question)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .multilineTextAlignment(.leading)
+
+                if showsAnswer {
+                    Divider().opacity(0.35)
+                    Text("Answer")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.secondary)
+                    Text(card.answer)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.primary.opacity(0.88))
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(4)
+                } else {
+                    Text("Tap to reveal answer")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary.opacity(0.82))
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.primary.opacity(isHovered ? 0.12 : 0.06), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
     }
 }
 
@@ -5119,34 +5612,10 @@ private struct AssistantFloatingPill: View {
     }
 
     private var modelMenu: some View {
-        Menu {
-            ForEach(AssistantModel.allCases) { model in
-                Button {
-                    store.selectAssistantModel(model)
-                } label: {
-                    if model == store.selectedAssistantModel {
-                        Label(model.title, systemImage: "checkmark")
-                    } else {
-                        Text(model.title)
-                    }
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text(store.selectedAssistantModel.title)
-                    .font(.system(size: 12.2, weight: .semibold))
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8.5, weight: .bold))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.leading, 3)
+        Text(store.selectedAssistantModel.title)
+            .font(.system(size: 12.2, weight: .semibold))
+            .lineLimit(1)
             .frame(width: modelMenuWidth, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .buttonStyle(.plain)
     }
 
     private var attachmentControl: some View {
@@ -5503,7 +5972,7 @@ private struct AssistantFloatingPill: View {
     }
 
     private var modelMenuWidth: CGFloat {
-        store.selectedAssistantModel == .groq ? 52 : 70
+        70
     }
 
     private var hasPromptInput: Bool {
@@ -5728,19 +6197,22 @@ private struct MarkdownPreview: View {
     let openLinkedNote: (String) -> Void
     let imageURL: (String) -> URL?
     let imageData: (String) -> Data?
+    let showsCodeCopyButton: Bool
 
     init(
         content: String,
         searchHighlight: SearchHighlight?,
         openLinkedNote: @escaping (String) -> Void,
         imageURL: @escaping (String) -> URL? = { _ in nil },
-        imageData: @escaping (String) -> Data? = { _ in nil }
+        imageData: @escaping (String) -> Data? = { _ in nil },
+        showsCodeCopyButton: Bool = false
     ) {
         self.content = content
         self.searchHighlight = searchHighlight
         self.openLinkedNote = openLinkedNote
         self.imageURL = imageURL
         self.imageData = imageData
+        self.showsCodeCopyButton = showsCodeCopyButton
     }
 
     private var blocks: [MarkdownBlock] {
@@ -5883,14 +6355,12 @@ private struct MarkdownPreview: View {
             .highlightedSearchBlock(isHighlighted)
 
         case .code(let text):
-            inlineText(text, highlighted: isHighlighted)
-                .font(.system(size: 13.5, design: .monospaced))
-                .textSelection(.enabled)
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary.opacity(0.45))
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .highlightedSearchBlock(isHighlighted)
+            MarkdownCodeBlockView(text: text, showsCopyButton: showsCodeCopyButton) {
+                inlineText(text, highlighted: isHighlighted)
+                    .font(.system(size: 13.5, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+            .highlightedSearchBlock(isHighlighted)
 
         case .image(let alt, let path):
             MarkdownImageView(alt: alt, path: path, url: imageURL(path), imageData: imageData(path), maxWidth: 520, maxHeight: 360)
@@ -6171,6 +6641,48 @@ private struct MarkdownPreview: View {
 
     private func headingWeight(for level: Int) -> Font.Weight {
         level <= 2 ? .bold : .semibold
+    }
+}
+
+private struct MarkdownCodeBlockView<Content: View>: View {
+    let text: String
+    let showsCopyButton: Bool
+    @ViewBuilder let content: () -> Content
+    @State private var didCopy = false
+    @State private var isCopyHovered = false
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            content()
+                .padding(12)
+                .padding(.top, showsCopyButton ? 10 : 0)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary.opacity(0.45))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+            if showsCopyButton {
+                Button {
+                    copyTextToPasteboard(text)
+                    didCopy = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                        didCopy = false
+                    }
+                } label: {
+                    Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary.opacity(isCopyHovered ? 0.95 : 0.72))
+                        .frame(width: 24, height: 24)
+                        .background {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.primary.opacity(isCopyHovered ? 0.10 : 0.06))
+                        }
+                }
+                .buttonStyle(.plain)
+                .help("Copy code")
+                .padding(6)
+                .onHover { isCopyHovered = $0 }
+            }
+        }
     }
 }
 
@@ -6666,11 +7178,19 @@ private enum APIKeyVerificationState: Equatable {
 private struct UsernameConfigurationView: View {
     @ObservedObject var store: BrainStore
     @Environment(\.dismiss) private var dismiss
-    @State private var userName: String
+    @State private var firstName: String
+    @State private var lastName: String
+    @State private var pronouns: String
+    @State private var occupationChoice: UserOccupationPickerChoice
+    @State private var otherOccupation: String
 
     init(store: BrainStore) {
         self.store = store
-        _userName = State(initialValue: store.userName)
+        _firstName = State(initialValue: store.userProfile.firstName)
+        _lastName = State(initialValue: store.userProfile.lastName)
+        _pronouns = State(initialValue: store.userProfile.pronouns)
+        _occupationChoice = State(initialValue: UserOccupationPickerChoice(occupation: store.userProfile.occupation))
+        _otherOccupation = State(initialValue: UserOccupationPickerChoice.otherText(from: store.userProfile.occupation))
     }
 
     var body: some View {
@@ -6682,18 +7202,44 @@ private struct UsernameConfigurationView: View {
                     .frame(width: 64, height: 64)
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Configure Username")
+                    Text("Your Profile")
                         .font(.system(size: 24, weight: .bold))
 
-                    Text("Your name appears in the welcome greeting on the start page.")
+                    Text("Your name and pronouns personalize the welcome greeting and AI responses. Occupation is optional.")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
-            ConfigurationField(title: "Username") {
-                TextField("Your name", text: $userName)
+            HStack(spacing: 12) {
+                ConfigurationField(title: "First Name") {
+                    TextField("First name", text: $firstName)
+                }
+
+                ConfigurationField(title: "Last Name") {
+                    TextField("Last name", text: $lastName)
+                }
+            }
+
+            ConfigurationField(title: "Pronouns") {
+                TextField("e.g. she/her, he/him, they/them", text: $pronouns)
+            }
+
+            ConfigurationField(title: "Occupation (optional)") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Picker("Occupation", selection: $occupationChoice) {
+                        ForEach(UserOccupationPickerChoice.allCases) { choice in
+                            Text(choice.title).tag(choice)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+
+                    if occupationChoice == .other {
+                        TextField("Specify your occupation", text: $otherOccupation)
+                    }
+                }
             }
 
             HStack(spacing: 12) {
@@ -6707,7 +7253,14 @@ private struct UsernameConfigurationView: View {
                 .controlSize(.large)
 
                 Button {
-                    store.saveUserName(userName)
+                    store.saveUserProfile(
+                        UserProfile(
+                            firstName: firstName,
+                            lastName: lastName,
+                            pronouns: pronouns,
+                            occupation: occupationChoice.resolvedOccupation(otherText: otherOccupation)
+                        )
+                    )
                     dismiss()
                 } label: {
                     Text("Save")
@@ -6719,6 +7272,7 @@ private struct UsernameConfigurationView: View {
             .padding(.top, 4)
         }
         .padding(28)
+        .frame(width: 480)
     }
 }
 
@@ -6727,9 +7281,6 @@ private struct ModelConfigurationView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var mistralAPIKey: String
-    @State private var groqAPIKey: String
-    @State private var groqModel: String
-    @State private var selectedModel: AssistantModel
     @State private var mistralVerificationState: APIKeyVerificationState
     @State private var verifiedMistralAPIKey: String
     @State private var verificationTask: Task<Void, Never>?
@@ -6738,9 +7289,6 @@ private struct ModelConfigurationView: View {
         self.store = store
         let configuration = store.assistantConfigurationSnapshot
         _mistralAPIKey = State(initialValue: configuration.mistralAPIKey)
-        _groqAPIKey = State(initialValue: configuration.groqAPIKey)
-        _groqModel = State(initialValue: configuration.groqModel)
-        _selectedModel = State(initialValue: store.selectedAssistantModel)
         _mistralVerificationState = State(initialValue: configuration.mistralAPIKey.isEmpty ? .idle : .verified)
         _verifiedMistralAPIKey = State(initialValue: configuration.mistralAPIKey)
     }
@@ -6757,7 +7305,7 @@ private struct ModelConfigurationView: View {
                     Text("Configure Model")
                         .font(.system(size: 24, weight: .bold))
 
-                    Text("Choose whether Zirn writes with Mistral or Groq.")
+                    Text("Connect Zirn to Mistral. Your API key is saved securely in Apple Passwords.")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -6765,44 +7313,28 @@ private struct ModelConfigurationView: View {
             }
 
             VStack(alignment: .leading, spacing: 14) {
-                ConfigurationField(title: "Provider") {
-                    Picker("Provider", selection: $selectedModel) {
-                        ForEach(AssistantModel.allCases) { model in
-                            Text(model.title).tag(model)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
+                ConfigurationField(title: "Mistral API Key") {
+                    MistralAPIKeyField(
+                        text: $mistralAPIKey,
+                        state: mistralVerificationState,
+                        width: mistralAPIKeyFieldWidth
+                    )
                 }
 
-                if selectedModel == .mistral {
-                    ConfigurationField(title: "Mistral API Key") {
-                        MistralAPIKeyField(
-                            text: $mistralAPIKey,
-                            state: mistralVerificationState,
-                            width: mistralAPIKeyFieldWidth
-                        )
-                    }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Default model: \(BrainStore.defaultMistralModel)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Default model: \(BrainStore.defaultMistralModel)")
+                    Text("Saved as \(MistralKeychainStore.appName) in Apple Passwords for api.mistral.ai.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+
+                    if case .failed(let message) = mistralVerificationState {
+                        Text(message)
                             .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-
-                        if case .failed(let message) = mistralVerificationState {
-                            Text(message)
-                                .font(.system(size: 12))
-                                .foregroundStyle(.red.opacity(0.88))
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                } else {
-                    ConfigurationField(title: "Groq API Key") {
-                        SecureField("gsk-...", text: $groqAPIKey)
-                    }
-
-                    ConfigurationField(title: "Groq Model") {
-                        TextField(BrainStore.defaultGroqModel, text: $groqModel)
+                            .foregroundStyle(.red.opacity(0.88))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -6821,23 +7353,18 @@ private struct ModelConfigurationView: View {
                     saveSelectedConfiguration()
                     dismiss()
                 } label: {
-                    Text(selectedModel == .mistral ? "Done" : "Save")
+                    Text("Done")
                         .frame(maxWidth: .infinity)
                 }
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
-                .disabled(selectedModel == .mistral && !isMistralKeyVerified)
+                .disabled(!isMistralKeyVerified)
             }
             .padding(.top, 4)
         }
         .padding(28)
         .onChange(of: mistralAPIKey) { _, newValue in
             scheduleMistralVerification(for: newValue)
-        }
-        .onChange(of: selectedModel) { _, newValue in
-            if newValue == .mistral {
-                scheduleMistralVerification(for: mistralAPIKey)
-            }
         }
         .onDisappear {
             verificationTask?.cancel()
@@ -6891,12 +7418,10 @@ private struct ModelConfigurationView: View {
     }
 
     private func saveSelectedConfiguration() {
-        store.selectAssistantModel(selectedModel)
+        store.selectAssistantModel(.mistral)
         store.saveModelConfiguration(
             mistralAPIKey: mistralAPIKey,
-            mistralModel: BrainStore.defaultMistralModel,
-            groqAPIKey: groqAPIKey,
-            groqModel: groqModel
+            mistralModel: BrainStore.defaultMistralModel
         )
     }
 }
@@ -6994,13 +7519,9 @@ private struct UsedModelsConfigurationView: View {
 
             VStack(alignment: .leading, spacing: 14) {
                 ConfigurationField(title: "Prompt Editing Model") {
-                    Picker("Prompt Editing Model", selection: $promptModel) {
-                        ForEach(AssistantModel.allCases) { model in
-                            Text(model.title).tag(model)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
+                    Text("Mistral")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
                 }
 
                 ConfigurationField(title: "Highlight Compile Model") {

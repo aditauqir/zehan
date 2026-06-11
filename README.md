@@ -1,13 +1,12 @@
 # Zirn
 
-Zirn is a local-first macOS writing and knowledge workspace. It stores notes in a brain vault, keeps document links stable, and includes AI assistance through Mistral and Groq.
+Zirn is a local-first macOS writing and knowledge workspace. It stores notes in a brain vault, keeps document links stable, and includes AI assistance through Mistral.
 
 ## Requirements
 
 - macOS with Xcode installed
 - Xcode command line tools
 - A Mistral API key for the default assistant model and OCR
-- Optional: a Groq API key if you want to use Groq as the assistant provider
 
 Install or refresh command line tools if needed:
 
@@ -54,12 +53,12 @@ You can also run it directly from Xcode with `Product > Run`.
 
 In the app, open `Settings > Configure Model`.
 
-- `Mistral` is the default provider.
+- `Mistral` is the assistant provider.
 - The default Mistral model is `mistral-large-latest`.
 - Mistral OCR uses `mistral-ocr-latest` for PDF uploads.
-- Groq is available as an alternate provider.
+- Your Mistral API key is stored securely in Apple Passwords as **Zirn** for `api.mistral.ai`.
 
-Add the relevant API key in the Configure Model sheet before using assistant generation or OCR.
+Add your Mistral API key in the Configure Model sheet before using assistant generation or OCR.
 
 ## Notes
 

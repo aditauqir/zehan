@@ -105,6 +105,31 @@ final class HelpDeskSessionDatabase {
         )
     }
 
+    func deleteMessages(in conversationID: HelpDeskConversation.ID, withIDs ids: [String]) throws {
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            try execute(
+                "DELETE FROM messages WHERE id = ? AND conversation_id = ?;",
+                bindings: [.text(id), .text(conversationID)]
+            )
+        }
+    }
+
+    func deleteMessages(in conversationID: HelpDeskConversation.ID, startingFromMessageID messageID: String) throws {
+        try execute(
+            """
+            DELETE FROM messages
+            WHERE conversation_id = ?
+              AND created_at >= (
+                SELECT created_at
+                FROM messages
+                WHERE id = ? AND conversation_id = ?
+              );
+            """,
+            bindings: [.text(conversationID), .text(messageID), .text(conversationID)]
+        )
+    }
+
     func insertMessage(_ message: HelpDeskMessage, conversationID: HelpDeskConversation.ID) throws {
         try execute(
             """

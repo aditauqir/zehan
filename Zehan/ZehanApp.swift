@@ -123,6 +123,10 @@ struct ZirnApp: App {
                 Button("Configure Username") {
                     store.configureUsernameFromUser()
                 }
+
+                Button("Login with iCloud (in dev)") {
+                    store.loginWithICloudInDevelopment()
+                }
             }
 
             CommandMenu("Settings") {
