@@ -17,3 +17,5 @@ xcodebuild -project Zehan.xcodeproj \
 
 cp -R "$DERIVED_DATA/Build/Products/Release/Zirn.app" "$BUILD_DIR/Zirn.app"
 echo "Built: $BUILD_DIR/Zirn.app"
+
+"$(dirname "$0")/create-dmg.sh" "$BUILD_DIR/Zirn.app"

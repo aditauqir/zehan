@@ -60,6 +60,24 @@ In the app, open `Settings > Configure Model`.
 
 Add your Mistral API key in the Configure Model sheet before using assistant generation or OCR.
 
+## Install Zirn (new users)
+
+Download the latest **Zirn.dmg** from [GitHub Releases](https://github.com/aditauqir/zehan/releases/latest):
+
+```
+https://github.com/aditauqir/zehan/releases/latest/download/Zirn-1.0.1.dmg
+```
+
+1. Open the DMG.
+2. Drag **Zirn** into **Applications**.
+3. Open Zirn from Applications.
+
+If macOS blocks the app on first open, right-click Zirn → **Open** → **Open** again.
+
+For a website download button, link directly to the DMG URL above (or `/releases/latest/download/Zirn-1.0.1.dmg` after each release, update the version in the filename).
+
+Existing users receive updates through Sparkle (**Zirn → Check for Updates…**). The `.zip` on Releases is for OTA only; ship the **`.dmg`** for new installs.
+
 ## Over-the-air updates (Sparkle)
 
 Zirn checks for updates via Sparkle. Use **Zirn → Check for Updates…** in the menu bar.

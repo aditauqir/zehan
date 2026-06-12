@@ -16,6 +16,7 @@ playground.xcworkspace
 
 # Swift Package Manager
 .build/
+dist/sparkle/
 
 # Carthage
 Carthage/Build/

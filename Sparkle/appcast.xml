@@ -1,26 +1,38 @@
-<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
-        <title>Zirn Updates</title>
-        <link>https://github.com/aditauqir/zehan</link>
-        <description>Over-the-air updates for Zirn.</description>
-        <language>en</language>
+        <title>Zirn</title>
         <item>
-            <title>Version 1.0.0</title>
+            <title>1.0.1</title>
+            <pubDate>Fri, 12 Jun 2026 01:15:38 -0400</pubDate>
+            <link>https://github.com/aditauqir/zehan</link>
+            <sparkle:version>2</sparkle:version>
+            <sparkle:shortVersionString>1.0.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.5</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>Zirn 1.0.1</h2>
+<ul>
+  <li>Sparkle over-the-air updates with Check for Updates in the app menu</li>
+  <li>DMG installer for first-time setup</li>
+  <li>Mistral API limits aligned with your account quota</li>
+  <li>Settings menu consolidated; Home page summary cards improved</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.0.1/Zirn-1.0.1.zip" length="3993480" type="application/octet-stream" sparkle:edSignature="c2WWh88F6EZsdHsUEy/QqXq+LMh8DDrC+AasECpD8R9frDI3kztAj5v0GuLq2QUcLcrXliNx97/Gbxfmk8Z8Dg=="/>
+        </item>
+        <item>
+            <title>1.0.0</title>
+            <pubDate>Fri, 12 Jun 2026 01:08:05 -0400</pubDate>
+            <link>https://github.com/aditauqir/zehan</link>
             <sparkle:version>1</sparkle:version>
             <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
-            <pubDate>Fri, 12 Jun 2026 12:00:00 +0000</pubDate>
-            <enclosure
-                url="https://github.com/aditauqir/zehan/releases/download/v1.0.0/Zirn-1.0.0.zip"
-                length="0"
-                type="application/octet-stream"
-                sparkle:edSignature="REPLACE_WITH_SIGNATURE_AFTER_RELEASE" />
-            <description><![CDATA[
-                <h2>Zirn 1.0.0</h2>
-                <ul>
-                    <li>Initial Sparkle over-the-air update support</li>
-                </ul>
-            ]]></description>
+            <sparkle:minimumSystemVersion>26.5</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>Zirn 1.0.0</h2>
+<ul>
+  <li>Initial release with Sparkle over-the-air updates</li>
+  <li>Local-first brain vaults, Mistral assistant, and Home summaries</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.0.0/Zirn-1.0.0.zip" length="3993483" type="application/octet-stream" sparkle:edSignature="072vgPBcTSXHpTI2513/023mxEc7m+5mvdOj3hvbCFT0JHS/+BzUdLDymdpUYB2OBiVf4VsMbRUbzBp+gpDJDg=="/>
         </item>
     </channel>
 </rss>

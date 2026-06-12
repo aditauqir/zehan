@@ -20,41 +20,34 @@ jobs:
           chmod +x scripts/build-release.sh
           scripts/build-release.sh
 
-      - name: Package update zip
+      - name: Package update zip and installer DMG
         run: |
           VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/Zirn.app/Contents/Info.plist)"
           BUILD_NUMBER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/Zirn.app/Contents/Info.plist)"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
-          mkdir -p dist
-          ditto -c -k --keepParent build/Zirn.app "dist/Zirn-${VERSION}.zip"
-
-      - name: Install Sparkle tools
-        run: |
-          curl -fsSL "https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/sparkle-2.6.4.tar.xz" \
-            | tar -xJ -C /tmp --strip-components=1
+          chmod +x scripts/create-dmg.sh
+          scripts/create-dmg.sh build/Zirn.app
 
       - name: Sign update and refresh appcast
         env:
           SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
         run: |
+          chmod +x scripts/sparkle-release.sh
           if [[ -z "$SPARKLE_EDDSA_PRIVATE_KEY" ]]; then
             echo "SPARKLE_EDDSA_PRIVATE_KEY secret is not configured. Skipping signed appcast update."
             exit 0
           fi
-          SIGNATURE="$(/tmp/bin/sign_update "dist/Zirn-${VERSION}.zip" -f "$SPARKLE_EDDSA_PRIVATE_KEY")"
-          FILE_SIZE="$(stat -f%z "dist/Zirn-${VERSION}.zip")"
-          /tmp/bin/generate_appcast dist \
-            --download-url-prefix "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/" \
-            --embed-release-notes \
-            --output-path Sparkle/appcast.xml
+          SPARKLE_TOOLS=/tmp scripts/sparkle-release.sh "${VERSION}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION }}
           name: Zirn v${{ env.VERSION }}
-          files: dist/Zirn-${{ env.VERSION }}.zip
+          files: |
+            dist/Zirn-${{ env.VERSION }}.dmg
+            dist/Zirn-${{ env.VERSION }}.zip
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

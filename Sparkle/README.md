@@ -19,19 +19,24 @@ curl -fsSL "https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/s
 /tmp/bin/generate_keys
 ```
 
-- Copy the **public key** into `INFOPLIST_KEY_SUPublicEDKey` in `Zehan.xcodeproj` (Debug and Release).
-- Save the **private key** to GitHub repo secret `SPARKLE_EDDSA_PRIVATE_KEY` (for CI).
+- Copy the **public key** into `Zirn-Info.plist` as `SUPublicEDKey` (already set for this project).
+- Export the **private key** for CI: run `/tmp/bin/generate_keys -x` and save the output as GitHub secret `SPARKLE_EDDSA_PRIVATE_KEY`.
 - Keep the private key out of git.
 
 ### 2. First release (v1.0.0)
 
 ```bash
-chmod +x scripts/build-release.sh scripts/sparkle-release.sh
+chmod +x scripts/build-release.sh scripts/create-dmg.sh scripts/sparkle-release.sh
 scripts/build-release.sh
 scripts/sparkle-release.sh 1.0.0
 ```
 
-Upload `dist/Zirn-1.0.0.zip` to GitHub Releases, then update `Sparkle/appcast.xml` (or let `generate_appcast` rewrite it).
+This produces:
+
+- `dist/Zirn-1.0.0.dmg` — drag-to-Applications installer for new users
+- `dist/Zirn-1.0.0.zip` — Sparkle OTA update package (signed via appcast)
+
+Upload **both** to GitHub Releases for `v1.0.0`, then update `Sparkle/appcast.xml` (or let `generate_appcast` rewrite it from the zip).
 
 ### 3. GitHub Actions secret
 
