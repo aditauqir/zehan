@@ -574,8 +574,12 @@ private struct WorkspaceView: View {
                 }
                 .background(Color(nsColor: .textBackgroundColor))
 
-                ZStack(alignment: .bottom) {
+                HStack(alignment: .bottom, spacing: 10) {
                     if !isReadingMode && !store.isViewingGeneratedPage {
+                        Color.clear
+                            .frame(width: readingToggleSize, height: readingToggleSize)
+                            .accessibilityHidden(true)
+
                         AssistantFloatingPill(store: store)
                             .transition(.scale(scale: 0.96).combined(with: .opacity))
                             .onPreferenceChange(PillHeightPreferenceKey.self) { height in
@@ -584,14 +588,11 @@ private struct WorkspaceView: View {
                     }
 
                     if !store.isViewingGeneratedPage {
-                        HStack {
-                            Spacer(minLength: 0)
-                            ReadingModeToggle(isOn: $isReadingMode, size: readingToggleSize)
-                        }
+                        ReadingModeToggle(isOn: $isReadingMode, size: readingToggleSize)
                     }
                 }
                 .padding(.bottom, 54)
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -5239,7 +5240,7 @@ private struct PromptTextInputView: NSViewRepresentable {
         func updateTextInsets(in textView: NSTextView) {
             textView.textContainerInset = isExpanded
                 ? NSSize(width: 10, height: 8)
-                : NSSize(width: 0, height: 5)
+                : NSSize(width: 0, height: 3)
             textView.textContainer?.lineFragmentPadding = 0
         }
 
@@ -5499,7 +5500,7 @@ private struct AssistantFloatingPill: View {
                     .padding(.bottom, 2)
                     .frame(width: pillWidth)
                 } else {
-                    HStack(alignment: .center, spacing: 7) {
+                    HStack(spacing: 7) {
                         modelMenu
 
                         Rectangle()
@@ -5510,7 +5511,6 @@ private struct AssistantFloatingPill: View {
                         promptLinkChips
 
                         promptInput(width: textFieldWidth, height: textFieldHeight, isExpanded: false)
-                            .frame(maxWidth: .infinity, alignment: .leading)
 
                         attachmentControl
                         expandToggle
@@ -5617,7 +5617,7 @@ private struct AssistantFloatingPill: View {
         Text(store.selectedAssistantModel.title)
             .font(.system(size: 12.2, weight: .semibold))
             .lineLimit(1)
-            .frame(width: modelMenuWidth, alignment: .leading)
+            .frame(width: modelMenuWidth, alignment: .center)
     }
 
     private var attachmentControl: some View {
@@ -5841,7 +5841,7 @@ private struct AssistantFloatingPill: View {
     }
 
     private var pillWidth: CGFloat {
-        isExpandedComposerPresented ? expandedPillWidth : 730
+        isExpandedComposerPresented ? expandedPillWidth : min(730, compactPillWidth)
     }
 
     private var textFieldWidth: CGFloat {
