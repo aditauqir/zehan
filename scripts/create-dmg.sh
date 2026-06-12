@@ -40,9 +40,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Background is 1320×800 (@2x) → 660×400 logical window.
-WINW=660
-WINH=400
+# 480×480 squarish window (960×960 @2x background).
+WINW=480
+WINH=480
 
 WINX="$(osascript -e "tell application \"Finder\" to set s to bounds of window of desktop
 set w to item 3 of s
