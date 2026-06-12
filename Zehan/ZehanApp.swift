@@ -119,7 +119,7 @@ struct ZirnApp: App {
                 }
             }
 
-            CommandMenu("User Settings") {
+            CommandMenu("Settings") {
                 Button("Configure Username") {
                     store.configureUsernameFromUser()
                 }
@@ -127,9 +127,10 @@ struct ZirnApp: App {
                 Button("Login with iCloud (in dev)") {
                     store.loginWithICloudInDevelopment()
                 }
-            }
+                .disabled(true)
 
-            CommandMenu("Settings") {
+                Divider()
+
                 Button("Configure Model") {
                     store.configureModelFromUser()
                 }

@@ -56,7 +56,7 @@ In the app, open `Settings > Configure Model`.
 - `Mistral` is the assistant provider.
 - The default Mistral model is `mistral-large-latest`.
 - Mistral OCR uses `mistral-ocr-latest` for PDF uploads.
-- Your Mistral API key is stored securely in Apple Passwords as **Zirn** for `api.mistral.ai`.
+- Your Mistral API key is stored locally in the app. Use **Add to Keychain** in Configure Model to save it to Apple Passwords as **Zirn** for `api.mistral.ai`.
 
 Add your Mistral API key in the Configure Model sheet before using assistant generation or OCR.
 
@@ -64,4 +64,4 @@ Add your Mistral API key in the Configure Model sheet before using assistant gen
 
 - The sidebar search field searches matching page titles and document content.
 - Duplicate note titles are automatically renamed with an incrementing suffix, for example `Title_(1)`.
-- PDF OCR uploads are currently limited to 100 pages.
+- PDF OCR uploads follow Mistral API limits: up to 512 MB per file and 1,000 pages per request.

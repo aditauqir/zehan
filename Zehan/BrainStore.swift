@@ -66,6 +66,9 @@ final class BrainStore: ObservableObject {
     @Published private(set) var helpDeskSuggestionsDisabledConversationIDs: Set<HelpDeskConversation.ID> = []
     @Published private(set) var mistralBudgetSpentUSD = 0.0
     @Published private(set) var mistralOCRPagesUsed = 0
+    @Published private(set) var mistralTokensConsumed = 0
+    @Published private(set) var mistralRateLimitTokens: Int?
+    @Published private(set) var mistralRateLimitTokensRemaining: Int?
 
     private let encoder: JSONEncoder
     private let decoder = JSONDecoder()
@@ -76,6 +79,7 @@ final class BrainStore: ObservableObject {
     private let mistralModelKey = "Assistant.MistralModel"
     private let mistralBudgetSpentUSDKey = "Assistant.MistralBudgetSpentUSD"
     private let mistralOCRPagesUsedKey = "Assistant.MistralOCRPagesUsed"
+    private let mistralTokensConsumedKey = "Assistant.MistralTokensConsumed"
     private let selectedAssistantModelKey = "Assistant.SelectedModel"
     private let selectedHighlightSummaryModelKey = "Assistant.HighlightSummaryModel"
     private let ollamaModelKey = "Assistant.OllamaModel"
@@ -108,9 +112,10 @@ final class BrainStore: ObservableObject {
     static let defaultOllamaModel = "llama3.1"
     static let defaultOllamaURL = "http://localhost:11434"
 
-    private static let mistralBudgetUSD = 10.0
     private static let mistralInputPricePerMillionTokens = 0.50
     private static let mistralOutputPricePerMillionTokens = 1.50
+    private static let mistralMaxUploadFileBytes = 512 * 1024 * 1024
+    private static let mistralMaxOCRPagesPerRequest = 1_000
     private static let maxAssistantOutputTokens = 4096
     private static let homeCompilationDebounceNanoseconds: UInt64 = 1_500_000_000
     private static let homeCompilationAfterAutosaveNanoseconds: UInt64 = 300_000_000
@@ -124,10 +129,6 @@ final class BrainStore: ObservableObject {
     private static let homePageUpdateSkipSimilarityThreshold = 0.92
     private static let estimatedCharactersPerToken = 4
     private static let mistralOCRModel = "mistral-ocr-latest"
-    private static let mistralOCRPageLimit = 100
-    private static var mistralBudgetTokenEquivalent: Int {
-        Int((mistralBudgetUSD / ((mistralInputPricePerMillionTokens + mistralOutputPricePerMillionTokens) / 2)) * 1_000_000)
-    }
 
     init() {
         encoder = JSONEncoder()
@@ -146,7 +147,14 @@ final class BrainStore: ObservableObject {
     }
 
     var contextUsageFraction: Double {
-        min(1, estimatedMistralBudgetUSD / Self.mistralBudgetUSD)
+        guard let limit = mistralRateLimitTokens,
+              let remaining = mistralRateLimitTokensRemaining,
+              limit > 0
+        else {
+            return 0
+        }
+        let used = max(0, limit - remaining)
+        return min(1, Double(used) / Double(limit))
     }
 
     var contextUsagePercent: Int {
@@ -154,27 +162,32 @@ final class BrainStore: ObservableObject {
     }
 
     var contextUsageLabel: String {
-        "\(formatUSD(estimatedMistralBudgetUSD)) / \(formatUSD(Self.mistralBudgetUSD))"
+        if let limit = mistralRateLimitTokens,
+           let remaining = mistralRateLimitTokensRemaining,
+           limit > 0 {
+            let used = max(0, limit - remaining)
+            return "\(used.formatted()) / \(limit.formatted()) tokens"
+        }
+        return "\(formatUSD(mistralBudgetSpentUSD)) spent"
     }
 
     var contextUsageDetail: String {
-        "~\(Self.mistralBudgetTokenEquivalent.formatted()) blended tokens"
-    }
-
-    var ocrUploadsRemaining: Int {
-        max(0, Self.mistralOCRPageLimit - mistralOCRPagesUsed)
+        if mistralRateLimitTokens != nil {
+            return "Mistral token/min quota"
+        }
+        return "\(mistralTokensConsumed.formatted()) total tokens"
     }
 
     var ocrUploadUsageFraction: Double {
-        min(1, Double(mistralOCRPagesUsed) / Double(Self.mistralOCRPageLimit))
+        0
     }
 
     var ocrUploadCounterLabel: String {
-        "\(ocrUploadsRemaining) left"
+        "512 MB · \(Self.mistralMaxOCRPagesPerRequest.formatted()) pg"
     }
 
     var ocrUploadCounterDetail: String {
-        "\(mistralOCRPagesUsed) of \(Self.mistralOCRPageLimit) OCR pages used"
+        "\(mistralOCRPagesUsed.formatted()) OCR pages processed · up to \(Self.mistralMaxOCRPagesPerRequest.formatted()) pages per upload"
     }
 
     var assistantConnectionStatus: AssistantConnectionStatus {
@@ -249,17 +262,6 @@ final class BrainStore: ObservableObject {
             }
         }
         return enrichHomePagePresentation(presentation)
-    }
-
-    private var estimatedMistralBudgetUSD: Double {
-        min(Self.mistralBudgetUSD, mistralBudgetSpentUSD + estimatedCurrentMistralRequestCostUSD)
-    }
-
-    private var estimatedCurrentMistralRequestCostUSD: Double {
-        let attachmentCount = assistantAttachment?.extractedText.count ?? 0
-        let inputTokens = estimatedTokenCount(forCharacterCount: content.count + assistantPrompt.count + attachmentCount)
-        let outputTokens = min(Self.maxAssistantOutputTokens, max(512, inputTokens / 5))
-        return Self.mistralCostUSD(inputTokens: inputTokens, outputTokens: outputTokens)
     }
 
     func createBrainVaultFromUser() {
@@ -1281,6 +1283,7 @@ final class BrainStore: ObservableObject {
         do {
             try saveAssistantConfiguration()
             isShowingModelConfiguration = false
+            refreshMistralAccountLimitsIfNeeded()
             status = "Model settings saved"
         } catch {
             status = error.localizedDescription
@@ -1298,7 +1301,22 @@ final class BrainStore: ObservableObject {
         mistralModel = Self.defaultMistralModel
         selectedAssistantModel = .mistral
         try saveAssistantConfiguration()
+        refreshMistralAccountLimitsIfNeeded()
         status = "Mistral API key verified"
+    }
+
+    @discardableResult
+    func saveMistralAPIKeyToKeychain(_ apiKey: String) async throws -> MistralKeychainStore.SaveLocation {
+        let cleanAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanAPIKey.isEmpty else {
+            throw AssistantError.missingConfiguration("Add and verify a Mistral API key first.")
+        }
+
+        let location = try await MistralKeychainStore.saveMistralAPIKey(cleanAPIKey)
+        status = location == .applePasswords
+            ? "Mistral API key saved to Apple Passwords"
+            : "Mistral API key saved to Apple Passwords on this Mac"
+        return location
     }
 
     func selectAssistantModel(_ model: AssistantModel) {
@@ -1875,6 +1893,11 @@ final class BrainStore: ObservableObject {
             }
         }
 
+        if let fileSize = fileByteCount(at: url), exceedsMistralUploadLimit(byteCount: fileSize) {
+            status = mistralUploadLimitStatusMessage(forFileName: url.lastPathComponent)
+            return
+        }
+
         switch url.pathExtension.lowercased() {
         case "pdf":
             attachPDFWithMistralOCR(from: url)
@@ -1906,12 +1929,12 @@ final class BrainStore: ObservableObject {
             return
         }
 
-        guard ocrUploadsRemaining > 0 else {
-            status = "No OCR uploads left"
+        let fileName = promptImageFileName(suggestedFileName: suggestedFileName)
+        guard !exceedsMistralUploadLimit(byteCount: data.count) else {
+            status = mistralUploadLimitStatusMessage(forFileName: fileName)
             return
         }
 
-        let fileName = promptImageFileName(suggestedFileName: suggestedFileName)
         let mimeType = imageMimeType(forFileName: fileName)
         status = "OCR reading \(fileName)"
 
@@ -1923,7 +1946,6 @@ final class BrainStore: ObservableObject {
                     fileExtension: (fileName as NSString).pathExtension.lowercased(),
                     extractedText: extractedText
                 )
-                recordMistralOCRUpload(pageCount: 1)
                 status = "\(fileName) attached · OCRed"
             } catch {
                 status = error.localizedDescription
@@ -1963,6 +1985,11 @@ final class BrainStore: ObservableObject {
             }
         }
 
+        if let fileSize = fileByteCount(at: url), exceedsMistralUploadLimit(byteCount: fileSize) {
+            status = mistralUploadLimitStatusMessage(forFileName: url.lastPathComponent)
+            return
+        }
+
         switch url.pathExtension.lowercased() {
         case "pdf", "doc", "docx":
             let extractedText = extractedPromptDocumentText(from: url)
@@ -1981,17 +2008,17 @@ final class BrainStore: ObservableObject {
                 return
             }
 
-            guard ocrUploadsRemaining > 0 else {
-                status = "No OCR uploads left"
-                return
-            }
-
             guard let data = try? Data(contentsOf: url) else {
                 status = "Could not read \(url.lastPathComponent)"
                 return
             }
 
             let fileName = promptImageFileName(suggestedFileName: url.lastPathComponent)
+            guard !exceedsMistralUploadLimit(byteCount: data.count) else {
+                status = mistralUploadLimitStatusMessage(forFileName: fileName)
+                return
+            }
+
             let mimeType = imageMimeType(forFileName: fileName)
             status = "OCR reading \(fileName)"
             Task {
@@ -2002,7 +2029,6 @@ final class BrainStore: ObservableObject {
                         fileExtension: (fileName as NSString).pathExtension.lowercased(),
                         extractedText: extractedText
                     )
-                    recordMistralOCRUpload(pageCount: 1)
                     status = "\(fileName) attached · OCRed"
                 } catch {
                     status = error.localizedDescription
@@ -3338,7 +3364,7 @@ final class BrainStore: ObservableObject {
         ])
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        try validateHTTPResponse(response, data: data)
+        try processMistralHTTPResponse(response, data: data)
         return try extractChatCompletionResult(from: data)
     }
 
@@ -3348,7 +3374,14 @@ final class BrainStore: ObservableObject {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        try validateHTTPResponse(response, data: data)
+        try processMistralHTTPResponse(response, data: data)
+    }
+
+    private func refreshMistralAccountLimitsIfNeeded() {
+        guard !mistralAPIKey.isEmpty else { return }
+        Task {
+            try? await verifyMistralAPIKey(mistralAPIKey)
+        }
     }
 
     private func generateWithOllama(system: String, user: String) async throws -> ChatCompletionResult {
@@ -5135,6 +5168,48 @@ final class BrainStore: ObservableObject {
         }
     }
 
+    private func processMistralHTTPResponse(_ response: URLResponse, data: Data) throws {
+        if let httpResponse = response as? HTTPURLResponse {
+            updateMistralRateLimits(from: httpResponse)
+        }
+        try validateHTTPResponse(response, data: data)
+    }
+
+    private func updateMistralRateLimits(from response: HTTPURLResponse) {
+        if let limit = mistralHeaderInt(in: response, named: "x-ratelimit-limit-tokens") {
+            mistralRateLimitTokens = limit
+        }
+        if let remaining = mistralHeaderInt(in: response, named: "x-ratelimit-remaining-tokens") {
+            mistralRateLimitTokensRemaining = remaining
+        }
+    }
+
+    private func mistralHeaderInt(in response: HTTPURLResponse, named headerName: String) -> Int? {
+        for (key, value) in response.allHeaderFields {
+            guard let key = key as? String,
+                  key.compare(headerName, options: .caseInsensitive) == .orderedSame,
+                  let rawValue = value as? String
+            else { continue }
+            return Int(rawValue.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+    }
+
+    private func exceedsMistralUploadLimit(byteCount: Int) -> Bool {
+        byteCount > Self.mistralMaxUploadFileBytes
+    }
+
+    private func mistralUploadLimitStatusMessage(forFileName fileName: String) -> String {
+        "Exceeds Mistral’s 512 MB upload limit · \(fileName)"
+    }
+
+    private func fileByteCount(at url: URL) -> Int? {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+              let size = values.fileSize
+        else { return nil }
+        return size
+    }
+
     private func extractChatCompletionResult(from data: Data) throws -> ChatCompletionResult {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
@@ -5173,12 +5248,27 @@ final class BrainStore: ObservableObject {
     private func recordMistralUsage(inputTokens: Int, outputTokens: Int) {
         let cost = Self.mistralCostUSD(inputTokens: inputTokens, outputTokens: outputTokens)
         mistralBudgetSpentUSD += cost
+        mistralTokensConsumed += max(0, inputTokens) + max(0, outputTokens)
         UserDefaults.standard.set(mistralBudgetSpentUSD, forKey: mistralBudgetSpentUSDKey)
+        UserDefaults.standard.set(mistralTokensConsumed, forKey: mistralTokensConsumedKey)
     }
 
     private func recordMistralOCRUpload(pageCount: Int) {
-        mistralOCRPagesUsed = min(Self.mistralOCRPageLimit, mistralOCRPagesUsed + pageCount)
+        mistralOCRPagesUsed += max(0, pageCount)
         UserDefaults.standard.set(mistralOCRPagesUsed, forKey: mistralOCRPagesUsedKey)
+    }
+
+    private func recordMistralOCRUsage(from data: Data, fallbackPageCount: Int? = nil) {
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let usageInfo = json["usage_info"] as? [String: Any],
+           let pagesProcessed = usageInfo["pages_processed"] as? Int,
+           pagesProcessed > 0 {
+            recordMistralOCRUpload(pageCount: pagesProcessed)
+            return
+        }
+        if let fallbackPageCount, fallbackPageCount > 0 {
+            recordMistralOCRUpload(pageCount: fallbackPageCount)
+        }
     }
 
     private func estimatedTokenCount(for text: String) -> Int {
@@ -5222,14 +5312,13 @@ final class BrainStore: ObservableObject {
         } else {
             selectedHighlightSummaryModel = .mistral
         }
-        MistralKeychainStore.migrateMistralAPIKeyFromUserDefaults(key: mistralAPIKeyKey)
-        mistralAPIKey = MistralKeychainStore.loadMistralAPIKey() ?? ""
+        mistralAPIKey = defaults.string(forKey: mistralAPIKeyKey) ?? ""
         mistralModel = defaults.string(forKey: mistralModelKey) ?? Self.defaultMistralModel
         mistralBudgetSpentUSD = defaults.double(forKey: mistralBudgetSpentUSDKey)
-        mistralOCRPagesUsed = min(Self.mistralOCRPageLimit, defaults.integer(forKey: mistralOCRPagesUsedKey))
+        mistralOCRPagesUsed = defaults.integer(forKey: mistralOCRPagesUsedKey)
+        mistralTokensConsumed = defaults.integer(forKey: mistralTokensConsumedKey)
         defaults.removeObject(forKey: openAIAPIKeyKey)
         defaults.removeObject(forKey: openAIModelKey)
-        defaults.removeObject(forKey: mistralAPIKeyKey)
         defaults.removeObject(forKey: "Assistant.GroqAPIKey")
         defaults.removeObject(forKey: "Assistant.GroqModel")
         ollamaModel = defaults.string(forKey: ollamaModelKey) ?? Self.defaultOllamaModel
@@ -5244,17 +5333,18 @@ final class BrainStore: ObservableObject {
         } else if !userName.isEmpty {
             userProfile.firstName = userName
         }
+        refreshMistralAccountLimitsIfNeeded()
     }
 
     private func saveAssistantConfiguration() throws {
         let defaults = UserDefaults.standard
         defaults.set(selectedAssistantModel.rawValue, forKey: selectedAssistantModelKey)
         defaults.set(selectedHighlightSummaryModel.rawValue, forKey: selectedHighlightSummaryModelKey)
+        defaults.set(mistralAPIKey, forKey: mistralAPIKeyKey)
         defaults.set(mistralModel, forKey: mistralModelKey)
         defaults.set(mistralBudgetSpentUSD, forKey: mistralBudgetSpentUSDKey)
         defaults.set(mistralOCRPagesUsed, forKey: mistralOCRPagesUsedKey)
-        try MistralKeychainStore.saveMistralAPIKey(mistralAPIKey)
-        defaults.removeObject(forKey: mistralAPIKeyKey)
+        defaults.set(mistralTokensConsumed, forKey: mistralTokensConsumedKey)
         defaults.set(ollamaModel, forKey: ollamaModelKey)
         defaults.set(cleanOllamaURL(ollamaURL), forKey: ollamaURLKey)
         defaults.removeObject(forKey: openAIAPIKeyKey)
@@ -5532,15 +5622,15 @@ final class BrainStore: ObservableObject {
             return
         }
 
-        guard ocrUploadsRemaining > 0 else {
-            status = "No OCR uploads left"
+        guard !exceedsMistralUploadLimit(byteCount: data.count) else {
+            status = mistralUploadLimitStatusMessage(forFileName: url.lastPathComponent)
             return
         }
 
         let pageCount = PDFDocument(data: data)?.pageCount ?? 0
         let pageLimit = pageCount == 0
-            ? ocrUploadsRemaining
-            : min(pageCount, ocrUploadsRemaining)
+            ? Self.mistralMaxOCRPagesPerRequest
+            : min(pageCount, Self.mistralMaxOCRPagesPerRequest)
         let pages = Array(0..<pageLimit)
         status = "OCR reading \(pageLimit) page\(pageLimit == 1 ? "" : "s")"
 
@@ -5552,7 +5642,6 @@ final class BrainStore: ObservableObject {
                     fileExtension: url.pathExtension.lowercased(),
                     extractedText: extractedText
                 )
-                recordMistralOCRUpload(pageCount: pageLimit)
 
                 if pageCount > pageLimit {
                     status = "\(url.lastPathComponent) attached · first \(pageLimit) pages OCRed"
@@ -5582,7 +5671,8 @@ final class BrainStore: ObservableObject {
         ])
 
         let (responseData, response) = try await URLSession.shared.data(for: request)
-        try validateHTTPResponse(response, data: responseData)
+        try processMistralHTTPResponse(response, data: responseData)
+        recordMistralOCRUsage(from: responseData, fallbackPageCount: pages.count)
         return try extractOCRMarkdown(from: responseData)
     }
 
@@ -5602,7 +5692,8 @@ final class BrainStore: ObservableObject {
         ])
 
         let (responseData, response) = try await URLSession.shared.data(for: request)
-        try validateHTTPResponse(response, data: responseData)
+        try processMistralHTTPResponse(response, data: responseData)
+        recordMistralOCRUsage(from: responseData, fallbackPageCount: 1)
         return try extractOCRMarkdown(from: responseData)
     }
 

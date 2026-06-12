@@ -1569,7 +1569,7 @@ private struct ContextUsageBar: View {
 
             Spacer()
 
-            Text("\(store.contextUsagePercent)%")
+            Text(store.mistralRateLimitTokens == nil ? "—" : "\(store.contextUsagePercent)%")
                 .font(.system(size: 11.5, weight: .semibold, design: .rounded))
                 .foregroundStyle(.secondary)
                 .contentTransition(.numericText())
@@ -3237,12 +3237,15 @@ private struct HomePageSummaryCard: View {
             .help(isExpanded ? "Collapse summary" : "Show full summary")
 
             if isExpanded, card.noteID != nil {
-                Button("Open \(card.title)") {
+                Button {
                     if let noteID = card.noteID {
                         openNote(noteID)
                     }
+                } label: {
+                    Label("Open", systemImage: "arrow.up.right.square")
+                        .font(.system(size: 12, weight: .semibold))
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.bordered)
                 .controlSize(.small)
                 .padding(.horizontal, 14)
                 .padding(.bottom, 4)
@@ -7284,6 +7287,9 @@ private struct ModelConfigurationView: View {
     @State private var mistralVerificationState: APIKeyVerificationState
     @State private var verifiedMistralAPIKey: String
     @State private var verificationTask: Task<Void, Never>?
+    @State private var keychainSaveState: KeychainSaveState = .idle
+    @State private var keychainLoadNotFound = false
+    @State private var isLoadingFromKeychain = false
 
     init(store: BrainStore) {
         self.store = store
@@ -7305,7 +7311,7 @@ private struct ModelConfigurationView: View {
                     Text("Configure Model")
                         .font(.system(size: 24, weight: .bold))
 
-                    Text("Connect Zirn to Mistral. Your API key is saved securely in Apple Passwords.")
+                    Text("Connect Zirn to Mistral.")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -7313,12 +7319,46 @@ private struct ModelConfigurationView: View {
             }
 
             VStack(alignment: .leading, spacing: 14) {
-                ConfigurationField(title: "Mistral API Key") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Mistral API Key")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+
                     MistralAPIKeyField(
                         text: $mistralAPIKey,
                         state: mistralVerificationState,
                         width: mistralAPIKeyFieldWidth
                     )
+
+                    HStack(spacing: 10) {
+                        Button {
+                            loadFromKeychain()
+                        } label: {
+                            Label("Load from Keychain", systemImage: "key.viewfinder")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                        .disabled(isLoadingFromKeychain)
+                        .help("Import the Zirn Mistral API key from Apple Passwords")
+
+                        Button {
+                            saveToKeychain()
+                        } label: {
+                            Label("Add to Keychain", systemImage: "key.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                        .disabled(!isMistralKeyVerified || keychainSaveState == .saving)
+                        .help("Save this API key to Apple Passwords as \(MistralKeychainStore.appName)")
+                    }
+
+                    if keychainLoadNotFound {
+                        Text("API key not found")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.red.opacity(0.88))
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
@@ -7326,9 +7366,27 @@ private struct ModelConfigurationView: View {
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
 
-                    Text("Saved as \(MistralKeychainStore.appName) in Apple Passwords for api.mistral.ai.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                    if case .saved(let location) = keychainSaveState {
+                        switch location {
+                        case .applePasswords:
+                            Label("Saved to Apple Passwords. Search for api.mistral.ai or \(MistralKeychainStore.appName).", systemImage: "checkmark.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.green)
+                                .fixedSize(horizontal: false, vertical: true)
+                        case .localPasswords:
+                            Label("Saved to Apple Passwords on this Mac. Search for api.mistral.ai.", systemImage: "checkmark.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.green)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    if case .failed(let message) = keychainSaveState {
+                        Text(message)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.red.opacity(0.88))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
                     if case .failed(let message) = mistralVerificationState {
                         Text(message)
@@ -7364,6 +7422,8 @@ private struct ModelConfigurationView: View {
         }
         .padding(28)
         .onChange(of: mistralAPIKey) { _, newValue in
+            keychainSaveState = .idle
+            keychainLoadNotFound = false
             scheduleMistralVerification(for: newValue)
         }
         .onDisappear {
@@ -7383,7 +7443,34 @@ private struct ModelConfigurationView: View {
 
     private var mistralAPIKeyFieldWidth: CGFloat {
         let text = cleanMistralAPIKey.isEmpty ? "MISTRAL_API_KEY" : cleanMistralAPIKey
-        return min(440, max(230, measuredTextWidth(text, font: .systemFont(ofSize: 14)) + 56))
+        return min(520, max(320, measuredTextWidth(text, font: .systemFont(ofSize: 14)) + 56))
+    }
+
+    private func loadFromKeychain() {
+        keychainLoadNotFound = false
+        keychainSaveState = .idle
+        isLoadingFromKeychain = true
+
+        Task {
+            defer { isLoadingFromKeychain = false }
+
+            do {
+                guard let importedKey = try await MistralKeychainStore.loadMistralAPIKey()?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                      !importedKey.isEmpty
+                else {
+                    keychainLoadNotFound = true
+                    return
+                }
+
+                mistralAPIKey = importedKey
+                scheduleMistralVerification(for: importedKey)
+            } catch MistralKeychainStore.KeychainError.authenticationCancelled {
+                keychainSaveState = .failed("Authentication was cancelled.")
+            } catch {
+                keychainLoadNotFound = true
+            }
+        }
     }
 
     private func scheduleMistralVerification(for apiKey: String) {
@@ -7417,6 +7504,19 @@ private struct ModelConfigurationView: View {
         }
     }
 
+    private func saveToKeychain() {
+        keychainSaveState = .saving
+
+        Task {
+            do {
+                let location = try await store.saveMistralAPIKeyToKeychain(cleanMistralAPIKey)
+                keychainSaveState = .saved(location)
+            } catch {
+                keychainSaveState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
     private func saveSelectedConfiguration() {
         store.selectAssistantModel(.mistral)
         store.saveModelConfiguration(
@@ -7424,6 +7524,13 @@ private struct ModelConfigurationView: View {
             mistralModel: BrainStore.defaultMistralModel
         )
     }
+}
+
+private enum KeychainSaveState: Equatable {
+    case idle
+    case saving
+    case saved(MistralKeychainStore.SaveLocation)
+    case failed(String)
 }
 
 private struct MistralAPIKeyField: View {
