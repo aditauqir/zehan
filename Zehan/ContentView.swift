@@ -5517,7 +5517,7 @@ private struct AssistantFloatingPill: View {
                         sendButton
                     }
                     .padding(.leading, 10)
-                    .padding(.trailing, 7)
+                    .padding(.trailing, 10)
                     .padding(.vertical, 6)
                     .frame(width: pillWidth)
                     .frame(minHeight: 34)
@@ -5970,7 +5970,30 @@ private struct AssistantFloatingPill: View {
     }
 
     private var compactPillWidth: CGFloat {
-        modelMenuWidth + 1 + 24 + textFieldWidth + attachmentWidth + 22 + 24 + 25 + 18
+        let horizontalPadding: CGFloat = 20
+        let itemSpacing = CGFloat(7 * 7)
+        return horizontalPadding
+            + itemSpacing
+            + modelMenuWidth
+            + 1
+            + 24
+            + linkChipsWidth
+            + textFieldWidth
+            + attachmentWidth
+            + 22
+            + 24
+    }
+
+    private var linkChipsWidth: CGFloat {
+        guard !store.assistantPromptLinkedPages.isEmpty else { return 0 }
+        let chipSpacing: CGFloat = 6
+        let chipPadding: CGFloat = 29
+        let font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        let chipsWidth = store.assistantPromptLinkedPages.reduce(CGFloat.zero) { partial, link in
+            partial + measuredTextWidth(link.title, font: font) + chipPadding
+        }
+        let gaps = chipSpacing * CGFloat(max(0, store.assistantPromptLinkedPages.count - 1))
+        return chipsWidth + gaps
     }
 
     private var modelMenuWidth: CGFloat {
