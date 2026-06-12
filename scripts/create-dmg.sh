@@ -21,9 +21,14 @@ if [[ ! -f "$BACKGROUND" || ! -f "$BACKGROUND_2X" ]]; then
 fi
 
 if ! python3 -c "from ds_store import DSStore; from mac_alias import Alias" 2>/dev/null; then
-  echo "Missing Python deps for DMG layout. Install with:"
-  echo "  python3 -m pip install ds-store mac-alias"
-  exit 1
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    echo "Installing Python deps for DMG layout..."
+    python3 -m pip install ds-store mac-alias
+  else
+    echo "Missing Python deps for DMG layout. Install with:"
+    echo "  python3 -m pip install ds-store mac-alias"
+    exit 1
+  fi
 fi
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist")"
