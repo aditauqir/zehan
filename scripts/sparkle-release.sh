@@ -54,8 +54,27 @@ rm -f "$ZIP_PATH"
 ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
 
 SIGN_ARGS=("$ZIP_PATH")
+SPARKLE_KEY_FILE=""
+cleanup_sparkle_key() {
+  if [[ -n "$SPARKLE_KEY_FILE" && "$SPARKLE_KEY_FILE" == /tmp/sparkle-eddsa-* ]]; then
+    rm -f "$SPARKLE_KEY_FILE"
+  fi
+}
+trap cleanup_sparkle_key EXIT
+
 if [[ -n "${SPARKLE_EDDSA_PRIVATE_KEY:-}" ]]; then
-  SIGN_ARGS+=(-f "$SPARKLE_EDDSA_PRIVATE_KEY")
+  if [[ -f "$SPARKLE_EDDSA_PRIVATE_KEY" ]]; then
+    SPARKLE_KEY_FILE="$SPARKLE_EDDSA_PRIVATE_KEY"
+  else
+    SPARKLE_KEY_FILE="$(mktemp /tmp/sparkle-eddsa-XXXXXX)"
+    printf '%s\n' "$SPARKLE_EDDSA_PRIVATE_KEY" > "$SPARKLE_KEY_FILE"
+  fi
+  SIGN_ARGS+=(-f "$SPARKLE_KEY_FILE")
+fi
+
+if [[ ${#SIGN_ARGS[@]} -eq 1 ]]; then
+  echo "Missing SPARKLE_EDDSA_PRIVATE_KEY — cannot sign update."
+  exit 1
 fi
 
 SIGNATURE="$("$SPARKLE_TOOLS/bin/sign_update" "${SIGN_ARGS[@]}")"
