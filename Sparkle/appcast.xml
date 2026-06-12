@@ -10,14 +10,9 @@
             <sparkle:shortVersionString>1.0.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.5</sparkle:minimumSystemVersion>
             <description><![CDATA[<h2>Zirn 1.0.1</h2>
-<ul>
-  <li>Sparkle over-the-air updates with Check for Updates in the app menu</li>
-  <li>DMG installer for first-time setup</li>
-  <li>Mistral API limits aligned with your account quota</li>
-  <li>Settings menu consolidated; Home page summary cards improved</li>
-</ul>
+<ul><li>Update for Zirn 1.0.1</li></ul>
 ]]></description>
-            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.0.1/Zirn-1.0.1.zip" length="3993480" type="application/octet-stream" sparkle:edSignature="c2WWh88F6EZsdHsUEy/QqXq+LMh8DDrC+AasECpD8R9frDI3kztAj5v0GuLq2QUcLcrXliNx97/Gbxfmk8Z8Dg=="/>
+            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.0.1/Zirn-1.0.1.zip" length="3943139" type="application/octet-stream" sparkle:edSignature="1fG4RUL68g8XgliyTY9EjaHGpEph1+Rv7a77/bEuD2Jjx58qdlE7vmOrIEVfkv2yWbmKmsVSRQM4I9Dv6issBQ=="/>
         </item>
         <item>
             <title>1.0.0</title>
