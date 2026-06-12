@@ -16,13 +16,7 @@ if [[ ! -d "$APP_PATH" ]]; then
 fi
 
 if [[ ! -f "$BACKGROUND" || ! -f "$BACKGROUND_2X" ]]; then
-  echo "Generating DMG background assets…"
-  chmod +x "$ROOT/scripts/generate-dmg-background.swift"
-  swift "$ROOT/scripts/generate-dmg-background.swift" "$ROOT"
-fi
-
-if [[ ! -f "$BACKGROUND" ]]; then
-  echo "Missing DMG background at $BACKGROUND"
+  echo "Missing DMG backgrounds in packaging/ (dmg-background.png and dmg-background@2x.png)."
   exit 1
 fi
 
@@ -40,9 +34,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 480×480 squarish window (960×960 @2x background).
-WINW=480
-WINH=480
+# User-provided background is 1024×768 (@2x) → 512×384 window.
+WINW=512
+WINH=384
 
 WINX="$(osascript -e "tell application \"Finder\" to set s to bounds of window of desktop
 set w to item 3 of s
