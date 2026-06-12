@@ -83,6 +83,8 @@ if [[ -n "${SPARKLE_EDDSA_PRIVATE_KEY:-}" ]]; then
       exit 1
     fi
   fi
+elif [[ -f "$HOME/.sparkle_eddsa_private_key" ]]; then
+  run_generate_appcast --ed-key-file "$HOME/.sparkle_eddsa_private_key"
 else
   echo "Missing SPARKLE_EDDSA_PRIVATE_KEY — cannot sign update."
   exit 1
