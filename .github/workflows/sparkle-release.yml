@@ -1,0 +1,69 @@
+name: Sparkle Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Release app
+        run: |
+          chmod +x scripts/build-release.sh
+          scripts/build-release.sh
+
+      - name: Package update zip
+        run: |
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/Zirn.app/Contents/Info.plist)"
+          BUILD_NUMBER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/Zirn.app/Contents/Info.plist)"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          mkdir -p dist
+          ditto -c -k --keepParent build/Zirn.app "dist/Zirn-${VERSION}.zip"
+
+      - name: Install Sparkle tools
+        run: |
+          curl -fsSL "https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/sparkle-2.6.4.tar.xz" \
+            | tar -xJ -C /tmp --strip-components=1
+
+      - name: Sign update and refresh appcast
+        env:
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$SPARKLE_EDDSA_PRIVATE_KEY" ]]; then
+            echo "SPARKLE_EDDSA_PRIVATE_KEY secret is not configured. Skipping signed appcast update."
+            exit 0
+          fi
+          SIGNATURE="$(/tmp/bin/sign_update "dist/Zirn-${VERSION}.zip" -f "$SPARKLE_EDDSA_PRIVATE_KEY")"
+          FILE_SIZE="$(stat -f%z "dist/Zirn-${VERSION}.zip")"
+          /tmp/bin/generate_appcast dist \
+            --download-url-prefix "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/" \
+            --embed-release-notes \
+            --output-path Sparkle/appcast.xml
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: Zirn v${{ env.VERSION }}
+          files: dist/Zirn-${{ env.VERSION }}.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit appcast
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Sparkle/appcast.xml || true
+          git diff --cached --quiet && echo "No appcast changes to commit." && exit 0
+          git commit -m "Update Sparkle appcast for v${VERSION}."
+          git push

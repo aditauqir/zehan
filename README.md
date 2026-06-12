@@ -60,6 +60,12 @@ In the app, open `Settings > Configure Model`.
 
 Add your Mistral API key in the Configure Model sheet before using assistant generation or OCR.
 
+## Over-the-air updates (Sparkle)
+
+Zirn checks for updates via Sparkle. Use **Zirn → Check for Updates…** in the menu bar.
+
+Setup, signing keys, and the automated `main` branch release workflow are documented in [Sparkle/README.md](Sparkle/README.md).
+
 ## Notes
 
 - The sidebar search field searches matching page titles and document content.

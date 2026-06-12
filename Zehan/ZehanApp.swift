@@ -14,6 +14,7 @@ struct ZirnApp: App {
 
     init() {
         Self.registerBundledFonts()
+        ZirnSparkleController.shared.startIfNeeded()
     }
 
     private static func registerBundledFonts() {
@@ -31,6 +32,12 @@ struct ZirnApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    ZirnSparkleController.shared.checkForUpdates()
+                }
+            }
+
             CommandGroup(replacing: .newItem) {
                 Button("New Page") {
                     store.newDraft()

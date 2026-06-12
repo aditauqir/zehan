@@ -36,3 +36,8 @@ Secrets.xcconfig
 *.keys
 APIKeys.plist
 Secrets.plist
+.sparkle-tools/
+.sparkle_eddsa_private_key
+.derivedDataRelease/
+build/
+dist/

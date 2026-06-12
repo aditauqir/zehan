@@ -3194,7 +3194,7 @@ private struct HomePageSummaryCard: View {
     @State private var isHovered = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             Button {
                 withAnimation(.easeOut(duration: 0.16)) {
                     isExpanded.toggle()
@@ -3222,18 +3222,9 @@ private struct HomePageSummaryCard: View {
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(14)
-                .frame(maxWidth: .infinity, minHeight: isExpanded ? nil : 120, alignment: .topLeading)
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.primary.opacity(isHovered ? 0.14 : 0.08), lineWidth: 1)
-                }
-                .shadow(color: .black.opacity(isHovered ? 0.10 : 0.04), radius: isHovered ? 10 : 4, y: 3)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.plain)
-            .onHover { isHovered = $0 }
             .help(isExpanded ? "Collapse summary" : "Show full summary")
 
             if isExpanded, card.noteID != nil {
@@ -3247,10 +3238,18 @@ private struct HomePageSummaryCard: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .padding(.horizontal, 14)
-                .padding(.bottom, 4)
             }
         }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: isExpanded ? nil : 120, alignment: .topLeading)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.primary.opacity(isHovered ? 0.14 : 0.08), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(isHovered ? 0.10 : 0.04), radius: isHovered ? 10 : 4, y: 3)
+        .onHover { isHovered = $0 }
     }
 }
 
