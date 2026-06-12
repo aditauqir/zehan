@@ -44,14 +44,20 @@ trap cleanup EXIT
 WINW=512
 WINH=384
 
-WINX="$(osascript -e "tell application \"Finder\" to set s to bounds of window of desktop
+# Finder is unavailable on GitHub Actions runners; use a sensible default origin.
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  WINX=200
+  WINY=120
+else
+  WINX="$(osascript -e "tell application \"Finder\" to set s to bounds of window of desktop
 set w to item 3 of s
 set h to item 4 of s
-return round ((w - ${WINW}) / 2)" | tr -d ',')"
-WINY="$(osascript -e "tell application \"Finder\" to set s to bounds of window of desktop
+return round ((w - ${WINW}) / 2)" 2>/dev/null | tr -d ',' || echo 200)"
+  WINY="$(osascript -e "tell application \"Finder\" to set s to bounds of window of desktop
 set w to item 3 of s
 set h to item 4 of s
-return round ((h - ${WINH}) / 2)" | tr -d ',')"
+return round ((h - ${WINH}) / 2)" 2>/dev/null | tr -d ',' || echo 120)"
+fi
 
 rm -rf "$STAGING"
 mkdir -p "$STAGING" "$DIST_DIR"
@@ -63,7 +69,7 @@ rm -f "$DMG_PATH" "$RW_DMG"
 STAGING_MB="$(du -sm "$STAGING" | awk '{print $1}')"
 DMG_MB=$((STAGING_MB + 50))
 
-hdiutil create -size "${DMG_MB}m" -type SPARSE -volname "Zirn" -fs HFS+ "${DIST_DIR}/rw.${DMG_NAME}" >/dev/null
+hdiutil create -size "${DMG_MB}m" -type SPARSE -volname "Zirn ${VERSION}" -fs HFS+ "${DIST_DIR}/rw.${DMG_NAME}" >/dev/null
 
 MOUNT_OUTPUT="$(hdiutil attach -readwrite -noverify -nobrowse -mountrandom /tmp "$RW_DMG")"
 DEV="$(echo "$MOUNT_OUTPUT" | awk '/^\/dev\/disk[0-9]+s[0-9]+/ && /Apple_HFS/ {print $1; exit}')"

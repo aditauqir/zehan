@@ -37,6 +37,10 @@ final class ZirnUpdateUserDriver: NSObject, SPUUserDriver {
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
+            ZirnPendingUpdateStore.save(
+                version: appcastItem.displayVersionString,
+                releaseNotesHTML: appcastItem.itemDescription
+            )
             reply(.install)
         case .alertThirdButtonReturn:
             reply(.skip)
@@ -93,6 +97,19 @@ final class ZirnUpdateUserDriver: NSObject, SPUUserDriver {
     }
 
     func showUpdateInstalledAndRelaunched(_ relaunched: Bool, acknowledgement: @escaping () -> Void) {
+        if relaunched {
+            let pending = ZirnPendingUpdateStore.consume()
+            let version = pending?.version
+                ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+                ?? "this version"
+            ZirnUpdateSuccessPresenter.show(
+                version: version,
+                releaseNotesHTML: pending?.releaseNotesHTML
+            )
+            acknowledgement()
+            return
+        }
+
         standardDriver.showUpdateInstalledAndRelaunched(relaunched, acknowledgement: acknowledgement)
     }
 

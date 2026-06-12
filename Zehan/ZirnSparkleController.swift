@@ -12,6 +12,7 @@ final class ZirnSparkleController: NSObject {
     static let shared = ZirnSparkleController()
 
     private let userDriver: ZirnUpdateUserDriver
+    private let updaterDelegate = ZirnSparkleUpdaterDelegate()
     private let updater: SPUUpdater
     private var started = false
 
@@ -21,7 +22,7 @@ final class ZirnSparkleController: NSObject {
             hostBundle: .main,
             applicationBundle: .main,
             userDriver: userDriver,
-            delegate: nil
+            delegate: updaterDelegate
         )
         super.init()
     }

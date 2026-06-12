@@ -23,6 +23,7 @@ jobs:
 
       - name: Package update zip and installer DMG
         run: |
+          python3 -m pip install --user ds-store mac-alias
           VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/Zirn.app/Contents/Info.plist)"
           BUILD_NUMBER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/Zirn.app/Contents/Info.plist)"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"

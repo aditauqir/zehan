@@ -61,3 +61,24 @@ When an update is found, Zirn shows:
 > Want to update?
 
 Buttons: **Update**, **Don't Update**, **Skip This Update**
+
+After the app relaunches, Zirn shows a **Successfully updated** window with the version and changelog from the appcast.
+
+## Changelog for each release
+
+Before shipping, add release notes for that version:
+
+```bash
+Sparkle/release-notes/<version>.html
+```
+
+Example: `Sparkle/release-notes/1.0.2.html`
+
+```html
+<h2>Zirn 1.0.2</h2>
+<ul>
+  <li>Your change here</li>
+</ul>
+```
+
+`scripts/sparkle-release.sh` embeds this HTML into `Sparkle/appcast.xml`. Users see it after updating.

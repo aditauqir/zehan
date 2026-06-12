@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		B442D5F32FDBCE0300DF3F05 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = SPARKLE002 /* Sparkle */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		B4CAC5C42FB773A9001D6EDD /* Zirn.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Zirn.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +27,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B442D5F32FDBCE0300DF3F05 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -262,7 +267,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = Zirn-Info.plist;
+				INFOPLIST_FILE = "Zirn-Info.plist";
 				INFOPLIST_KEY_ATSApplicationFontsPath = Fonts;
 				INFOPLIST_KEY_CFBundleDisplayName = Zirn;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -298,7 +303,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = Zirn-Info.plist;
+				INFOPLIST_FILE = "Zirn-Info.plist";
 				INFOPLIST_KEY_ATSApplicationFontsPath = Fonts;
 				INFOPLIST_KEY_CFBundleDisplayName = Zirn;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
