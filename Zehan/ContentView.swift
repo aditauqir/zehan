@@ -574,12 +574,8 @@ private struct WorkspaceView: View {
                 }
                 .background(Color(nsColor: .textBackgroundColor))
 
-                HStack(alignment: .bottom, spacing: 10) {
+                ZStack(alignment: .bottom) {
                     if !isReadingMode && !store.isViewingGeneratedPage {
-                        ReadingModeToggle(isOn: $isReadingMode, size: readingToggleSize)
-                            .opacity(0)
-                            .allowsHitTesting(false)
-
                         AssistantFloatingPill(store: store)
                             .transition(.scale(scale: 0.96).combined(with: .opacity))
                             .onPreferenceChange(PillHeightPreferenceKey.self) { height in
@@ -588,11 +584,14 @@ private struct WorkspaceView: View {
                     }
 
                     if !store.isViewingGeneratedPage {
-                        ReadingModeToggle(isOn: $isReadingMode, size: readingToggleSize)
+                        HStack {
+                            Spacer(minLength: 0)
+                            ReadingModeToggle(isOn: $isReadingMode, size: readingToggleSize)
+                        }
                     }
                 }
                 .padding(.bottom, 54)
-                .frame(maxWidth: .infinity, alignment: .center)
+                .frame(maxWidth: .infinity)
         }
     }
 
@@ -5240,7 +5239,7 @@ private struct PromptTextInputView: NSViewRepresentable {
         func updateTextInsets(in textView: NSTextView) {
             textView.textContainerInset = isExpanded
                 ? NSSize(width: 10, height: 8)
-                : NSSize(width: 0, height: 3)
+                : NSSize(width: 0, height: 5)
             textView.textContainer?.lineFragmentPadding = 0
         }
 
@@ -5500,7 +5499,7 @@ private struct AssistantFloatingPill: View {
                     .padding(.bottom, 2)
                     .frame(width: pillWidth)
                 } else {
-                    HStack(spacing: 7) {
+                    HStack(alignment: .center, spacing: 7) {
                         modelMenu
 
                         Rectangle()
@@ -5511,6 +5510,7 @@ private struct AssistantFloatingPill: View {
                         promptLinkChips
 
                         promptInput(width: textFieldWidth, height: textFieldHeight, isExpanded: false)
+                            .frame(maxWidth: .infinity, alignment: .leading)
 
                         attachmentControl
                         expandToggle
@@ -5841,7 +5841,7 @@ private struct AssistantFloatingPill: View {
     }
 
     private var pillWidth: CGFloat {
-        isExpandedComposerPresented ? expandedPillWidth : min(730, compactPillWidth)
+        isExpandedComposerPresented ? expandedPillWidth : 730
     }
 
     private var textFieldWidth: CGFloat {
@@ -7468,6 +7468,7 @@ private struct ModelConfigurationView: View {
                 keychainSaveState = .failed("Authentication was cancelled.")
             } catch {
                 keychainLoadNotFound = true
+                keychainSaveState = .failed(error.localizedDescription)
             }
         }
     }

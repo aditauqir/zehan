@@ -250,7 +250,6 @@ enum MistralKeychainStore {
         accessGroup: String,
         synchronizable: Bool
     ) -> OSStatus {
-        let query = internetPasswordQuery(synchronizable: synchronizable ? kCFBooleanTrue as Any : kCFBooleanFalse as Any)
         guard let accessControl = try? makeAccessControl(synchronizable: synchronizable) else {
             return errSecParam
         }
@@ -263,36 +262,72 @@ enum MistralKeychainStore {
             kSecAttrDescription as String: "Mistral API Key",
             kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any
         ]
-        return SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+
+        var lastStatus = errSecItemNotFound
+        for query in internetPasswordQueryVariants(
+            synchronizable: synchronizable ? kCFBooleanTrue as Any : kCFBooleanFalse as Any
+        ) {
+            let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+            if status == errSecSuccess {
+                return errSecSuccess
+            }
+            lastStatus = status
+        }
+        return lastStatus
     }
 
-    private static func internetPasswordQuery(synchronizable: Any) -> [String: Any] {
-        [
-            kSecClass as String: kSecClassInternetPassword,
-            kSecAttrServer as String: mistralServer,
-            kSecAttrAccount as String: appName,
-            kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
-            kSecAttrSynchronizable as String: synchronizable
-        ]
+    private static func resolvedAccessGroup() -> String? {
+        KeychainAccessGroup.resolved()
     }
 
-    private static func deleteInternetPassword(synchronizable: Any) {
-        SecItemDelete(internetPasswordQuery(synchronizable: synchronizable) as CFDictionary)
-    }
-
-    private static func hasInternetPasswordEntry(synchronizable: Any) -> Bool {
+    private static func internetPasswordQuery(
+        synchronizable: Any,
+        accessGroup: String? = resolvedAccessGroup()
+    ) -> [String: Any] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassInternetPassword,
             kSecAttrServer as String: mistralServer,
             kSecAttrAccount as String: appName,
-            kSecReturnAttributes as String: kCFBooleanTrue as Any,
-            kSecMatchLimit as String: kSecMatchLimitOne,
             kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
             kSecAttrSynchronizable as String: synchronizable
         ]
 
-        var item: CFTypeRef?
-        return SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess
+        if let accessGroup {
+            query[kSecAttrAccessGroup as String] = accessGroup
+        }
+
+        return query
+    }
+
+    private static func internetPasswordQueryVariants(
+        synchronizable: Any
+    ) -> [[String: Any]] {
+        if let accessGroup = resolvedAccessGroup() {
+            return [
+                internetPasswordQuery(synchronizable: synchronizable, accessGroup: accessGroup),
+                internetPasswordQuery(synchronizable: synchronizable, accessGroup: nil)
+            ]
+        }
+        return [internetPasswordQuery(synchronizable: synchronizable, accessGroup: nil)]
+    }
+
+    private static func deleteInternetPassword(synchronizable: Any) {
+        for query in internetPasswordQueryVariants(synchronizable: synchronizable) {
+            SecItemDelete(query as CFDictionary)
+        }
+    }
+
+    private static func hasInternetPasswordEntry(synchronizable: Any) -> Bool {
+        for query in internetPasswordQueryVariants(synchronizable: synchronizable) {
+            var item: CFTypeRef?
+            var lookup = query
+            lookup[kSecReturnAttributes as String] = kCFBooleanTrue as Any
+            lookup[kSecMatchLimit as String] = kSecMatchLimitOne
+            if SecItemCopyMatching(lookup as CFDictionary, &item) == errSecSuccess {
+                return true
+            }
+        }
+        return false
     }
 
     private static func loadStoredMistralAPIKey(authenticationContext: LAContext) -> String? {
@@ -333,48 +368,100 @@ enum MistralKeychainStore {
         synchronizable: Any,
         authenticationContext: LAContext?
     ) -> String? {
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassInternetPassword,
-            kSecAttrServer as String: server,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: kCFBooleanTrue as Any,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
-            kSecAttrSynchronizable as String: synchronizable
-        ]
+        let queryBases: [[String: Any]] = {
+            var queries: [[String: Any]] = []
+            if let accessGroup = resolvedAccessGroup() {
+                queries.append([
+                    kSecClass as String: kSecClassInternetPassword,
+                    kSecAttrServer as String: server,
+                    kSecAttrAccount as String: account,
+                    kSecAttrAccessGroup as String: accessGroup,
+                    kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
+                    kSecAttrSynchronizable as String: synchronizable
+                ])
+            }
+            queries.append([
+                kSecClass as String: kSecClassInternetPassword,
+                kSecAttrServer as String: server,
+                kSecAttrAccount as String: account,
+                kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
+                kSecAttrSynchronizable as String: synchronizable
+            ])
+            queries.append([
+                kSecClass as String: kSecClassInternetPassword,
+                kSecAttrServer as String: server,
+                kSecAttrAccount as String: account,
+                kSecAttrSynchronizable as String: synchronizable
+            ])
+            return queries
+        }()
 
-        if let key = copyPasswordData(from: query, authenticationContext: authenticationContext) {
-            return key
+        for baseQuery in queryBases {
+            var query = baseQuery
+            query[kSecReturnData as String] = kCFBooleanTrue as Any
+            query[kSecMatchLimit as String] = kSecMatchLimitOne
+            if let key = copyPasswordData(from: query, authenticationContext: authenticationContext) {
+                return key
+            }
         }
 
-        query.removeValue(forKey: kSecUseDataProtectionKeychain as String)
-        query.removeValue(forKey: kSecAttrSynchronizable as String)
-        return copyPasswordData(from: query, authenticationContext: authenticationContext)
+        return nil
     }
 
     private static func loadBestMatchingInternetPassword(
         forServer server: String,
         authenticationContext: LAContext?
     ) -> String? {
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassInternetPassword,
-            kSecAttrServer as String: server,
-            kSecReturnData as String: kCFBooleanTrue as Any,
-            kSecReturnAttributes as String: kCFBooleanTrue as Any,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
-            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny
-        ]
+        let queryBases: [[String: Any]] = {
+            var queries: [[String: Any]] = []
+            if let accessGroup = resolvedAccessGroup() {
+                queries.append([
+                    kSecClass as String: kSecClassInternetPassword,
+                    kSecAttrServer as String: server,
+                    kSecAttrAccessGroup as String: accessGroup,
+                    kSecReturnData as String: kCFBooleanTrue as Any,
+                    kSecReturnAttributes as String: kCFBooleanTrue as Any,
+                    kSecMatchLimit as String: kSecMatchLimitAll,
+                    kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
+                    kSecAttrSynchronizable as String: kSecAttrSynchronizableAny
+                ])
+                queries.append([
+                    kSecClass as String: kSecClassInternetPassword,
+                    kSecAttrServer as String: server,
+                    kSecAttrAccessGroup as String: accessGroup,
+                    kSecReturnData as String: kCFBooleanTrue as Any,
+                    kSecReturnAttributes as String: kCFBooleanTrue as Any,
+                    kSecMatchLimit as String: kSecMatchLimitAll,
+                    kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
+                    kSecAttrSynchronizable as String: kCFBooleanFalse as Any
+                ])
+            }
+            queries.append([
+                kSecClass as String: kSecClassInternetPassword,
+                kSecAttrServer as String: server,
+                kSecReturnData as String: kCFBooleanTrue as Any,
+                kSecReturnAttributes as String: kCFBooleanTrue as Any,
+                kSecMatchLimit as String: kSecMatchLimitAll,
+                kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
+                kSecAttrSynchronizable as String: kSecAttrSynchronizableAny
+            ])
+            queries.append([
+                kSecClass as String: kSecClassInternetPassword,
+                kSecAttrServer as String: server,
+                kSecReturnData as String: kCFBooleanTrue as Any,
+                kSecReturnAttributes as String: kCFBooleanTrue as Any,
+                kSecMatchLimit as String: kSecMatchLimitAll,
+                kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
+                kSecAttrSynchronizable as String: kCFBooleanFalse as Any
+            ])
+            return queries
+        }()
 
-        if let items = copyMatchingItems(from: query, authenticationContext: authenticationContext),
-           let match = bestMatchingPassword(from: items) {
-            return match
-        }
-
-        query[kSecAttrSynchronizable as String] = kCFBooleanFalse as Any
-        if let items = copyMatchingItems(from: query, authenticationContext: authenticationContext),
-           let match = bestMatchingPassword(from: items) {
-            return match
+        for query in queryBases {
+            if let items = copyMatchingItems(from: query, authenticationContext: authenticationContext),
+               let match = bestMatchingPassword(from: items) {
+                return match
+            }
         }
 
         return nil

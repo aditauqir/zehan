@@ -274,7 +274,7 @@ final class BrainStore: ObservableObject {
 
         let panel = NSOpenPanel()
         panel.title = "Choose Where to Store Your Brain"
-        panel.message = "Select a folder. Zirn will create a visible .brain vault file in that folder."
+        panel.message = "Select an empty folder. Zirn will create a visible .brain vault file in that folder."
         panel.prompt = "Create Brain"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -312,7 +312,12 @@ final class BrainStore: ObservableObject {
                     isDirectory: false
                 )
                 guard findBrainFile(in: folderURL) == nil else {
-                    status = "That folder already contains a .brain vault file"
+                    let message = """
+                    This folder already contains a brain vault. \
+                    Choose a different folder, or create a new empty folder with no existing brain.
+                    """
+                    status = message
+                    showAlert(title: "Cannot Create Brain", message: message)
                     return
                 }
 
