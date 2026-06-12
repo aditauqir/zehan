@@ -4,10 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_PATH="${1:-$ROOT/build/Zirn.app}"
 DIST_DIR="$ROOT/dist"
-BACKGROUND="$ROOT/packaging/dmg-background.png"
-BACKGROUND_2X="$ROOT/packaging/dmg-background@2x.png"
+BACKGROUND="$ROOT/packaging/background.png"
+BACKGROUND_2X="$ROOT/packaging/background@2x.png"
 STAGING="$ROOT/build/dmg-staging"
-APPLESCRIPT="$ROOT/scripts/dmg-finder-layout.applescript"
+DS_STORE_SCRIPT="$ROOT/scripts/generate-dmg-ds-store.py"
 
 if [[ ! -d "$APP_PATH" ]]; then
   echo "Missing app bundle: $APP_PATH"
@@ -16,7 +16,13 @@ if [[ ! -d "$APP_PATH" ]]; then
 fi
 
 if [[ ! -f "$BACKGROUND" || ! -f "$BACKGROUND_2X" ]]; then
-  echo "Missing DMG backgrounds in packaging/ (dmg-background.png and dmg-background@2x.png)."
+  echo "Missing DMG backgrounds in packaging/ (background.png and background@2x.png)."
+  exit 1
+fi
+
+if ! python3 -c "from ds_store import DSStore; from mac_alias import Alias" 2>/dev/null; then
+  echo "Missing Python deps for DMG layout. Install with:"
+  echo "  python3 -m pip install ds-store mac-alias"
   exit 1
 fi
 
@@ -34,7 +40,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# User-provided background is 1024×768 (@2x) → 512×384 window.
+# background@2x is 1024×768 → 512×384 logical window.
 WINW=512
 WINH=384
 
@@ -62,7 +68,6 @@ hdiutil create -size "${DMG_MB}m" -type SPARSE -volname "Zirn" -fs HFS+ "${DIST_
 MOUNT_OUTPUT="$(hdiutil attach -readwrite -noverify -nobrowse -mountrandom /tmp "$RW_DMG")"
 DEV="$(echo "$MOUNT_OUTPUT" | awk '/^\/dev\/disk[0-9]+s[0-9]+/ && /Apple_HFS/ {print $1; exit}')"
 MOUNT_DIR="$(echo "$MOUNT_OUTPUT" | awk '/Apple_HFS/ {print $3; exit}')"
-VOLUME_NAME="$(basename "$MOUNT_DIR")"
 
 if [[ -z "$DEV" || -z "$MOUNT_DIR" || ! -d "$MOUNT_DIR" ]]; then
   echo "Failed to mount DMG for layout."
@@ -73,8 +78,8 @@ fi
 ditto --norsrc "$STAGING/" "$MOUNT_DIR/"
 
 mkdir -p "$MOUNT_DIR/.background"
-cp "$BACKGROUND" "$MOUNT_DIR/.background/dmg-background.png"
-cp "$BACKGROUND_2X" "$MOUNT_DIR/.background/dmg-background@2x.png"
+cp "$BACKGROUND" "$MOUNT_DIR/.background/background.png"
+cp "$BACKGROUND_2X" "$MOUNT_DIR/.background/background@2x.png"
 
 if [[ -f "$APP_PATH/Contents/Resources/AppIcon.icns" ]]; then
   cp "$APP_PATH/Contents/Resources/AppIcon.icns" "$MOUNT_DIR/.VolumeIcon.icns"
@@ -84,12 +89,29 @@ if [[ -f "$APP_PATH/Contents/Resources/AppIcon.icns" ]]; then
   fi
 fi
 
-sleep 2
-osascript "$APPLESCRIPT" "Zirn" "$WINX" "$WINY" "$WINW" "$WINH" "$MOUNT_DIR/.background/dmg-background.png"
+if command -v SetFile >/dev/null 2>&1; then
+  SetFile -a V "$MOUNT_DIR/.background"
+fi
+
+if command -v SetFile >/dev/null 2>&1; then
+  SetFile -a E "$MOUNT_DIR/Zirn.app"
+fi
+
+python3 "$DS_STORE_SCRIPT" "$MOUNT_DIR" \
+  --window-x "$WINX" \
+  --window-y "$WINY" \
+  --window-width "$WINW" \
+  --window-height "$WINH"
+
+if [[ ! -f "$MOUNT_DIR/.DS_Store" ]]; then
+  echo "Failed to write .DS_Store; DMG background will not appear."
+  exit 1
+fi
+echo "Saved Finder layout to .DS_Store"
 
 chmod -Rf go-w "$MOUNT_DIR" 2>/dev/null || true
 rm -rf "$MOUNT_DIR/.fseventsd" 2>/dev/null || true
-SetFile -a V "$MOUNT_DIR/.background" 2>/dev/null || true
+sync
 
 hdiutil detach "$DEV" >/dev/null
 DEV=""
