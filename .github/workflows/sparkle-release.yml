@@ -39,8 +39,8 @@ jobs:
         run: |
           chmod +x scripts/sparkle-release.sh
           if [[ -z "$SPARKLE_EDDSA_PRIVATE_KEY" ]]; then
-            echo "SPARKLE_EDDSA_PRIVATE_KEY secret is not configured. Skipping signed appcast update."
-            exit 0
+            echo "::error::SPARKLE_EDDSA_PRIVATE_KEY secret is not configured."
+            exit 1
           fi
           SPARKLE_TOOLS=/tmp scripts/sparkle-release.sh "${VERSION}"
 
@@ -53,6 +53,7 @@ jobs:
             dist/Zirn-${{ env.VERSION }}.dmg
             dist/Zirn-${{ env.VERSION }}.zip
           generate_release_notes: true
+          overwrite: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

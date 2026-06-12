@@ -33,8 +33,8 @@ scripts/sparkle-release.sh 1.0.0
 
 This produces:
 
-- `dist/Zirn-1.0.0.dmg` — drag-to-Applications installer for new users
-- `dist/Zirn-1.0.0.zip` — Sparkle OTA update package (signed via appcast)
+- `dist/Zirn-<version>.dmg` — drag-to-Applications installer for new users
+- `dist/Zirn-<version>.zip` — Sparkle OTA update package (signed via appcast)
 
 Upload **both** to GitHub Releases for `v1.0.0`, then update `Sparkle/appcast.xml` (or let `generate_appcast` rewrite it from the zip).
 

@@ -21,6 +21,14 @@ if [[ ! -d "$APP_PATH" ]]; then
   exit 1
 fi
 
+# Drop stale local release artifacts from prior builds.
+rm -f "$DIST_DIR/Zirn.dmg"
+find "$DIST_DIR" -maxdepth 1 -type f \( -name 'Zirn-*.dmg' -o -name 'Zirn-*.zip' -o -name 'Zirn-*.html' \) \
+  ! -name "Zirn-${VERSION}.dmg" \
+  ! -name "Zirn-${VERSION}.zip" \
+  ! -name "Zirn-${VERSION}.html" \
+  -delete 2>/dev/null || true
+
 if [[ ! -x "$SPARKLE_TOOLS/bin/sign_update" ]]; then
   echo "Downloading Sparkle release tools..."
   mkdir -p "$SPARKLE_TOOLS/sparkle-tools"
