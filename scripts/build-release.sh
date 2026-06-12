@@ -26,12 +26,17 @@ xcodebuild -project Zehan.xcodeproj \
   -derivedDataPath "$DERIVED_DATA" \
   -resolvePackageDependencies
 
-xcodebuild -project Zehan.xcodeproj \
-  -scheme Zehan \
-  -configuration Release \
-  -derivedDataPath "$DERIVED_DATA" \
-  clean build \
-  "${XCODE_FLAGS[@]}"
+BUILD_ARGS=(
+  -project Zehan.xcodeproj
+  -scheme Zehan
+  -configuration Release
+  -derivedDataPath "$DERIVED_DATA"
+  clean build
+)
+if ((${#XCODE_FLAGS[@]})); then
+  BUILD_ARGS+=("${XCODE_FLAGS[@]}")
+fi
+xcodebuild "${BUILD_ARGS[@]}"
 
 APP_BUNDLE="$DERIVED_DATA/Build/Products/Release/Zirn.app"
 if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
