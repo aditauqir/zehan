@@ -24,7 +24,12 @@ xcodebuild -project Zehan.xcodeproj \
   -scheme Zehan \
   -configuration Release \
   -derivedDataPath "$DERIVED_DATA" \
-  -resolvePackageDependencies \
+  -resolvePackageDependencies
+
+xcodebuild -project Zehan.xcodeproj \
+  -scheme Zehan \
+  -configuration Release \
+  -derivedDataPath "$DERIVED_DATA" \
   clean build \
   "${XCODE_FLAGS[@]}"
 
