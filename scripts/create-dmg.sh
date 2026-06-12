@@ -15,25 +15,40 @@ if [[ ! -d "$APP_PATH" ]]; then
   exit 1
 fi
 
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist")"
+DMG_NAME="Zirn-${VERSION}.dmg"
+DMG_PATH="$DIST_DIR/$DMG_NAME"
+
+rm -rf "$STAGING"
+mkdir -p "$STAGING" "$DIST_DIR"
+ditto --norsrc "$APP_PATH" "$STAGING/Zirn.app"
+ln -sf /Applications "$STAGING/Applications"
+rm -f "$DMG_PATH"
+
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  echo "CI build: creating a basic installer DMG (Finder background layout skipped)."
+  hdiutil create \
+    -volname "Zirn ${VERSION}" \
+    -srcfolder "$STAGING" \
+    -ov \
+    -format UDZO \
+    "$DMG_PATH" >/dev/null
+  rm -rf "$STAGING"
+  echo "Created: $DMG_PATH"
+  exit 0
+fi
+
 if [[ ! -f "$BACKGROUND" || ! -f "$BACKGROUND_2X" ]]; then
   echo "Missing DMG backgrounds in packaging/ (background.png and background@2x.png)."
   exit 1
 fi
 
 if ! python3 -c "from ds_store import DSStore; from mac_alias import Alias" 2>/dev/null; then
-  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
-    echo "Installing Python deps for DMG layout..."
-    python3 -m pip install ds-store mac-alias
-  else
-    echo "Missing Python deps for DMG layout. Install with:"
-    echo "  python3 -m pip install ds-store mac-alias"
-    exit 1
-  fi
+  echo "Missing Python deps for DMG layout. Install with:"
+  echo "  python3 -m pip install ds-store mac-alias"
+  exit 1
 fi
 
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist")"
-DMG_NAME="Zirn-${VERSION}.dmg"
-DMG_PATH="$DIST_DIR/$DMG_NAME"
 RW_DMG="$DIST_DIR/rw.${DMG_NAME}.sparseimage"
 DEV=""
 MOUNT_DIR=""
@@ -49,27 +64,16 @@ trap cleanup EXIT
 WINW=512
 WINH=384
 
-# Finder is unavailable on GitHub Actions runners; use a sensible default origin.
-if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
-  WINX=200
-  WINY=120
-else
-  WINX="$(osascript -e "tell application \"Finder\" to set s to bounds of window of desktop
+WINX="$(osascript -e "tell application \"Finder\" to set s to bounds of window of desktop
 set w to item 3 of s
 set h to item 4 of s
 return round ((w - ${WINW}) / 2)" 2>/dev/null | tr -d ',' || echo 200)"
-  WINY="$(osascript -e "tell application \"Finder\" to set s to bounds of window of desktop
+WINY="$(osascript -e "tell application \"Finder\" to set s to bounds of window of desktop
 set w to item 3 of s
 set h to item 4 of s
 return round ((h - ${WINH}) / 2)" 2>/dev/null | tr -d ',' || echo 120)"
-fi
 
-rm -rf "$STAGING"
-mkdir -p "$STAGING" "$DIST_DIR"
-ditto --norsrc "$APP_PATH" "$STAGING/Zirn.app"
-ln -sf /Applications "$STAGING/Applications"
-
-rm -f "$DMG_PATH" "$RW_DMG"
+rm -f "$RW_DMG"
 
 STAGING_MB="$(du -sm "$STAGING" | awk '{print $1}')"
 DMG_MB=$((STAGING_MB + 50))
