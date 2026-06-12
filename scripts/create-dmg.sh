@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_PATH="${1:-$ROOT/build/Zirn.app}"
 DIST_DIR="$ROOT/dist"
 BACKGROUND="$ROOT/packaging/dmg-background.png"
+BACKGROUND_2X="$ROOT/packaging/dmg-background@2x.png"
 STAGING="$ROOT/build/dmg-staging"
 APPLESCRIPT="$ROOT/scripts/dmg-finder-layout.applescript"
 
@@ -12,6 +13,12 @@ if [[ ! -d "$APP_PATH" ]]; then
   echo "Missing app bundle: $APP_PATH"
   echo "Run scripts/build-release.sh first."
   exit 1
+fi
+
+if [[ ! -f "$BACKGROUND" || ! -f "$BACKGROUND_2X" ]]; then
+  echo "Generating DMG background assets…"
+  chmod +x "$ROOT/scripts/generate-dmg-background.swift"
+  swift "$ROOT/scripts/generate-dmg-background.swift" "$ROOT"
 fi
 
 if [[ ! -f "$BACKGROUND" ]]; then
@@ -33,9 +40,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Background is 1536×1024 (@2x) → 768×512 logical window.
-WINW=768
-WINH=512
+# Background is 1320×800 (@2x) → 660×400 logical window.
+WINW=660
+WINH=400
 
 WINX="$(osascript -e "tell application \"Finder\" to set s to bounds of window of desktop
 set w to item 3 of s
@@ -73,6 +80,7 @@ ditto --norsrc "$STAGING/" "$MOUNT_DIR/"
 
 mkdir -p "$MOUNT_DIR/.background"
 cp "$BACKGROUND" "$MOUNT_DIR/.background/dmg-background.png"
+cp "$BACKGROUND_2X" "$MOUNT_DIR/.background/dmg-background@2x.png"
 
 if [[ -f "$APP_PATH/Contents/Resources/AppIcon.icns" ]]; then
   cp "$APP_PATH/Contents/Resources/AppIcon.icns" "$MOUNT_DIR/.VolumeIcon.icns"

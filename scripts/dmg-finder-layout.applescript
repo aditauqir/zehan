@@ -22,8 +22,8 @@ on run argv
 				set arrangement to not arranged
 				set background picture to POSIX file backgroundPOSIX
 			end tell
-			set position of item "Zirn.app" to {560, 280}
-			set position of item "Applications" to {180, 280}
+			set position of item "Zirn.app" to {440, 210}
+			set position of item "Applications" to {120, 210}
 			set the extension hidden of item "Zirn.app" to true
 			update without registering applications
 			delay 3
