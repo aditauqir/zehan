@@ -72,9 +72,22 @@ https://github.com/aditauqir/zehan/releases/latest/download/Zirn-1.0.1.dmg
 2. Drag **Zirn** into **Applications**.
 3. Open Zirn from Applications.
 
-If macOS blocks the app on first open, right-click Zirn → **Open** → **Open** again.
+### First launch — macOS security prompt
 
-For a website download button, link directly to the DMG URL above (or `/releases/latest/download/Zirn-1.0.1.dmg` after each release, update the version in the filename).
+macOS may say it cannot verify Zirn. That is expected without Apple notarization. Users only need to allow it **once**:
+
+**System Settings (recommended)**
+
+1. Try opening Zirn once (macOS blocks it).
+2. **System Settings → Privacy & Security**
+3. Scroll to **Security** → click **Open Anyway**
+4. Confirm **Open**
+
+**Or:** right-click Zirn in Applications → **Open** → **Open**
+
+Full copy for your website: [Sparkle/INSTALL.md](Sparkle/INSTALL.md)
+
+For a website download button, link directly to the DMG URL above (update the version in the filename after each release).
 
 Existing users receive updates through Sparkle (**Zirn → Check for Updates…**). The `.zip` on Releases is for OTA only; ship the **`.dmg`** for new installs.
 
