@@ -29,7 +29,7 @@ find "$DIST_DIR" -maxdepth 1 -type f \( -name 'Zirn-*.dmg' -o -name 'Zirn-*.zip'
   ! -name "Zirn-${VERSION}.html" \
   -delete 2>/dev/null || true
 
-if [[ ! -x "$SPARKLE_TOOLS/bin/sign_update" ]]; then
+if [[ ! -x "$SPARKLE_TOOLS/bin/generate_appcast" && ! -x "$SPARKLE_TOOLS/bin/sign_update" ]]; then
   echo "Downloading Sparkle release tools..."
   mkdir -p "$SPARKLE_TOOLS/sparkle-tools"
   curl -fsSL "https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/sparkle-2.6.4.tar.xz" \
@@ -53,52 +53,50 @@ ZIP_PATH="$APPCAST_DIR/Zirn-${VERSION}.zip"
 rm -f "$ZIP_PATH"
 ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
 
-SIGN_ARGS=("$ZIP_PATH")
-SPARKLE_KEY_FILE=""
-cleanup_sparkle_key() {
-  if [[ -n "$SPARKLE_KEY_FILE" && "$SPARKLE_KEY_FILE" == /tmp/sparkle-eddsa-* ]]; then
-    rm -f "$SPARKLE_KEY_FILE"
-  fi
-}
-trap cleanup_sparkle_key EXIT
-
-if [[ -n "${SPARKLE_EDDSA_PRIVATE_KEY:-}" ]]; then
-  if [[ -f "$SPARKLE_EDDSA_PRIVATE_KEY" ]]; then
-    SPARKLE_KEY_FILE="$SPARKLE_EDDSA_PRIVATE_KEY"
-  else
-    SPARKLE_KEY_FILE="$(mktemp /tmp/sparkle-eddsa-XXXXXX)"
-    printf '%s\n' "$SPARKLE_EDDSA_PRIVATE_KEY" > "$SPARKLE_KEY_FILE"
-  fi
-  SIGN_ARGS+=(-f "$SPARKLE_KEY_FILE")
-fi
-
-if [[ ${#SIGN_ARGS[@]} -eq 1 ]]; then
-  echo "Missing SPARKLE_EDDSA_PRIVATE_KEY — cannot sign update."
-  exit 1
-fi
-
-SIGNATURE="$("$SPARKLE_TOOLS/bin/sign_update" "${SIGN_ARGS[@]}")"
-FILE_SIZE="$(stat -f%z "$ZIP_PATH")"
-
 if [[ -f "$ROOT/Sparkle/appcast.xml" ]]; then
   cp "$ROOT/Sparkle/appcast.xml" "$APPCAST_DIR/appcast.xml"
 fi
 
-"$SPARKLE_TOOLS/bin/generate_appcast" "$APPCAST_DIR" \
-  --download-url-prefix "https://github.com/aditauqir/zehan/releases/download/v${VERSION}/" \
-  --embed-release-notes \
+GENERATE_ARGS=(
+  "$APPCAST_DIR"
+  --download-url-prefix "https://github.com/aditauqir/zehan/releases/download/v${VERSION}/"
+  --embed-release-notes
   --link "https://github.com/aditauqir/zehan"
+)
+
+run_generate_appcast() {
+  if ! "$SPARKLE_TOOLS/bin/generate_appcast" "${GENERATE_ARGS[@]}" "$@"; then
+    echo "generate_appcast failed."
+    echo "Check that SPARKLE_EDDSA_PRIVATE_KEY matches SUPublicEDKey in Zirn-Info.plist."
+    exit 1
+  fi
+}
+
+if [[ -n "${SPARKLE_EDDSA_PRIVATE_KEY:-}" ]]; then
+  if [[ -f "$SPARKLE_EDDSA_PRIVATE_KEY" ]]; then
+    run_generate_appcast --ed-key-file "$SPARKLE_EDDSA_PRIVATE_KEY"
+  else
+    # GitHub Actions stores the exported EdDSA key as secret text.
+    if ! printf '%s\n' "$SPARKLE_EDDSA_PRIVATE_KEY" | "$SPARKLE_TOOLS/bin/generate_appcast" "${GENERATE_ARGS[@]}" --ed-key-file -; then
+      echo "generate_appcast failed."
+      echo "Check that SPARKLE_EDDSA_PRIVATE_KEY matches SUPublicEDKey in Zirn-Info.plist."
+      exit 1
+    fi
+  fi
+else
+  echo "Missing SPARKLE_EDDSA_PRIVATE_KEY — cannot sign update."
+  exit 1
+fi
 
 cp "$APPCAST_DIR/appcast.xml" "$ROOT/Sparkle/appcast.xml"
-
-# Keep release artifacts at dist root for GitHub Releases upload.
 cp "$ZIP_PATH" "$DIST_DIR/Zirn-${VERSION}.zip"
+
+FILE_SIZE="$(stat -f%z "$ZIP_PATH")"
 
 echo "Release artifacts:"
 echo "  DMG: $DIST_DIR/Zirn-${VERSION}.dmg"
 echo "  ZIP: $DIST_DIR/Zirn-${VERSION}.zip"
 echo "  Appcast: $ROOT/Sparkle/appcast.xml"
-echo "EdDSA signature: $SIGNATURE"
 echo "File size: $FILE_SIZE"
 echo
 echo "Upload dist/Zirn-${VERSION}.dmg and dist/Zirn-${VERSION}.zip to GitHub Releases for v${VERSION}."
