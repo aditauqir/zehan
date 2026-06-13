@@ -39,11 +39,8 @@ fi
 xcodebuild "${BUILD_ARGS[@]}"
 
 APP_BUNDLE="$DERIVED_DATA/Build/Products/Release/Zirn.app"
-if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
-  echo "CI build: ad-hoc signing app for Sparkle packaging."
-  xattr -cr "$APP_BUNDLE"
-  codesign --force --deep --sign - "$APP_BUNDLE"
-fi
+chmod +x scripts/sign-release-app.sh
+scripts/sign-release-app.sh "$APP_BUNDLE"
 
 cp -R "$APP_BUNDLE" "$BUILD_DIR/Zirn.app"
 echo "Built: $BUILD_DIR/Zirn.app"

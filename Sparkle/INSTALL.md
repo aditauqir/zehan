@@ -1,43 +1,36 @@
 # Install Zirn (for your website)
 
-Copy this section to your download page. Zirn is not notarized yet, so macOS shows a one-time security prompt on first launch. This is normal for independent Mac apps.
+Zirn is not notarized yet. On **first launch only**, macOS shows a security prompt. After you allow it once, Zirn opens normally forever — including updates.
 
 ## Download
 
-[Download Zirn for Mac](https://github.com/aditauqir/zehan/releases/latest/download/Zirn-1.0.1.dmg)
+[Download Zirn for Mac](https://github.com/aditauqir/zehan/releases/latest/download/Zirn-1.0.3.dmg)
 
-Requires **macOS 26.5** or later.
+Requires **macOS 26.0** or later.
 
 ## Install
 
-1. Open **Zirn-1.0.1.dmg**.
+1. Open the **Zirn** DMG.
 2. Drag **Zirn** into **Applications**.
-3. Open **Zirn** from Applications (or Launchpad).
+3. **Important — first launch only:** do **not** double-click.
+   - Go to **Applications**
+   - **Right-click** (or Control-click) **Zirn**
+   - Choose **Open**
+   - Click **Open** in the dialog
+4. After that one-time step, open Zirn normally from Applications or Launchpad.
 
-## First launch — if macOS blocks the app
+## If macOS still blocks the app
 
-You may see: *“Apple could not verify Zirn is free of malware…”*  
-Zirn is safe — macOS just doesn’t recognize the developer yet. Use **one** of these:
-
-### Option A — System Settings (recommended)
-
-1. Try to open Zirn once (macOS will block it).
+1. Try opening Zirn once (macOS blocks it).
 2. Open **System Settings → Privacy & Security**.
-3. Scroll down to the **Security** section.
-4. Click **Open Anyway** next to the Zirn message.
-5. Confirm **Open** in the dialog.
+3. Scroll to **Security** → click **Open Anyway** next to the Zirn message.
+4. Confirm **Open**.
 
-### Option B — Right-click
-
-1. In **Applications**, **right-click** (or Control-click) **Zirn**.
-2. Choose **Open**.
-3. Click **Open** in the dialog (not Cancel).
-
-You only need to do this **once**. After that, Zirn opens normally.
+You only need to do this **once per Mac**.
 
 ## Updates
 
-After Zirn is installed, use **Zirn → Check for Updates…** in the menu bar for new versions.
+After Zirn is installed, use **Zirn → Check for Updates…** for new versions.
 
 ---
 
