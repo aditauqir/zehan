@@ -4,6 +4,22 @@
         <title>Zirn</title>
         <item>
             <title>1.0.3</title>
+            <pubDate>Sat, 13 Jun 2026 00:35:05 -0400</pubDate>
+            <link>https://github.com/aditauqir/zehan</link>
+            <sparkle:version>6</sparkle:version>
+            <sparkle:shortVersionString>1.0.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>Zirn 1.0.3 (RC)</h2>
+<ul>
+  <li>Fixed DMG install so Zirn opens after drag-to-Applications</li>
+  <li>Lowered minimum macOS requirement to 26.0</li>
+  <li>First launch: right-click Zirn → Open once; after that it opens normally</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.0.3/Zirn-1.0.3.zip" length="5628902" type="application/octet-stream" sparkle:edSignature="nx9eLFEgFHajWGihIDpn2O3mQw8+G4aRdXOanvAIyt6S09VonZI5mt1wH55d3hh523dTr8YKEE+k+dQ8hL9QCw=="/>
+        </item>
+        <item>
+            <title>1.0.3</title>
             <pubDate>Sat, 13 Jun 2026 00:18:04 -0400</pubDate>
             <link>https://github.com/aditauqir/zehan</link>
             <sparkle:version>5</sparkle:version>
