@@ -21,7 +21,8 @@ DMG_PATH="$DIST_DIR/$DMG_NAME"
 
 rm -rf "$STAGING"
 mkdir -p "$STAGING" "$DIST_DIR"
-ditto --norsrc "$APP_PATH" "$STAGING/Zirn.app"
+ditto --norsrc --noextattr "$APP_PATH" "$STAGING/Zirn.app"
+xattr -cr "$STAGING/Zirn.app"
 ln -sf /Applications "$STAGING/Applications"
 rm -f "$DMG_PATH"
 
@@ -90,7 +91,7 @@ if [[ -z "$DEV" || -z "$MOUNT_DIR" || ! -d "$MOUNT_DIR" ]]; then
   exit 1
 fi
 
-ditto --norsrc "$STAGING/" "$MOUNT_DIR/"
+ditto --norsrc --noextattr "$STAGING/" "$MOUNT_DIR/"
 
 mkdir -p "$MOUNT_DIR/.background"
 cp "$BACKGROUND" "$MOUNT_DIR/.background/background.png"
@@ -108,10 +109,6 @@ if command -v SetFile >/dev/null 2>&1; then
   SetFile -a V "$MOUNT_DIR/.background"
 fi
 
-if command -v SetFile >/dev/null 2>&1; then
-  SetFile -a E "$MOUNT_DIR/Zirn.app"
-fi
-
 python3 "$DS_STORE_SCRIPT" "$MOUNT_DIR" \
   --window-x "$WINX" \
   --window-y "$WINY" \
@@ -126,6 +123,15 @@ echo "Saved Finder layout to .DS_Store"
 
 chmod -Rf go-w "$MOUNT_DIR" 2>/dev/null || true
 rm -rf "$MOUNT_DIR/.fseventsd" 2>/dev/null || true
+
+# Finder layout (SetFile, .DS_Store) can add detritus that breaks code signing.
+xattr -cr "$MOUNT_DIR/Zirn.app"
+if ! codesign --verify --deep --strict "$MOUNT_DIR/Zirn.app" 2>/dev/null; then
+  echo "DMG app failed code signature verification after layout."
+  codesign --verify --deep --strict --verbose=4 "$MOUNT_DIR/Zirn.app" 2>&1 || true
+  exit 1
+fi
+
 sync
 
 hdiutil detach "$DEV" >/dev/null

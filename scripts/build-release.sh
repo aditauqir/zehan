@@ -42,5 +42,7 @@ APP_BUNDLE="$DERIVED_DATA/Build/Products/Release/Zirn.app"
 chmod +x scripts/sign-release-app.sh
 scripts/sign-release-app.sh "$APP_BUNDLE"
 
-cp -R "$APP_BUNDLE" "$BUILD_DIR/Zirn.app"
+rm -rf "$BUILD_DIR/Zirn.app"
+ditto --norsrc --noextattr "$APP_BUNDLE" "$BUILD_DIR/Zirn.app"
+xattr -cr "$BUILD_DIR/Zirn.app"
 echo "Built: $BUILD_DIR/Zirn.app"
