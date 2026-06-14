@@ -518,6 +518,7 @@ private struct WorkspaceView: View {
                                 isEditing: $isEditingMarkdown,
                                 isReadOnly: isReadingMode,
                                 editorBottomInset: editorInputAvoidanceInset,
+                                previewBottomInset: renderedPageInputAvoidanceInset,
                                 searchHighlight: store.activeSearchHighlight,
                                 noteTitles: store.notes.map(\.title),
                                 openLinkedNote: { store.openLinkedNote(named: $0) },
@@ -669,6 +670,11 @@ private struct WorkspaceView: View {
     private var editorInputAvoidanceInset: CGFloat {
         guard isEditingMarkdown, !isReadingMode, !store.isViewingGeneratedPage else { return 0 }
         return promptPillHeight + 92
+    }
+
+    private var renderedPageInputAvoidanceInset: CGFloat {
+        guard !isReadingMode, !store.isViewingGeneratedPage else { return 0 }
+        return promptPillHeight * 1.09
     }
 
     private func handleDocumentDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -3502,6 +3508,7 @@ private struct MarkdownEditingSurface: View {
     @Binding var isEditing: Bool
     let isReadOnly: Bool
     let editorBottomInset: CGFloat
+    let previewBottomInset: CGFloat
     let searchHighlight: SearchHighlight?
     let noteTitles: [String]
     let openLinkedNote: (String) -> Void
@@ -3624,7 +3631,7 @@ private struct MarkdownEditingSurface: View {
                 )
                     .padding(.horizontal, 26)
                     .padding(.top, 2)
-                    .padding(.bottom, 24)
+                    .padding(.bottom, 24 + previewBottomInset)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .onChange(of: searchHighlight) { _, highlight in
@@ -3890,6 +3897,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             if let textView = notification.object as? NSTextView {
+                clampDocumentTitleSelection(in: textView)
                 publishSelection(from: textView)
                 updateTypingAttributesForCurrentLine(in: textView)
             }
@@ -3986,6 +3994,14 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             shouldChangeTextIn affectedCharRange: NSRange,
             replacementString: String?
         ) -> Bool {
+            if !shouldAllowDocumentTitleMarkerChange(
+                in: textView,
+                affectedCharRange: affectedCharRange,
+                replacementString: replacementString
+            ) {
+                return false
+            }
+
             guard !activeInlineCommands.isEmpty,
                   affectedCharRange.length == 0,
                   let replacementString,
@@ -4039,6 +4055,84 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             applyMarkdownStyling()
             updateSuggestionAnchor()
             return false
+        }
+
+        private static let documentTitleMarker = "# "
+
+        private static func documentTitleHeadingMarkerRange(in rawText: NSString) -> NSRange? {
+            guard rawText.length > 0 else { return nil }
+
+            var markerRange: NSRange?
+            rawText.enumerateSubstrings(
+                in: NSRange(location: 0, length: rawText.length),
+                options: [.byLines, .substringNotRequired]
+            ) { _, lineRange, _, stop in
+                let rawLine = rawText.substring(with: lineRange)
+                guard headingLevel(in: rawLine) == 1 else { return }
+
+                let leadingWhitespace = rawLine.prefix { $0 == " " || $0 == "\t" }.count
+                markerRange = NSRange(
+                    location: lineRange.location + leadingWhitespace,
+                    length: (documentTitleMarker as NSString).length
+                )
+                stop.pointee = true
+            }
+            return markerRange
+        }
+
+        private func shouldAllowDocumentTitleMarkerChange(
+            in textView: NSTextView,
+            affectedCharRange: NSRange,
+            replacementString: String?
+        ) -> Bool {
+            let rawText = textView.string as NSString
+            guard let markerRange = Self.documentTitleHeadingMarkerRange(in: rawText) else { return true }
+
+            let replacement = replacementString ?? ""
+
+            if NSIntersectionRange(affectedCharRange, markerRange).length > 0 {
+                blockDocumentTitleMarkerEdit(in: textView, markerRange: markerRange)
+                return false
+            }
+
+            if affectedCharRange.length == 0,
+               affectedCharRange.location < markerRange.upperBound,
+               !replacement.isEmpty {
+                blockDocumentTitleMarkerEdit(in: textView, markerRange: markerRange)
+                return false
+            }
+
+            return true
+        }
+
+        private func blockDocumentTitleMarkerEdit(in textView: NSTextView, markerRange: NSRange) {
+            let caret = NSRange(location: markerRange.upperBound, length: 0)
+            textView.setSelectedRange(caret)
+            selectionRange.wrappedValue = caret
+        }
+
+        private func clampDocumentTitleSelection(in textView: NSTextView) {
+            let rawText = textView.string as NSString
+            guard let markerRange = Self.documentTitleHeadingMarkerRange(in: rawText) else { return }
+
+            let selected = textView.selectedRange()
+            guard selected.location <= rawText.length else { return }
+
+            if selected.length == 0 {
+                if selected.location > markerRange.location, selected.location < markerRange.upperBound {
+                    blockDocumentTitleMarkerEdit(in: textView, markerRange: markerRange)
+                }
+                return
+            }
+
+            if NSIntersectionRange(selected, markerRange).length > 0 {
+                let clamped = NSRange(
+                    location: markerRange.upperBound,
+                    length: max(0, selected.upperBound - markerRange.upperBound)
+                )
+                textView.setSelectedRange(clamped)
+                selectionRange.wrappedValue = clamped
+            }
         }
 
         private var activeCommandsInRenderOrder: [MarkdownInlineCommand] {

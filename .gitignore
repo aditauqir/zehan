@@ -18,6 +18,10 @@ playground.xcworkspace
 .build/
 dist/sparkle/
 
+# Zirn local vault metadata
+.brain
+*.brain
+
 # Carthage
 Carthage/Build/
 
