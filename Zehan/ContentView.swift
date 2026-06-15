@@ -4657,7 +4657,9 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             else { return }
 
             textStorage.addAttributes([
-                .foregroundColor: NSColor.clear
+                .foregroundColor: NSColor.clear,
+                .font: NSFont.systemFont(ofSize: 0.1, weight: .regular),
+                .kern: 0
             ], range: range)
         }
 
