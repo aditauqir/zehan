@@ -4,9 +4,9 @@
         <title>Zirn</title>
         <item>
             <title>1.1</title>
-            <pubDate>Mon, 15 Jun 2026 19:10:02 -0400</pubDate>
+            <pubDate>Mon, 15 Jun 2026 19:16:55 -0400</pubDate>
             <link>https://github.com/aditauqir/zehan</link>
-            <sparkle:version>7</sparkle:version>
+            <sparkle:version>8</sparkle:version>
             <sparkle:shortVersionString>1.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <description><![CDATA[<h2>Zirn v1.1 (Mizan)</h2>
@@ -17,6 +17,7 @@
   <li>Added release-note generation from <code>PATCH_NOTES.md</code> so OTA popup copy and GitHub release notes can use the same versioned source of truth.</li>
   <li>Added automatic reopening of the previous workspace on launch, plus a File menu Go to Home shortcut that returns to the greeting start page.</li>
   <li>Added centered Personalize and Configure buttons under the welcome greeting for faster profile and model setup.</li>
+  <li>Changed the About Zirn panel to show <code>v1.1 (Mizan)</code> instead of the internal Sparkle build number.</li>
   <li>Fixed release delivery safety by requiring Developer ID signing for public builds and adding notarization support before Sparkle/GitHub distribution.</li>
   <li>Changed the app version to <code>1.1</code>.</li>
   <li>Improved rendered page spacing near the floating input pill so end-of-page text is not covered.</li>
@@ -24,7 +25,7 @@
   <li>Notes: OTA publishing, appcast updates, and release uploads should still only happen after an explicit ship/release instruction.</li>
 </ul>
 ]]></description>
-            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.1/Zirn-1.1.zip" length="5658860" type="application/octet-stream" sparkle:edSignature="pCuYhwkU19Rj6fleGPglQaceXB2xPmS8rMKCJ3lJdk9PqLd2EZecnLdVjB4ZuRxhvyGECYfT9yEUfpaZKJVNDQ=="/>
+            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.1/Zirn-1.1.zip" length="5662855" type="application/octet-stream" sparkle:edSignature="/x6/hki5n5JdTiGJtBYmG3grQ64yx3vEEd7oAZ6xL/EnsiW1oOUwq94mJR8e/UwEw4Zfdff+6ZYpB3TpmyOhAw=="/>
         </item>
         <item>
             <title>1.0.3</title>
@@ -41,22 +42,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.0.3/Zirn-1.0.3.zip" length="5628902" type="application/octet-stream" sparkle:edSignature="nx9eLFEgFHajWGihIDpn2O3mQw8+G4aRdXOanvAIyt6S09VonZI5mt1wH55d3hh523dTr8YKEE+k+dQ8hL9QCw=="/>
-        </item>
-        <item>
-            <title>1.0.3</title>
-            <pubDate>Sat, 13 Jun 2026 00:18:04 -0400</pubDate>
-            <link>https://github.com/aditauqir/zehan</link>
-            <sparkle:version>5</sparkle:version>
-            <sparkle:shortVersionString>1.0.3</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <description><![CDATA[<h2>Zirn 1.0.3 (RC)</h2>
-<ul>
-  <li>Lowered minimum macOS requirement to 26.0</li>
-  <li>Improved release signing for distribution outside the App Store</li>
-  <li>First launch: right-click Zirn → Open once; after that it opens normally</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.0.3/Zirn-1.0.3.zip" length="5686705" type="application/octet-stream" sparkle:edSignature="3ARXYBks+Zwfg6caNRLQ2F2mejSRQYYFN2lMmEeZAKiLyDAWD59k4F3J2MBNHz+/aozZpq+f/DgtXSSqY7T0AQ=="/>
         </item>
         <item>
             <title>1.0.2</title>
