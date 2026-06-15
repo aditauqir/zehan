@@ -8,6 +8,7 @@
 - Added release-note generation from `PATCH_NOTES.md` so OTA popup copy and GitHub release notes can use the same versioned source of truth.
 - Added automatic reopening of the previous workspace on launch, plus a File menu Go to Home shortcut that returns to the greeting start page.
 - Added centered Personalize and Configure buttons under the welcome greeting for faster profile and model setup.
+- Changed the About Zirn panel to show `v1.1 (Mizan)` instead of the internal Sparkle build number.
 - Fixed release delivery safety by requiring Developer ID signing for public builds and adding notarization support before Sparkle/GitHub distribution.
 - Changed the app version to `1.1`.
 - Improved rendered page spacing near the floating input pill so end-of-page text is not covered.

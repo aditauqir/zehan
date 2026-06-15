@@ -6,6 +6,7 @@
 //
 
 import CoreText
+import AppKit
 import SwiftUI
 
 @main
@@ -32,7 +33,16 @@ struct ZirnApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
-            CommandGroup(after: .appInfo) {
+            CommandGroup(replacing: .appInfo) {
+                Button("About Zirn") {
+                    NSApp.orderFrontStandardAboutPanel(
+                        options: [
+                            .applicationName: "Zirn",
+                            .applicationVersion: ZirnReleaseInfo.displayVersion,
+                        ]
+                    )
+                }
+
                 Button("Check for Updates…") {
                     ZirnSparkleController.shared.checkForUpdates()
                 }
@@ -165,5 +175,15 @@ struct ZirnApp: App {
                 .keyboardShortcut("/", modifiers: [.command, .shift])
             }
         }
+    }
+}
+
+private enum ZirnReleaseInfo {
+    static let codename = "Mizan"
+
+    static var displayVersion: String {
+        let version = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+            ?? "1.1"
+        return "v\(version) (\(codename))"
     }
 }
