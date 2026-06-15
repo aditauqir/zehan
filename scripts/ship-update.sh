@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 chmod +x scripts/build-release.sh scripts/create-dmg.sh scripts/sparkle-release.sh
+chmod +x scripts/notarize-release.sh
 
 echo "Building signed Release app…"
 scripts/build-release.sh
@@ -12,8 +13,21 @@ scripts/build-release.sh
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/Zirn.app/Contents/Info.plist)"
 BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/Zirn.app/Contents/Info.plist)"
 
+if [[ "${SKIP_NOTARIZATION:-0}" != "1" ]]; then
+  echo "Notarizing Release app…"
+  scripts/notarize-release.sh build/Zirn.app
+else
+  echo "Skipping notarization because SKIP_NOTARIZATION=1 (not for public downloads)."
+fi
+
 echo "Packaging Zirn ${VERSION} (${BUILD})…"
 scripts/create-dmg.sh build/Zirn.app
+
+if [[ "${SKIP_NOTARIZATION:-0}" != "1" ]]; then
+  echo "Notarizing installer DMG…"
+  scripts/notarize-release.sh "dist/Zirn-${VERSION}.dmg"
+fi
+
 scripts/sparkle-release.sh "${VERSION}"
 
 echo

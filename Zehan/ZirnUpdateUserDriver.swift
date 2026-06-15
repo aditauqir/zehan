@@ -30,10 +30,13 @@ final class ZirnUpdateUserDriver: NSObject, SPUUserDriver {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "New update for Zirn \(appcastItem.displayVersionString) available."
-        alert.informativeText = "Want to update?"
+        alert.informativeText = "Review what changed, then choose whether to install it now."
+        if let releaseNotesView = releaseNotesAccessoryView(for: appcastItem.itemDescription) {
+            alert.accessoryView = releaseNotesView
+        }
         alert.addButton(withTitle: "Update")
         alert.addButton(withTitle: "Don't Update")
-        alert.addButton(withTitle: "Skip This Update")
+        alert.addButton(withTitle: "Skip This Version")
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
@@ -119,5 +122,81 @@ final class ZirnUpdateUserDriver: NSObject, SPUUserDriver {
 
     func showUpdateInFocus() {
         standardDriver.showUpdateInFocus()
+    }
+
+    private func releaseNotesAccessoryView(for html: String?) -> NSView? {
+        guard let html,
+              !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+
+        let container = NSStackView()
+        container.orientation = .vertical
+        container.alignment = .leading
+        container.spacing = 8
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = NSTextField(labelWithString: "What's changed")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.textColor = .labelColor
+
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = .textBackgroundColor.withAlphaComponent(0.72)
+        scrollView.borderType = .bezelBorder
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 10, height: 10)
+        textView.autoresizingMask = [.width]
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
+
+        if let attributed = attributedReleaseNotes(from: html) {
+            textView.textStorage?.setAttributedString(attributed)
+        } else {
+            textView.string = html
+        }
+
+        scrollView.documentView = textView
+        container.addArrangedSubview(title)
+        container.addArrangedSubview(scrollView)
+
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: 420),
+            scrollView.widthAnchor.constraint(equalTo: container.widthAnchor),
+            scrollView.heightAnchor.constraint(equalToConstant: 190),
+        ])
+
+        return container
+    }
+
+    private func attributedReleaseNotes(from html: String) -> NSAttributedString? {
+        guard let data = html.data(using: .utf8),
+              let attributed = try? NSMutableAttributedString(
+                data: data,
+                options: [
+                    .documentType: NSAttributedString.DocumentType.html,
+                    .characterEncoding: String.Encoding.utf8.rawValue,
+                ],
+                documentAttributes: nil
+              )
+        else { return nil }
+
+        let fullRange = NSRange(location: 0, length: attributed.length)
+        attributed.addAttributes(
+            [
+                .foregroundColor: NSColor.labelColor,
+                .font: NSFont.systemFont(ofSize: 12),
+            ],
+            range: fullRange
+        )
+        return attributed
     }
 }

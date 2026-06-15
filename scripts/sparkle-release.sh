@@ -43,6 +43,14 @@ rm -rf "$APPCAST_DIR"/*
 cp "$ROOT/Sparkle/release-notes/${VERSION}.html" "$APPCAST_DIR/" 2>/dev/null || true
 cp "$ROOT/dist/Zirn-${VERSION}.html" "$APPCAST_DIR/" 2>/dev/null || true
 if [[ ! -f "$APPCAST_DIR/Zirn-${VERSION}.html" ]]; then
+  if [[ -f "$ROOT/PATCH_NOTES.md" ]]; then
+    python3 "$ROOT/scripts/patch-notes-release-html.py" \
+      "$VERSION" \
+      --patch-notes "$ROOT/PATCH_NOTES.md" \
+      --output "$APPCAST_DIR/Zirn-${VERSION}.html" || true
+  fi
+fi
+if [[ ! -f "$APPCAST_DIR/Zirn-${VERSION}.html" ]]; then
   cat > "$APPCAST_DIR/Zirn-${VERSION}.html" <<EOF
 <h2>Zirn ${VERSION}</h2>
 <ul><li>Update for Zirn ${VERSION}</li></ul>

@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_PATH="${1:-$ROOT/build/Zirn.app}"
 ENTITLEMENTS="$ROOT/Zehan/Zirn.adhoc.entitlements"
-SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+SIGN_IDENTITY="${SIGN_IDENTITY:-}"
+ALLOW_ADHOC_RELEASE="${ALLOW_ADHOC_RELEASE:-0}"
 
 if [[ ! -d "$APP_PATH" ]]; then
   echo "Missing app bundle: $APP_PATH"
@@ -22,7 +23,12 @@ sign_release_app() {
 
   strip_release_metadata
 
-  # Ad-hoc signing cannot use hardened runtime; nested Sparkle must match the main binary.
+  local signing_args=(--force --sign "$identity")
+  if [[ "$identity" != "-" ]]; then
+    signing_args+=(--timestamp --options runtime)
+  fi
+
+  # Nested Sparkle code must be signed consistently with the main binary.
   local sparkle_b="$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B"
   if [[ -d "$sparkle_b" ]]; then
     for bin in \
@@ -33,15 +39,15 @@ sign_release_app() {
       "$sparkle_b/Sparkle"
     do
       if [[ -f "$bin" ]]; then
-        codesign --force --sign "$identity" "$bin"
+        codesign "${signing_args[@]}" "$bin"
       fi
     done
-    codesign --force --sign "$identity" "$sparkle_b/Updater.app"
-    codesign --force --sign "$identity" "$sparkle_b"
-    codesign --force --sign "$identity" "$APP_PATH/Contents/Frameworks/Sparkle.framework"
+    codesign "${signing_args[@]}" "$sparkle_b/Updater.app"
+    codesign "${signing_args[@]}" "$sparkle_b"
+    codesign "${signing_args[@]}" "$APP_PATH/Contents/Frameworks/Sparkle.framework"
   fi
 
-  codesign --force --sign "$identity" \
+  codesign "${signing_args[@]}" \
     --entitlements "$ENTITLEMENTS" \
     "$APP_PATH"
 
@@ -56,16 +62,47 @@ sign_release_app() {
   echo "Signed: $APP_PATH"
 }
 
-if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
-  echo "CI build: ad-hoc signing app for Sparkle packaging."
-  strip_release_metadata
-  codesign --force --deep --sign - "$APP_PATH"
-  strip_release_metadata
-  codesign --verify --deep --strict "$APP_PATH"
-  exit 0
+find_developer_id_identity() {
+  security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n 's/.*"\(Developer ID Application:.*\)".*/\1/p' \
+    | head -n 1
+}
+
+resolve_sign_identity() {
+  if [[ -n "$SIGN_IDENTITY" ]]; then
+    echo "$SIGN_IDENTITY"
+    return
+  fi
+
+  local developer_id
+  developer_id="$(find_developer_id_identity)"
+  if [[ -n "$developer_id" ]]; then
+    echo "$developer_id"
+    return
+  fi
+
+  if [[ "$ALLOW_ADHOC_RELEASE" == "1" ]]; then
+    echo "-"
+    return
+  fi
+
+  cat >&2 <<'EOF'
+Missing Developer ID Application signing identity.
+
+Install a "Developer ID Application" certificate or set SIGN_IDENTITY to one.
+Set ALLOW_ADHOC_RELEASE=1 only for private local testing; ad-hoc builds trigger
+Gatekeeper's "Apple could not verify Zirn is free of malware" warning.
+EOF
+  exit 1
+}
+
+RESOLVED_IDENTITY="$(resolve_sign_identity)"
+if [[ "$RESOLVED_IDENTITY" == "-" ]]; then
+  echo "Release signing: ad-hoc (private testing only; not for public downloads)."
+else
+  echo "Release signing: $RESOLVED_IDENTITY"
 fi
 
-echo "Release signing: ad-hoc (right-click → Open once on first launch)."
-sign_release_app "$SIGN_IDENTITY"
+sign_release_app "$RESOLVED_IDENTITY"
 
 spctl -a -t exec -vv "$APP_PATH" 2>&1 || true

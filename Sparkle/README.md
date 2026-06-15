@@ -22,6 +22,33 @@ Then:
 2. Commit and push `Sparkle/appcast.xml` to `main`.
 
 Or say **"deploy it"** in Cursor — the `deploy-it` skill runs this workflow.
+The script signs with a **Developer ID Application** certificate and notarizes
+both `build/Zirn.app` and the installer DMG before publishing artifacts. Set
+`SKIP_NOTARIZATION=1` only for private local testing.
+
+### Notarization credentials
+
+Install a Developer ID Application certificate locally, then configure one of:
+
+```bash
+NOTARYTOOL_PROFILE=zirn-notary
+```
+
+or:
+
+```bash
+APPLE_ID=you@example.com
+APP_SPECIFIC_PASSWORD=xxxx-xxxx-xxxx-xxxx
+APPLE_TEAM_ID=L22992699P
+```
+
+or App Store Connect API key credentials:
+
+```bash
+APP_STORE_CONNECT_KEY_PATH=/path/to/AuthKey_XXXX.p8
+APP_STORE_CONNECT_KEY_ID=XXXX
+APP_STORE_CONNECT_ISSUER_ID=XXXX
+```
 
 ### Website download link
 
@@ -58,9 +85,9 @@ curl -fsSL "https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/s
 When an update is found, Zirn shows:
 
 > **New update for Zirn vX.X.X available.**  
-> Want to update?
+> Review what changed, then choose whether to install it now.
 
-Buttons: **Update**, **Don't Update**, **Skip This Update**
+Buttons: **Update**, **Don't Update**, **Skip This Version**
 
 After the app relaunches, Zirn shows a **Successfully updated** window with the version and changelog from the appcast.
 
@@ -81,4 +108,4 @@ Example: `Sparkle/release-notes/1.0.2.html`
 </ul>
 ```
 
-`scripts/sparkle-release.sh` embeds this HTML into `Sparkle/appcast.xml`. Users see it after updating.
+`scripts/sparkle-release.sh` embeds this HTML into `Sparkle/appcast.xml`. If no version-specific HTML exists, it generates release-note HTML from `PATCH_NOTES.md`. Users see it before choosing to update and after a successful update.

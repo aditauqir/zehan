@@ -93,7 +93,7 @@ final class BrainStore: ObservableObject {
     private var ollamaURL = BrainStore.defaultOllamaURL
     private var autosaveTask: Task<Void, Never>?
     private var homeCompilationTask: Task<Void, Never>?
-    private var lastHomeSourceTextForSimilarityCheck: String?
+    private var lastHomeSourceDiceTokensForSimilarityCheck: [String]?
     private var activeHomeGenerationID: UUID?
     private var activeHighlightGenerationID: UUID?
     private var assistantConversationMemory = LangChainConversationMemory()
@@ -125,8 +125,8 @@ final class BrainStore: ObservableObject {
     private static let helpDeskRelevantBlockLimit = 10
     private static let helpDeskHistoryMessageLimit = 8
     private static let semanticSearchMinimumSimilarity = 0.22
-    // Cosine similarity cutoff for skipping Mistral home regeneration; raise to save tokens, lower to refresh more often.
-    private static let homePageUpdateSkipSimilarityThreshold = 0.92
+    // Dice-Sorensen cutoff for skipping Home regeneration; raise to refresh more often, lower to save more tokens.
+    private static let homePageDiceSimilaritySkipThreshold = 0.94
     private static let estimatedCharactersPerToken = 4
     private static let mistralOCRModel = "mistral-ocr-latest"
 
@@ -407,7 +407,7 @@ final class BrainStore: ObservableObject {
         autosaveTask = nil
         homeCompilationTask?.cancel()
         homeCompilationTask = nil
-        lastHomeSourceTextForSimilarityCheck = nil
+        lastHomeSourceDiceTokensForSimilarityCheck = nil
         needsHomeRegenerationAfterCurrentCompile = false
         pendingAssistantInsertion = nil
         pendingAssistantPreview = nil
@@ -1068,7 +1068,8 @@ final class BrainStore: ObservableObject {
                     vaultName: activeBrain.name,
                     sourceNotes: sourceNotes,
                     modelTitle: "Local live summary",
-                    sourceFingerprint: sourceFingerprint
+                    sourceFingerprint: sourceFingerprint,
+                    sourceDiceTokens: homeSourceDiceTokens(for: sourceNotes)
                 )
                 isGeneratingHomePage = false
                 status = "Home cleared"
@@ -1076,9 +1077,9 @@ final class BrainStore: ObservableObject {
             }
 
             let sourceFingerprint = homeSourceFingerprint(for: sourceNotes)
-            let currentSourceText = homeSourceText(for: sourceNotes)
+            let currentSourceDiceTokens = homeSourceDiceTokens(for: sourceNotes)
             if !force, latestHomeSummary?.sourceFingerprint == sourceFingerprint {
-                lastHomeSourceTextForSimilarityCheck = currentSourceText
+                lastHomeSourceDiceTokensForSimilarityCheck = currentSourceDiceTokens
                 if isShowingHomePage {
                     title = "Home"
                     content = homeMarkdown
@@ -1089,17 +1090,20 @@ final class BrainStore: ObservableObject {
             }
 
             if !force,
-               let previousSourceText = lastHomeSourceTextForSimilarityCheck,
-               let similarity = homeSourceTextSimilarity(previousSourceText, currentSourceText),
-               similarity >= Self.homePageUpdateSkipSimilarityThreshold {
-                refreshHomeSummarySourceFingerprint(sourceFingerprint)
-                lastHomeSourceTextForSimilarityCheck = currentSourceText
+               let previousSourceDiceTokens = latestHomeSummary?.sourceDiceTokens ?? lastHomeSourceDiceTokensForSimilarityCheck,
+               let similarity = homeSourceDiceSimilarity(previousSourceDiceTokens, currentSourceDiceTokens),
+               similarity >= Self.homePageDiceSimilaritySkipThreshold {
+                refreshHomeSummarySourceSignature(
+                    sourceFingerprint,
+                    sourceDiceTokens: currentSourceDiceTokens
+                )
+                lastHomeSourceDiceTokensForSimilarityCheck = currentSourceDiceTokens
                 if isShowingHomePage {
                     title = "Home"
                     content = homeMarkdown
                 }
                 isGeneratingHomePage = false
-                status = "Home is up to date (source similarity \(Int(similarity * 100))%)"
+                status = "Home is up to date (Dice similarity \(Int(similarity * 100))%)"
                 return
             }
 
@@ -1109,7 +1113,8 @@ final class BrainStore: ObservableObject {
                 vaultName: activeBrain.name,
                 sourceNotes: sourceNotes,
                 modelTitle: "Local live summary",
-                sourceFingerprint: sourceFingerprint
+                sourceFingerprint: sourceFingerprint,
+                sourceDiceTokens: currentSourceDiceTokens
             )
             isCompilingHighlightSummary = true
             status = "\(model.title) is generating Home page"
@@ -1121,6 +1126,7 @@ final class BrainStore: ObservableObject {
                     vaultName: activeBrain.name,
                     sourceNotes: sourceNotes,
                     sourceFingerprint: sourceFingerprint,
+                    sourceDiceTokens: currentSourceDiceTokens,
                     model: model,
                     generationID: generationID
                 )
@@ -1150,7 +1156,8 @@ final class BrainStore: ObservableObject {
                     vaultName: activeBrain.name,
                     sourceNotes: sourceNotes,
                     modelTitle: "Local live summary",
-                    sourceFingerprint: sourceFingerprint
+                    sourceFingerprint: sourceFingerprint,
+                    sourceDiceTokens: homeSourceDiceTokens(for: sourceNotes)
                 )
                 content = homeMarkdown
                 isGeneratingHomePage = false
@@ -1159,13 +1166,15 @@ final class BrainStore: ObservableObject {
             }
 
             let model = selectedHighlightSummaryModel
+            let sourceDiceTokens = homeSourceDiceTokens(for: sourceNotes)
             let generationID = UUID()
             activeHomeGenerationID = generationID
             persistImmediateHomeSummary(
                 vaultName: activeBrain.name,
                 sourceNotes: sourceNotes,
                 modelTitle: "Local live summary",
-                sourceFingerprint: sourceFingerprint
+                sourceFingerprint: sourceFingerprint,
+                sourceDiceTokens: sourceDiceTokens
             )
             content = homeMarkdown
             isCompilingHighlightSummary = true
@@ -1177,6 +1186,7 @@ final class BrainStore: ObservableObject {
                     vaultName: activeBrain.name,
                     sourceNotes: sourceNotes,
                     sourceFingerprint: sourceFingerprint,
+                    sourceDiceTokens: sourceDiceTokens,
                     model: model,
                     generationID: generationID
                 )
@@ -3191,7 +3201,8 @@ final class BrainStore: ObservableObject {
                     mistralModel: mistralModel,
                     ollamaModel: ollamaModel
                 ),
-                sourceFingerprint: nil
+                sourceFingerprint: nil,
+                sourceDiceTokens: nil
             )
 
             try persistHighlightSummary(summary)
@@ -3209,6 +3220,7 @@ final class BrainStore: ObservableObject {
         vaultName: String,
         sourceNotes: [HomePageSourceNote],
         sourceFingerprint: String,
+        sourceDiceTokens: [String],
         model: HighlightSummaryModel,
         generationID: UUID? = nil
     ) async {
@@ -3275,12 +3287,13 @@ final class BrainStore: ObservableObject {
                     mistralModel: mistralModel,
                     ollamaModel: ollamaModel
                 ),
-                sourceFingerprint: sourceFingerprint
+                sourceFingerprint: sourceFingerprint,
+                sourceDiceTokens: sourceDiceTokens
             )
 
             try persistHighlightSummary(summary)
             upsertHighlightSummary(summary)
-            lastHomeSourceTextForSimilarityCheck = homeSourceText(for: sourceNotes)
+            lastHomeSourceDiceTokensForSimilarityCheck = sourceDiceTokens
             if isShowingHomePage {
                 title = "Home"
                 content = markdown
@@ -3723,7 +3736,8 @@ final class BrainStore: ObservableObject {
         vaultName: String,
         sourceNotes: [HomePageSourceNote],
         modelTitle: String,
-        sourceFingerprint: String
+        sourceFingerprint: String,
+        sourceDiceTokens: [String]
     ) {
         let markdown = localHomePageMarkdown(vaultName: vaultName, sourceNotes: sourceNotes)
         let summary = HighlightSummary(
@@ -3735,7 +3749,8 @@ final class BrainStore: ObservableObject {
             compiledAt: Date(),
             compileDuration: 0,
             modelTitle: modelTitle,
-            sourceFingerprint: sourceFingerprint
+            sourceFingerprint: sourceFingerprint,
+            sourceDiceTokens: sourceDiceTokens
         )
 
         do {
@@ -4113,28 +4128,45 @@ final class BrainStore: ObservableObject {
             .joined(separator: "\n\n")
     }
 
-    private func homeSourceTextSimilarity(_ previous: String, _ current: String) -> Double? {
-        guard let previousVector = semanticVector(for: previous),
-              let currentVector = semanticVector(for: current) else { return nil }
-        return cosineSimilarity(previousVector, currentVector)
+    private func homeSourceDiceTokens(for sourceNotes: [HomePageSourceNote]) -> [String] {
+        let tokenCharacters = CharacterSet.alphanumerics.inverted
+        let tokens = homeSourceText(for: sourceNotes)
+            .lowercased()
+            .components(separatedBy: tokenCharacters)
+            .filter { $0.count >= 2 }
+        return Array(Set(tokens)).sorted()
+    }
+
+    private func homeSourceDiceSimilarity(_ previousTokens: [String], _ currentTokens: [String]) -> Double? {
+        if previousTokens.isEmpty && currentTokens.isEmpty {
+            return 1
+        }
+
+        guard !previousTokens.isEmpty, !currentTokens.isEmpty else { return nil }
+
+        let previous = Set(previousTokens)
+        let current = Set(currentTokens)
+        let intersectionCount = previous.intersection(current).count
+        return (2 * Double(intersectionCount)) / Double(previous.count + current.count)
     }
 
     private func syncHomeSourceSimilarityCache() {
         guard activeBrain != nil,
               let sourceNotes = try? loadHomePageSourceNotes() else {
-            lastHomeSourceTextForSimilarityCheck = nil
+            lastHomeSourceDiceTokensForSimilarityCheck = nil
             return
         }
 
         let fingerprint = homeSourceFingerprint(for: sourceNotes)
         if latestHomeSummary?.sourceFingerprint == fingerprint {
-            lastHomeSourceTextForSimilarityCheck = homeSourceText(for: sourceNotes)
+            lastHomeSourceDiceTokensForSimilarityCheck = latestHomeSummary?.sourceDiceTokens
+                ?? homeSourceDiceTokens(for: sourceNotes)
         } else {
-            lastHomeSourceTextForSimilarityCheck = nil
+            lastHomeSourceDiceTokensForSimilarityCheck = nil
         }
     }
 
-    private func refreshHomeSummarySourceFingerprint(_ fingerprint: String) {
+    private func refreshHomeSummarySourceSignature(_ fingerprint: String, sourceDiceTokens: [String]) {
         guard let existing = latestHomeSummary else { return }
         let updated = HighlightSummary(
             id: existing.id,
@@ -4145,7 +4177,8 @@ final class BrainStore: ObservableObject {
             compiledAt: existing.compiledAt,
             compileDuration: existing.compileDuration,
             modelTitle: existing.modelTitle,
-            sourceFingerprint: fingerprint
+            sourceFingerprint: fingerprint,
+            sourceDiceTokens: sourceDiceTokens
         )
         do {
             try persistHighlightSummary(updated)
@@ -5955,7 +5988,8 @@ final class BrainStore: ObservableObject {
             compiledAt: summary.compiledAt,
             compileDuration: summary.compileDuration,
             modelTitle: summary.modelTitle,
-            sourceFingerprint: summary.sourceFingerprint
+            sourceFingerprint: summary.sourceFingerprint,
+            sourceDiceTokens: summary.sourceDiceTokens
         )
         let metadataData = try encoder.encode(metadata)
         guard let metadataText = String(data: metadataData, encoding: .utf8) else {
@@ -5997,7 +6031,8 @@ final class BrainStore: ObservableObject {
             compiledAt: metadata.compiledAt,
             compileDuration: metadata.compileDuration,
             modelTitle: metadata.modelTitle,
-            sourceFingerprint: metadata.sourceFingerprint
+            sourceFingerprint: metadata.sourceFingerprint,
+            sourceDiceTokens: metadata.sourceDiceTokens
         )
     }
 
@@ -6896,6 +6931,7 @@ struct HighlightSummary: Identifiable, Equatable {
     let compileDuration: TimeInterval
     let modelTitle: String
     let sourceFingerprint: String?
+    let sourceDiceTokens: [String]?
 }
 
 private struct HighlightSummaryMetadata: Codable {
@@ -6907,6 +6943,7 @@ private struct HighlightSummaryMetadata: Codable {
     let compileDuration: TimeInterval
     let modelTitle: String
     let sourceFingerprint: String?
+    let sourceDiceTokens: [String]?
 }
 
 enum HighlightSummaryModel: String, CaseIterable, Identifiable {
