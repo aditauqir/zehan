@@ -71,6 +71,10 @@ struct ZirnApp: App {
                 }
                 .keyboardShortcut("k", modifiers: .command)
 
+                Button("Go to Home") {
+                    store.goToStartPage()
+                }
+
                 Divider()
             }
 

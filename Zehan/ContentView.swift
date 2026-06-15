@@ -25,6 +25,8 @@ struct ContentView: View {
                     isBusy: store.isBusy,
                     newBrain: store.createBrainVaultFromUser,
                     openBrain: store.openBrainVaultFromUser,
+                    configure: store.configureModelFromUser,
+                    personalize: store.configureUsernameFromUser,
                     openRecent: store.openRecentVault
                 )
             } else {
@@ -61,35 +63,55 @@ private struct SplashView: View {
     let isBusy: Bool
     let newBrain: () -> Void
     let openBrain: () -> Void
+    let configure: () -> Void
+    let personalize: () -> Void
     let openRecent: (RecentVault) -> Void
 
     var body: some View {
-        VStack(spacing: 62) {
+        VStack(spacing: 52) {
             Text(greeting)
                 .font(.custom(AppFont.ptSerifRegular, size: AppFont.welcomeGreetingSize))
                 .foregroundStyle(.white.opacity(0.74))
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 720)
 
-            VStack(spacing: 34) {
-                HStack(spacing: 34) {
-                    SplashActionButton(
-                        title: "Create New Brain",
-                        systemImage: "folder.badge.plus",
-                        width: 218,
-                        isProminent: true,
-                        isDisabled: isBusy,
-                        action: newBrain
-                    )
+            VStack(spacing: 28) {
+                VStack(spacing: 16) {
+                    HStack(spacing: 34) {
+                        SplashActionButton(
+                            title: "Create New Brain",
+                            systemImage: "folder.badge.plus",
+                            width: 218,
+                            isProminent: true,
+                            isDisabled: isBusy,
+                            action: newBrain
+                        )
 
-                    SplashActionButton(
-                        title: "Open Brain Vault",
-                        systemImage: "folder",
-                        width: 246,
-                        isProminent: false,
-                        isDisabled: isBusy,
-                        action: openBrain
-                    )
+                        SplashActionButton(
+                            title: "Open Brain Vault",
+                            systemImage: "folder",
+                            width: 246,
+                            isProminent: false,
+                            isDisabled: isBusy,
+                            action: openBrain
+                        )
+                    }
+
+                    HStack(spacing: 12) {
+                        SplashUtilityButton(
+                            title: "Personalize",
+                            systemImage: "wand.and.stars",
+                            isDisabled: isBusy,
+                            action: personalize
+                        )
+
+                        SplashUtilityButton(
+                            title: "Configure",
+                            systemImage: "gearshape",
+                            isDisabled: isBusy,
+                            action: configure
+                        )
+                    }
                 }
 
                 RecentVaultsView(
@@ -112,6 +134,46 @@ private struct SplashView: View {
         }
         .ignoresSafeArea(.container, edges: .top)
         .preferredColorScheme(.dark)
+    }
+}
+
+private struct SplashUtilityButton: View {
+    let title: String
+    let systemImage: String
+    let isDisabled: Bool
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .semibold))
+
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(.white.opacity(isHovered ? 0.86 : 0.62))
+            .padding(.horizontal, 13)
+            .frame(height: 30)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .background {
+            Capsule()
+                .fill(.white.opacity(isHovered ? 0.10 : 0.045))
+        }
+        .overlay {
+            Capsule()
+                .stroke(.white.opacity(isHovered ? 0.18 : 0.09), lineWidth: 1)
+        }
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .onHover { hovering in
+            isHovered = hovering && !isDisabled
+        }
+        .opacity(isDisabled ? 0.55 : 1)
     }
 }
 

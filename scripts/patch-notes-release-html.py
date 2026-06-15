@@ -15,7 +15,10 @@ def markdown_inline_to_html(text: str) -> str:
 
 
 def extract_version_entries(markdown: str, version: str) -> list[str]:
-    heading_pattern = re.compile(r"^##\s+v?" + re.escape(version) + r"\s*$", re.MULTILINE)
+    heading_pattern = re.compile(
+        r"^##\s+v?" + re.escape(version) + r"(?:\s+\([^)]+\))?\s*$",
+        re.MULTILINE,
+    )
     match = heading_pattern.search(markdown)
     if not match:
         return []
@@ -36,6 +39,7 @@ def extract_version_entries(markdown: str, version: str) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version")
+    parser.add_argument("--codename", default="")
     parser.add_argument("--patch-notes", default="PATCH_NOTES.md")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -45,7 +49,11 @@ def main() -> int:
     if not entries:
         return 2
 
-    title = html.escape(f"Zirn {args.version}")
+    display_version = f"v{args.version}"
+    if args.codename:
+        display_version = f"{display_version} ({args.codename})"
+
+    title = html.escape(f"Zirn {display_version}")
     items = "\n".join(f"  <li>{markdown_inline_to_html(entry)}</li>" for entry in entries)
     output = f"<h2>{title}</h2>\n<ul>\n{items}\n</ul>\n"
     pathlib.Path(args.output).write_text(output)

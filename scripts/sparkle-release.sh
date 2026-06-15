@@ -6,6 +6,7 @@ VERSION="${1:-}"
 APP_PATH="$ROOT/build/Zirn.app"
 DIST_DIR="$ROOT/dist"
 SPARKLE_TOOLS="${SPARKLE_TOOLS:-/tmp}"
+RELEASE_CODENAME="${RELEASE_CODENAME:-}"
 
 if [[ -z "$VERSION" ]]; then
   VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist" 2>/dev/null || true)"
@@ -44,16 +45,26 @@ cp "$ROOT/Sparkle/release-notes/${VERSION}.html" "$APPCAST_DIR/" 2>/dev/null || 
 cp "$ROOT/dist/Zirn-${VERSION}.html" "$APPCAST_DIR/" 2>/dev/null || true
 if [[ ! -f "$APPCAST_DIR/Zirn-${VERSION}.html" ]]; then
   if [[ -f "$ROOT/PATCH_NOTES.md" ]]; then
+    PATCH_NOTES_ARGS=(
+      "$VERSION"
+      --patch-notes "$ROOT/PATCH_NOTES.md"
+      --output "$APPCAST_DIR/Zirn-${VERSION}.html"
+    )
+    if [[ -n "$RELEASE_CODENAME" ]]; then
+      PATCH_NOTES_ARGS+=(--codename "$RELEASE_CODENAME")
+    fi
     python3 "$ROOT/scripts/patch-notes-release-html.py" \
-      "$VERSION" \
-      --patch-notes "$ROOT/PATCH_NOTES.md" \
-      --output "$APPCAST_DIR/Zirn-${VERSION}.html" || true
+      "${PATCH_NOTES_ARGS[@]}" || true
   fi
 fi
 if [[ ! -f "$APPCAST_DIR/Zirn-${VERSION}.html" ]]; then
+  DISPLAY_VERSION="v${VERSION}"
+  if [[ -n "$RELEASE_CODENAME" ]]; then
+    DISPLAY_VERSION="${DISPLAY_VERSION} (${RELEASE_CODENAME})"
+  fi
   cat > "$APPCAST_DIR/Zirn-${VERSION}.html" <<EOF
-<h2>Zirn ${VERSION}</h2>
-<ul><li>Update for Zirn ${VERSION}</li></ul>
+<h2>Zirn ${DISPLAY_VERSION}</h2>
+<ul><li>Update for Zirn ${DISPLAY_VERSION}</li></ul>
 EOF
 fi
 

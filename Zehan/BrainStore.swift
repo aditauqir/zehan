@@ -137,6 +137,7 @@ final class BrainStore: ObservableObject {
         decoder.dateDecodingStrategy = .iso8601
         loadRecentVaults()
         loadAssistantConfiguration()
+        openPreviousBrainOnLaunch()
     }
 
     var documentStats: String {
@@ -296,6 +297,10 @@ final class BrainStore: ObservableObject {
 
         guard panel.runModal() == .OK, let folderURL = panel.url else { return }
         openBrain(fileURL: folderURL, showsInvalidVaultAlert: true)
+    }
+
+    func goToStartPage() {
+        closeBrain()
     }
 
     func createBrain(at folderURL: URL, named explicitName: String? = nil) {
@@ -2137,6 +2142,17 @@ final class BrainStore: ObservableObject {
         }
 
         requestAccessToRecentVault(recentVault)
+    }
+
+    private func openPreviousBrainOnLaunch() {
+        guard activeBrain == nil,
+              let recentVault = recentVaults.first,
+              let folderURL = resolvedRecentFolderURL(for: recentVault)
+        else { return }
+
+        withSecurityScopedAccess(to: folderURL) {
+            openBrain(fileURL: folderURL)
+        }
     }
 
     private func resolvedRecentFolderURL(for recentVault: RecentVault) -> URL? {

@@ -27,9 +27,10 @@ final class ZirnUpdateUserDriver: NSObject, SPUUserDriver {
     func showUpdateFound(with appcastItem: SUAppcastItem, state: SPUUserUpdateState, reply: @escaping (SPUUserUpdateChoice) -> Void) {
         NSApp.activate(ignoringOtherApps: true)
 
+        let versionTitle = ZirnUpdateVersionDisplay.title(for: appcastItem)
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "New update for Zirn \(appcastItem.displayVersionString) available."
+        alert.messageText = "New update for Zirn \(versionTitle) available."
         alert.informativeText = "Review what changed, then choose whether to install it now."
         if let releaseNotesView = releaseNotesAccessoryView(for: appcastItem.itemDescription) {
             alert.accessoryView = releaseNotesView
@@ -41,7 +42,7 @@ final class ZirnUpdateUserDriver: NSObject, SPUUserDriver {
         switch alert.runModal() {
         case .alertFirstButtonReturn:
             ZirnPendingUpdateStore.save(
-                version: appcastItem.displayVersionString,
+                version: versionTitle,
                 releaseNotesHTML: appcastItem.itemDescription
             )
             reply(.install)
