@@ -3,6 +3,30 @@
     <channel>
         <title>Zirn</title>
         <item>
+            <title>1.1</title>
+            <pubDate>Mon, 15 Jun 2026 19:10:02 -0400</pubDate>
+            <link>https://github.com/aditauqir/zehan</link>
+            <sparkle:version>7</sparkle:version>
+            <sparkle:shortVersionString>1.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>Zirn v1.1 (Mizan)</h2>
+<ul>
+  <li>Added on-device Dice-Sorensen source similarity for Home generation so reopening a vault can skip unnecessary model calls when the vault has only marginal changes.</li>
+  <li>Added persisted Home source signatures in generated summary metadata so similarity checks can work across vault reopen sessions.</li>
+  <li>Added an automatic Sparkle update checker flow that notifies users when an update is available, shows what changed, and offers Update, Don&#x27;t Update, or Skip This Version.</li>
+  <li>Added release-note generation from <code>PATCH_NOTES.md</code> so OTA popup copy and GitHub release notes can use the same versioned source of truth.</li>
+  <li>Added automatic reopening of the previous workspace on launch, plus a File menu Go to Home shortcut that returns to the greeting start page.</li>
+  <li>Added centered Personalize and Configure buttons under the welcome greeting for faster profile and model setup.</li>
+  <li>Fixed release delivery safety by requiring Developer ID signing for public builds and adding notarization support before Sparkle/GitHub distribution.</li>
+  <li>Changed the app version to <code>1.1</code>.</li>
+  <li>Improved rendered page spacing near the floating input pill so end-of-page text is not covered.</li>
+  <li>Added git ignore coverage for local <code>.brain</code> vault files.</li>
+  <li>Notes: OTA publishing, appcast updates, and release uploads should still only happen after an explicit ship/release instruction.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.1/Zirn-1.1.zip" length="5658860" type="application/octet-stream" sparkle:edSignature="pCuYhwkU19Rj6fleGPglQaceXB2xPmS8rMKCJ3lJdk9PqLd2EZecnLdVjB4ZuRxhvyGECYfT9yEUfpaZKJVNDQ=="/>
+        </item>
+        <item>
             <title>1.0.3</title>
             <pubDate>Sat, 13 Jun 2026 00:35:05 -0400</pubDate>
             <link>https://github.com/aditauqir/zehan</link>
