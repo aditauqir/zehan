@@ -81,6 +81,11 @@ struct ZirnApp: App {
                 }
                 .keyboardShortcut("k", modifiers: .command)
 
+                Button("Open Your Files") {
+                    store.openFilesFolder()
+                }
+                .disabled(store.activeBrain == nil)
+
                 Button("Go to Home") {
                     store.goToStartPage()
                 }

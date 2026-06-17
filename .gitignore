@@ -22,6 +22,14 @@ dist/sparkle/
 .brain
 *.brain
 
+# Local AI prompt scratch files (do not ignore shipped app prompt resources)
+.ai-prompts/
+ai-prompts.local/
+*.ai-prompt.local
+*.ai-prompt.local.md
+*.prompt.local
+*.prompt.local.md
+
 # Carthage
 Carthage/Build/
 

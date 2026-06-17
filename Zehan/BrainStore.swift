@@ -17,6 +17,28 @@ extension UTType {
     static let brainFile = UTType(filenameExtension: "brain") ?? .json
 }
 
+private enum AttachmentTarget {
+    case assistant
+    case helpDesk
+}
+
+private enum WorkspaceFileKind {
+    case documents
+    case images
+    case pdfs
+
+    var folderName: String {
+        switch self {
+        case .documents:
+            return "Documents"
+        case .images:
+            return "Images"
+        case .pdfs:
+            return "PDFs"
+        }
+    }
+}
+
 @MainActor
 final class BrainStore: ObservableObject {
     @Published var activeBrain: BrainSummary?
@@ -116,6 +138,8 @@ final class BrainStore: ObservableObject {
     private static let mistralOutputPricePerMillionTokens = 1.50
     private static let mistralMaxUploadFileBytes = 512 * 1024 * 1024
     private static let mistralMaxOCRPagesPerRequest = 1_000
+    private static let supportedImageAttachmentExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "tif", "tiff", "webp", "avif"]
+    private static let supportedDocumentAttachmentExtensions: Set<String> = ["pdf", "doc", "docx", "ppt", "pptx"]
     private static let maxAssistantOutputTokens = 4096
     private static let homeCompilationDebounceNanoseconds: UInt64 = 1_500_000_000
     private static let homeCompilationAfterAutosaveNanoseconds: UInt64 = 300_000_000
@@ -602,7 +626,7 @@ final class BrainStore: ObservableObject {
                 try noteIdentityDatabase?.upsert(
                     noteID: note.id,
                     title: note.title,
-                    fileName: targetURL.lastPathComponent,
+                    fileName: relativeNoteFileName(for: targetURL, in: brain),
                     updatedAt: note.updatedAt
                 )
                 if let existingURL, existingURL.pathExtension == "json" {
@@ -785,7 +809,7 @@ final class BrainStore: ObservableObject {
     func chooseHelpDeskAttachmentFromUser() {
         let panel = NSOpenPanel()
         panel.title = "Attach File"
-        panel.message = "Choose a PDF, Word document, or image."
+        panel.message = "Choose a PDF, Word document, PowerPoint, or image."
         panel.prompt = "Attach"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -794,6 +818,8 @@ final class BrainStore: ObservableObject {
             .pdf,
             UTType(filenameExtension: "doc") ?? .data,
             UTType(filenameExtension: "docx") ?? .data,
+            UTType(filenameExtension: "ppt") ?? .data,
+            UTType(filenameExtension: "pptx") ?? .data,
             .image
         ]
 
@@ -1397,6 +1423,20 @@ final class BrainStore: ObservableObject {
         status = "Conversation closed"
     }
 
+    func addAssistantConversationResponseToCurrentNote() {
+        guard let response = assistantConversationResponse,
+              !isGeneratingAssistantResponse
+        else { return }
+
+        isGeneratingAssistantResponse = true
+        isUsingWebSearch = false
+        status = "\(response.providerTitle) is adding the answer to the page"
+
+        Task {
+            await generateAssistantConversationInsertion(from: response)
+        }
+    }
+
     func acceptAssistantPreview() {
         guard let preview = pendingAssistantPreview else { return }
         applyAssistantDocumentOutput(preview.markdown, prompt: preview.prompt)
@@ -1774,13 +1814,17 @@ final class BrainStore: ObservableObject {
                     createdAt: oldNote.createdAt,
                     updatedAt: Date()
                 )
-                let newURL = markdownNoteURL(for: renamedNote, in: brain)
+                let newURL = markdownNoteURL(for: renamedNote, in: brain, allowing: oldURL)
 
+                try FileManager.default.createDirectory(
+                    at: newURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
                 try writeMarkdownNote(renamedNote, to: newURL)
                 try noteIdentityDatabase?.upsert(
                     noteID: renamedNote.id,
                     title: renamedNote.title,
-                    fileName: newURL.lastPathComponent,
+                    fileName: relativeNoteFileName(for: newURL, in: brain),
                     updatedAt: renamedNote.updatedAt
                 )
                 if oldURL != newURL, FileManager.default.fileExists(atPath: oldURL.path) {
@@ -1902,7 +1946,7 @@ final class BrainStore: ObservableObject {
 
     func attachPromptDocument(from url: URL) {
         guard isSupportedPromptDocument(url) else {
-            status = "Only PDFs, Word documents, and images are supported"
+            status = supportedAttachmentStatusMessage
             return
         }
 
@@ -1913,6 +1957,14 @@ final class BrainStore: ObservableObject {
             }
         }
 
+        let storedFileURL: URL
+        do {
+            storedFileURL = try copyAttachmentToWorkspace(from: url)
+        } catch {
+            status = error.localizedDescription
+            return
+        }
+
         if let fileSize = fileByteCount(at: url), exceedsMistralUploadLimit(byteCount: fileSize) {
             status = mistralUploadLimitStatusMessage(forFileName: url.lastPathComponent)
             return
@@ -1920,27 +1972,30 @@ final class BrainStore: ObservableObject {
 
         switch url.pathExtension.lowercased() {
         case "pdf":
-            attachPDFWithMistralOCR(from: url)
+            attachPDFWithMistralOCR(from: url, storedFileURL: storedFileURL, target: .assistant)
         case "doc", "docx":
             let extractedText = extractedPromptDocumentText(from: url)
             assistantAttachment = PromptAttachment(
-                fileName: url.lastPathComponent,
-                fileExtension: url.pathExtension.lowercased(),
-                extractedText: extractedText
+                fileName: storedFileURL.lastPathComponent,
+                fileExtension: storedFileURL.pathExtension.lowercased(),
+                extractedText: extractedText,
+                storedFileURL: storedFileURL
             )
-            status = "\(url.lastPathComponent) attached"
-        case "png", "jpg", "jpeg", "gif", "heic", "tiff", "webp":
+            status = "\(storedFileURL.lastPathComponent) attached"
+        case "ppt", "pptx":
+            attachDocumentWithMistralOCR(from: url, storedFileURL: storedFileURL, target: .assistant)
+        case let ext where Self.supportedImageAttachmentExtensions.contains(ext):
             guard let data = try? Data(contentsOf: url) else {
                 status = "Could not read \(url.lastPathComponent)"
                 return
             }
-            attachPromptImage(data: data, suggestedFileName: url.lastPathComponent)
+            attachPromptImage(data: data, suggestedFileName: storedFileURL.lastPathComponent, storedFileURL: storedFileURL)
         default:
-            status = "Only PDFs, Word documents, and images are supported"
+            status = supportedAttachmentStatusMessage
         }
     }
 
-    func attachPromptImage(data: Data, suggestedFileName: String? = nil) {
+    func attachPromptImage(data: Data, suggestedFileName: String? = nil, storedFileURL: URL? = nil) {
         guard !mistralAPIKey.isEmpty || requestAndSaveMistralAPIKey(
             title: "Mistral API Key",
             message: "Mistral OCR needs your Mistral API key before reading this image."
@@ -1949,7 +2004,19 @@ final class BrainStore: ObservableObject {
             return
         }
 
-        let fileName = promptImageFileName(suggestedFileName: suggestedFileName)
+        let storedURL: URL
+        do {
+            if let storedFileURL {
+                storedURL = storedFileURL
+            } else {
+                storedURL = try storeAttachmentDataInWorkspace(data, suggestedFileName: suggestedFileName, kind: .images)
+            }
+        } catch {
+            status = error.localizedDescription
+            return
+        }
+
+        let fileName = storedURL.lastPathComponent
         guard !exceedsMistralUploadLimit(byteCount: data.count) else {
             status = mistralUploadLimitStatusMessage(forFileName: fileName)
             return
@@ -1964,7 +2031,8 @@ final class BrainStore: ObservableObject {
                 assistantAttachment = PromptAttachment(
                     fileName: fileName,
                     fileExtension: (fileName as NSString).pathExtension.lowercased(),
-                    extractedText: extractedText
+                    extractedText: extractedText,
+                    storedFileURL: storedURL
                 )
                 status = "\(fileName) attached · OCRed"
             } catch {
@@ -1976,7 +2044,7 @@ final class BrainStore: ObservableObject {
     func choosePromptAttachmentFromUser() {
         let panel = NSOpenPanel()
         panel.title = "Attach File"
-        panel.message = "Choose a PDF, Word document, or image."
+        panel.message = "Choose a PDF, Word document, PowerPoint, or image."
         panel.prompt = "Attach"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -1985,6 +2053,8 @@ final class BrainStore: ObservableObject {
             .pdf,
             UTType(filenameExtension: "doc") ?? .data,
             UTType(filenameExtension: "docx") ?? .data,
+            UTType(filenameExtension: "ppt") ?? .data,
+            UTType(filenameExtension: "pptx") ?? .data,
             .image
         ]
 
@@ -1994,7 +2064,7 @@ final class BrainStore: ObservableObject {
 
     private func attachHelpDeskDocument(from url: URL) {
         guard isSupportedPromptDocument(url) else {
-            status = "Only PDFs, Word documents, and images are supported"
+            status = supportedAttachmentStatusMessage
             return
         }
 
@@ -2005,21 +2075,34 @@ final class BrainStore: ObservableObject {
             }
         }
 
+        let storedFileURL: URL
+        do {
+            storedFileURL = try copyAttachmentToWorkspace(from: url)
+        } catch {
+            status = error.localizedDescription
+            return
+        }
+
         if let fileSize = fileByteCount(at: url), exceedsMistralUploadLimit(byteCount: fileSize) {
             status = mistralUploadLimitStatusMessage(forFileName: url.lastPathComponent)
             return
         }
 
         switch url.pathExtension.lowercased() {
-        case "pdf", "doc", "docx":
+        case "pdf":
+            attachPDFWithMistralOCR(from: url, storedFileURL: storedFileURL, target: .helpDesk)
+        case "doc", "docx":
             let extractedText = extractedPromptDocumentText(from: url)
             helpDeskAttachment = PromptAttachment(
-                fileName: url.lastPathComponent,
-                fileExtension: url.pathExtension.lowercased(),
-                extractedText: extractedText
+                fileName: storedFileURL.lastPathComponent,
+                fileExtension: storedFileURL.pathExtension.lowercased(),
+                extractedText: extractedText,
+                storedFileURL: storedFileURL
             )
-            status = "\(url.lastPathComponent) attached"
-        case "png", "jpg", "jpeg", "gif", "heic", "tiff", "webp":
+            status = "\(storedFileURL.lastPathComponent) attached"
+        case "ppt", "pptx":
+            attachDocumentWithMistralOCR(from: url, storedFileURL: storedFileURL, target: .helpDesk)
+        case let ext where Self.supportedImageAttachmentExtensions.contains(ext):
             guard !mistralAPIKey.isEmpty || requestAndSaveMistralAPIKey(
                 title: "Mistral API Key",
                 message: "Mistral OCR needs your Mistral API key before reading this image."
@@ -2033,7 +2116,7 @@ final class BrainStore: ObservableObject {
                 return
             }
 
-            let fileName = promptImageFileName(suggestedFileName: url.lastPathComponent)
+            let fileName = storedFileURL.lastPathComponent
             guard !exceedsMistralUploadLimit(byteCount: data.count) else {
                 status = mistralUploadLimitStatusMessage(forFileName: fileName)
                 return
@@ -2047,7 +2130,8 @@ final class BrainStore: ObservableObject {
                     helpDeskAttachment = PromptAttachment(
                         fileName: fileName,
                         fileExtension: (fileName as NSString).pathExtension.lowercased(),
-                        extractedText: extractedText
+                        extractedText: extractedText,
+                        storedFileURL: storedFileURL
                     )
                     status = "\(fileName) attached · OCRed"
                 } catch {
@@ -2055,7 +2139,7 @@ final class BrainStore: ObservableObject {
                 }
             }
         default:
-            status = "Only PDFs, Word documents, and images are supported"
+            status = supportedAttachmentStatusMessage
         }
     }
 
@@ -2097,6 +2181,8 @@ final class BrainStore: ObservableObject {
 
                 let imageMarkdown = "![\(imageAltText(from: fileName))](../Images/\(fileName))"
                 appendMarkdownBlock(imageMarkdown)
+                assistantAttachment = nil
+                helpDeskAttachment = nil
                 status = "\(fileName) inserted"
             } catch {
                 status = error.localizedDescription
@@ -2126,6 +2212,23 @@ final class BrainStore: ObservableObject {
         }
 
         return imageData
+    }
+
+    func openFilesFolder() {
+        guard let activeBrain else {
+            status = "Open or create a brain first"
+            return
+        }
+
+        withSecurityScopedAccess(to: activeBrain.folderURL) {
+            do {
+                try createWorkspaceFileFolders(in: activeBrain)
+                NSWorkspace.shared.open(filesFolderURL(for: activeBrain))
+                status = "Opened Files folder"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
     }
 
     func removePromptAttachment() {
@@ -2296,10 +2399,12 @@ final class BrainStore: ObservableObject {
 
         var seenIDs = Set<Note.ID>()
         var reservedTitles = Set<String>()
+        var discoveredGroupTitlesByNoteID: [Note.ID: String] = [:]
         let loadedNotes = try noteURLs.map { url in
             var note = try readNote(from: url)
             var noteURL = url
             var fileName = relativeNoteFileName(for: noteURL, in: brain)
+            let originalFolderURL = noteURL.deletingLastPathComponent()
             let metadataID = note.id.trimmingCharacters(in: .whitespacesAndNewlines)
             let indexedID = noteIdentityDatabase?.noteID(forFileName: fileName)
                 ?? noteIdentityDatabase?.noteID(forFileName: noteURL.lastPathComponent)
@@ -2321,7 +2426,7 @@ final class BrainStore: ObservableObject {
                     createdAt: note.createdAt,
                     updatedAt: Date()
                 )
-                let updatedURL = markdownNoteURL(for: note, in: brain)
+                let updatedURL = markdownNoteURL(for: note, inFolder: originalFolderURL, allowing: noteURL)
                 try FileManager.default.createDirectory(
                     at: updatedURL.deletingLastPathComponent(),
                     withIntermediateDirectories: true
@@ -2340,13 +2445,16 @@ final class BrainStore: ObservableObject {
                 fileName: fileName,
                 updatedAt: note.updatedAt
             )
+            if let groupTitle = sidebarGroupTitle(fromRelativeFileName: fileName) {
+                discoveredGroupTitlesByNoteID[note.id] = groupTitle
+            }
             seenIDs.insert(note.id)
             return note
         }
         let loadedSummaries = loadedNotes
             .map { NoteSummary(id: $0.id, title: $0.title, updatedAt: $0.updatedAt) }
             .sorted { $0.updatedAt > $1.updatedAt }
-        syncSidebarItems(with: loadedSummaries)
+        syncSidebarItems(with: loadedSummaries, discoveredGroupTitlesByNoteID: discoveredGroupTitlesByNoteID)
         notes = orderedNotesForSidebar(from: loadedSummaries)
         graphLinks = buildGraphLinks(from: loadedNotes)
         rebuildSearchIndex(from: loadedNotes, in: brain)
@@ -2435,7 +2543,10 @@ final class BrainStore: ObservableObject {
         return sourceNotes
     }
 
-    private func syncSidebarItems(with loadedSummaries: [NoteSummary]) {
+    private func syncSidebarItems(
+        with loadedSummaries: [NoteSummary],
+        discoveredGroupTitlesByNoteID: [Note.ID: String] = [:]
+    ) {
         let storedItems: [SidebarItem]
         if let activeBrain,
            let brain = try? readBrain(from: activeBrain.brainURL),
@@ -2449,6 +2560,8 @@ final class BrainStore: ObservableObject {
         var seenNoteIDs = Set<Note.ID>()
         var mergedItems: [SidebarItem] = []
         let storedGroupIDs = Set(storedItems.filter { $0.kind == .group }.map(\.id))
+        var groupIDsByNormalizedTitle: [String: SidebarItem.ID] = [:]
+        var normalizedGroupTitles = Set<String>()
 
         for item in storedItems {
             switch item.kind {
@@ -2456,6 +2569,9 @@ final class BrainStore: ObservableObject {
                 var groupItem = item
                 groupItem.title = sanitizedSidebarGroupTitle(groupItem.title)
                 mergedItems.append(groupItem)
+                let normalizedTitle = normalizedLinkTitle(groupItem.title)
+                groupIDsByNormalizedTitle[normalizedTitle] = groupItem.id
+                normalizedGroupTitles.insert(normalizedTitle)
             case .note:
                 guard let noteID = item.noteID,
                       let note = notesByID[noteID],
@@ -2467,8 +2583,41 @@ final class BrainStore: ObservableObject {
             }
         }
 
+        func groupID(forDiscoveredTitle rawTitle: String) -> SidebarItem.ID {
+            let cleanTitle = sanitizedSidebarGroupTitle(rawTitle)
+            let normalizedTitle = normalizedLinkTitle(cleanTitle)
+            if let existingID = groupIDsByNormalizedTitle[normalizedTitle] {
+                return existingID
+            }
+
+            var finalTitle = cleanTitle
+            var suffix = 2
+            while normalizedGroupTitles.contains(normalizedLinkTitle(finalTitle)) {
+                finalTitle = "\(cleanTitle) \(suffix)"
+                suffix += 1
+            }
+
+            let groupItem = SidebarItem(
+                id: UUID().uuidString,
+                kind: .group,
+                noteID: nil,
+                title: finalTitle,
+                groupID: nil,
+                isExpanded: true
+            )
+            mergedItems.append(groupItem)
+            let finalNormalizedTitle = normalizedLinkTitle(finalTitle)
+            groupIDsByNormalizedTitle[finalNormalizedTitle] = groupItem.id
+            normalizedGroupTitles.insert(finalNormalizedTitle)
+            return groupItem.id
+        }
+
         for note in loadedSummaries where !seenNoteIDs.contains(note.id) {
-            mergedItems.append(SidebarItem(note: note))
+            if let groupTitle = discoveredGroupTitlesByNoteID[note.id] {
+                mergedItems.append(SidebarItem(note: note, groupID: groupID(forDiscoveredTitle: groupTitle)))
+            } else {
+                mergedItems.append(SidebarItem(note: note))
+            }
         }
 
         sidebarItems = mergedItems
@@ -3040,6 +3189,37 @@ final class BrainStore: ObservableObject {
         }
     }
 
+    private func generateAssistantConversationInsertion(from response: AssistantConversationResponse) async {
+        defer {
+            isGeneratingAssistantResponse = false
+            isUsingWebSearch = false
+        }
+
+        do {
+            let prompt = assistantConversationInsertionInput(for: response)
+            let result = try await generateWithMistral(
+                system: assistantConversationInsertionInstructions(),
+                user: prompt,
+                maxTokens: Self.maxAssistantOutputTokens
+            )
+            recordMistralUsage(
+                inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
+                outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+            )
+
+            let markdown = cleanedWritingAssistantMarkdown(result.content)
+            guard !markdown.isEmpty else {
+                throw AssistantError.requestFailed("The model returned no Markdown.")
+            }
+
+            applyAssistantDocumentOutput(markdown, prompt: "Add conversation answer to the page")
+            try? updateStyleMemory(with: content)
+            status = "\(response.providerTitle) added the answer to the page"
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
     private func generateHelpDeskResponse(
         for userMessage: HelpDeskMessage,
         attachment: PromptAttachment?,
@@ -3062,7 +3242,11 @@ final class BrainStore: ObservableObject {
             let history = helpDeskMessages(for: conversationID)
                 .filter { $0.id != userMessage.id }
             let vaultContext = try helpDeskVaultContext(for: userMessage.content, history: history)
-            let attachmentContext = helpDeskAttachmentContext(attachment)
+            let attachmentContext = helpDeskAttachmentContext(
+                attachment,
+                question: userMessage.content,
+                vaultContext: vaultContext
+            )
             let currentInput = """
             User question:
             \(userMessage.content)
@@ -3149,6 +3333,7 @@ final class BrainStore: ObservableObject {
 
         assistantPrompt = ""
         assistantPromptLinkedPages = []
+        assistantAttachment = nil
     }
 
     private func generateHighlightSummary(
@@ -3323,7 +3508,7 @@ final class BrainStore: ObservableObject {
     }
 
     private func applyAssistantDocumentOutput(_ output: String, prompt: String) {
-        let cleanOutput = cleanedAssistantMarkdown(output)
+        let cleanOutput = cleanedWritingAssistantMarkdown(output)
         guard !cleanOutput.isEmpty else { return }
 
         let contentBeforeInsertion = content
@@ -3459,37 +3644,46 @@ final class BrainStore: ObservableObject {
     }
 
     private func assistantInstructions() -> String {
-        personalizedSystemInstructions(
-            """
-            You are Zirn's writing assistant. You edit the user's current Markdown document in place.
-            You will receive the full current document and a user request. Return the complete revised Markdown document, not a patch, diff, explanation, or separate suggestion.
-            The user may type quickly and make spelling mistakes, missing spaces, or phonetic typos. Infer the intended meaning from context instead of rejecting the request for spelling.
-            If the user asks to add, include the original document plus the addition in the best location.
-            If the user asks to edit, rewrite only the needed parts and preserve everything else.
-            If the user asks to delete, remove the requested text or section and keep the remaining document coherent.
-            If the user asks to organize, restructure the whole document cleanly while preserving meaning.
-            Do not wrap the answer in code fences unless the user specifically asks for code.
-            Do not include meta commentary, apologies, or explanations of what you changed.
-            Match the user's writing pattern, vocabulary, rhythm, heading style, and density when possible.
-            Treat correction-derived preferences as stronger than passive style samples.
-            Preserve the user's existing edits. Make the smallest useful change unless the user asks for a larger rewrite.
-            Output polished Markdown with clear headings, short paragraphs, and useful lists only when lists are natural.
-            Use Obsidian-style wiki links like [[Page Title]] only when linking is genuinely useful.
-            """
-        )
+        """
+        You are Zirn's writing assistant. You edit the user's current Markdown document in place.
+        You will receive the full current document and a user request. Return the complete revised Markdown document, not a patch, diff, explanation, or separate suggestion.
+        The user may type quickly and make spelling mistakes, missing spaces, or phonetic typos. Infer the intended meaning from context instead of rejecting the request for spelling.
+        If the user asks to add, include the original document plus the addition in the best location.
+        If the user asks to edit, rewrite only the needed parts and preserve everything else.
+        If the user asks to delete, remove the requested text or section and keep the remaining document coherent.
+        If the user asks to organize, restructure the whole document cleanly while preserving meaning.
+        Do not wrap the answer in code fences unless the user specifically asks for code.
+        Do not include meta commentary, apologies, or explanations of what you changed.
+        Do not add conversational follow-up questions, offers, invitations, or tutoring prompts, such as "Would you like..." or "Do you want...".
+        Match the user's writing pattern, vocabulary, rhythm, heading style, and density when possible.
+        Treat correction-derived preferences as stronger than passive style samples.
+        Preserve the user's existing edits. Make the smallest useful change unless the user asks for a larger rewrite.
+        Output polished Markdown with clear headings, short paragraphs, and useful lists only when lists are natural.
+        Use Obsidian-style wiki links like [[Page Title]] only when linking is genuinely useful.
+        """
     }
 
     private func assistantConversationInstructions() -> String {
-        personalizedSystemInstructions(
-            """
-            You are Zirn's conversational assistant. Answer the user's question without editing, rewriting, or replacing the Markdown document.
-            Use the current Markdown document and any attached document as context when relevant.
-            The user may type quickly and make spelling mistakes, missing spaces, or phonetic typos. Infer the intended meaning from context instead of rejecting the question for spelling.
-            Return Markdown only. Do not claim you changed the file.
-            If the user asks you to edit the note, briefly tell them to turn on writing mode with the pen icon.
-            Keep answers concise, useful, and grounded in the supplied context.
-            """
-        )
+        """
+        You are Zirn's conversational assistant. Answer the user's question without editing, rewriting, or replacing the Markdown document.
+        Use the current Markdown document and any attached document as context when relevant.
+        The user may type quickly and make spelling mistakes, missing spaces, or phonetic typos. Infer the intended meaning from context instead of rejecting the question for spelling.
+        Return Markdown only. Do not claim you changed the file.
+        If the user asks you to edit the note, briefly tell them to turn on writing mode with the pen icon.
+        Keep answers concise, useful, and grounded in the supplied context.
+        """
+    }
+
+    private func assistantConversationInsertionInstructions() -> String {
+        """
+        You are Zirn's Markdown editor. Weave a conversation-mode answer into the user's current Markdown document.
+        Return the complete revised Markdown document only, not a patch, explanation, transcript, or separate answer.
+        Read the current document, the recent conversation, the user's latest question, and the assistant's answer.
+        Insert the answer where it belongs in the document. Blend it into existing prose, headings, lists, or examples so it feels intentionally written there.
+        Preserve the user's existing edits, title, voice, structure, and Markdown style.
+        Do not append a raw chat log. Do not add "User:", "Assistant:", "Question:", or "Answer:" labels unless the document already uses that format.
+        Do not add conversational follow-up questions, offers, invitations, or meta commentary.
+        """
     }
 
     private func helpDeskInstructions() -> String {
@@ -3517,14 +3711,12 @@ final class BrainStore: ObservableObject {
     }
 
     private func highlightSummaryInstructions() -> String {
-        personalizedSystemInstructions(
-            """
-            You are Zirn's highlight compiler. You turn selected highlighted excerpts into one coherent non-editable Markdown summary.
-            Use only the supplied highlighted excerpts as factual source material.
-            Preserve the user's writing style, rhythm, density, and vocabulary when possible.
-            Return Markdown only. Do not include meta commentary, apologies, or code fences.
-            """
-        )
+        """
+        You are Zirn's highlight compiler. You turn selected highlighted excerpts into one coherent non-editable Markdown summary.
+        Use only the supplied highlighted excerpts as factual source material.
+        Preserve the user's writing style, rhythm, density, and vocabulary when possible.
+        Return Markdown only. Do not include meta commentary, apologies, or code fences.
+        """
     }
 
     private func homePageSummaryInstructions() -> String {
@@ -3570,7 +3762,7 @@ final class BrainStore: ObservableObject {
         \(learnedStyleMemory())
 
         Correction-derived preferences, strongest first:
-        \(learnedCorrectionMemory())\(userPersonalizationPromptSection())
+        \(learnedCorrectionMemory())
         """
     }
 
@@ -4322,7 +4514,7 @@ final class BrainStore: ObservableObject {
         \(assistantPromptLinksContext(linkedPageTitles))
 
         Attached document:
-        \(assistantAttachmentContext())
+        \(assistantAttachmentContext(for: prompt, linkedPageTitles: linkedPageTitles, intent: .writing))
 
         Current document title:
         \(title)
@@ -4334,12 +4526,13 @@ final class BrainStore: ObservableObject {
         Return the complete revised Markdown document only.
         If the user request has typos or missing spaces, silently infer the intended words from context.
         When referring to any selected linked page, use its exact Obsidian wiki link form, such as [[Page Title]].
+        Do not end with a follow-up question, offer, invitation, or line like "Would you like an example...?"
 
         Learned user writing samples:
         \(learnedStyleMemory())
 
         Correction-derived preferences, strongest first:
-        \(learnedCorrectionMemory())\(userPersonalizationPromptSection())
+        \(learnedCorrectionMemory())
         """
     }
 
@@ -4352,7 +4545,7 @@ final class BrainStore: ObservableObject {
         \(assistantPromptLinksContext(linkedPageTitles))
 
         Attached document:
-        \(assistantAttachmentContext())
+        \(assistantAttachmentContext(for: prompt, linkedPageTitles: linkedPageTitles, intent: .conversation))
 
         Current document title:
         \(title)
@@ -4362,7 +4555,31 @@ final class BrainStore: ObservableObject {
 
         Required output:
         Answer the user. Do not rewrite the Markdown file.
-        If the question has typos or missing spaces, silently infer the intended words from context.\(userPersonalizationPromptSection())
+        If the question has typos or missing spaces, silently infer the intended words from context.
+        """
+    }
+
+    private func assistantConversationInsertionInput(for response: AssistantConversationResponse) -> String {
+        """
+        Current document title:
+        \(title)
+
+        Current Markdown document:
+        \(content)
+
+        Recent conversation:
+        \(assistantConversationTranscript())
+
+        Latest user question:
+        \(response.prompt)
+
+        Conversation-mode answer to weave into the document:
+        \(response.answer)
+
+        Required output:
+        Return the complete revised Markdown document only.
+        Add the answer at the most relevant place in the Markdown. If the answer belongs inside an existing section, revise that section instead of appending a new block.
+        Keep the result readable as a normal note, not as a conversation transcript.
         """
     }
 
@@ -4580,7 +4797,7 @@ final class BrainStore: ObservableObject {
         try noteIdentityDatabase?.upsert(
             noteID: note.id,
             title: note.title,
-            fileName: noteURL.lastPathComponent,
+            fileName: activeBrain.map { relativeNoteFileName(for: noteURL, in: $0) } ?? noteURL.lastPathComponent,
             updatedAt: note.updatedAt
         )
         try loadNotes()
@@ -4618,7 +4835,7 @@ final class BrainStore: ObservableObject {
         try noteIdentityDatabase?.upsert(
             noteID: note.id,
             title: note.title,
-            fileName: targetURL.lastPathComponent,
+            fileName: relativeNoteFileName(for: targetURL, in: brain),
             updatedAt: note.updatedAt
         )
         try loadNotes()
@@ -5107,18 +5324,12 @@ final class BrainStore: ObservableObject {
             }
     }
 
-    private func helpDeskAttachmentContext(_ attachment: PromptAttachment?) -> String {
+    private func helpDeskAttachmentContext(_ attachment: PromptAttachment?, question: String, vaultContext: String) -> String {
         guard let attachment else { return "None" }
-        let text = attachment.extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.isEmpty {
-            return "\(attachment.fileName) (\(attachment.fileExtension.uppercased())) attached, but no readable text could be extracted."
+        guard shouldUseAttachmentContext(prompt: question, markdownContext: vaultContext, attachment: attachment) else {
+            return "\(attachment.fileName) is attached and stored at \(attachmentFileLink(attachment)), but Zirn should prefer the vault Markdown context because the question does not appear file-specific."
         }
-        return """
-        File: \(attachment.fileName)
-        Type: \(attachment.fileExtension.uppercased())
-        Text:
-        \(promptExcerpt(text, characterLimit: 12_000))
-        """
+        return attachmentContext(attachment, characterLimit: 12_000)
     }
 
     private func assistantPromptLinksContext(_ titles: [String]) -> String {
@@ -5164,19 +5375,68 @@ final class BrainStore: ObservableObject {
         return .conversation
     }
 
-    private func assistantAttachmentContext() -> String {
+    private func assistantAttachmentContext(for prompt: String, linkedPageTitles: [String], intent: AssistantPromptIntent) -> String {
         guard let assistantAttachment else { return "None" }
-        let text = assistantAttachment.extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let clippedText = String(text.prefix(24_000))
+        let markdownContext = "\(title)\n\(content)\n\(linkedPageTitles.joined(separator: " "))"
+        guard shouldUseAttachmentContext(prompt: prompt, markdownContext: markdownContext, attachment: assistantAttachment) else {
+            return "None. Prefer the current Markdown and linked pages; the attached file was not needed for this request."
+        }
+        let limit = intent == .writing ? 24_000 : 12_000
+        return attachmentContext(assistantAttachment, characterLimit: limit)
+    }
+
+    private func attachmentContext(_ attachment: PromptAttachment, characterLimit: Int) -> String {
+        let text = attachment.extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clippedText = String(text.prefix(characterLimit))
+        let fileLink = attachmentFileLink(attachment)
         if clippedText.isEmpty {
-            return "\(assistantAttachment.fileName) (\(assistantAttachment.fileExtension.uppercased())) attached, but no readable text could be extracted."
+            return "\(attachment.fileName) (\(attachment.fileExtension.uppercased())) attached, but no readable text could be extracted.\nFile link: \(fileLink)"
         }
         return """
-        File: \(assistantAttachment.fileName)
-        Type: \(assistantAttachment.fileExtension.uppercased())
+        File: \(attachment.fileName)
+        Type: \(attachment.fileExtension.uppercased())
+        File link: \(fileLink)
+        Use this file context only if it is directly relevant. If you rely on it in a conversational answer, include the file link briefly.
         Text:
         \(clippedText)
         """
+    }
+
+    private func attachmentFileLink(_ attachment: PromptAttachment) -> String {
+        guard let storedFileURL = attachment.storedFileURL else {
+            return attachment.fileName
+        }
+        return "[\(attachment.fileName)](\(storedFileURL.absoluteString))"
+    }
+
+    private func shouldUseAttachmentContext(prompt: String, markdownContext: String, attachment: PromptAttachment) -> Bool {
+        let cleanPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleanPrompt.isEmpty { return true }
+
+        let lowerPrompt = cleanPrompt.lowercased()
+        let lowerFileName = attachment.fileName.lowercased()
+        let fileBaseName = (lowerFileName as NSString).deletingPathExtension
+        let fileTerms = [
+            "file", "attachment", "attached", "pdf", "document", "docx", "word",
+            "powerpoint", "ppt", "slide", "image", "picture", "photo", "screenshot",
+            "scan", "ocr", "handwriting", "handwritten", "from this", "in this"
+        ]
+
+        if lowerPrompt.contains(lowerFileName) || (!fileBaseName.isEmpty && lowerPrompt.contains(fileBaseName)) {
+            return true
+        }
+        if fileTerms.contains(where: { lowerPrompt.contains($0) }) {
+            return true
+        }
+
+        let promptTokens = searchTokens(in: cleanPrompt)
+            .filter { $0.count > 3 }
+            .prefix(12)
+        guard !promptTokens.isEmpty else { return false }
+
+        let normalizedMarkdown = normalizedSearchText(markdownContext)
+        let markdownMatches = promptTokens.filter { normalizedMarkdown.contains($0) }.count
+        return markdownMatches < min(2, promptTokens.count)
     }
 
     private func promptSuggestsWebSearch(_ prompt: String) -> Bool {
@@ -5211,6 +5471,54 @@ final class BrainStore: ObservableObject {
             output.removeLast(3)
         }
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func cleanedWritingAssistantMarkdown(_ markdown: String) -> String {
+        let cleaned = cleanedAssistantMarkdown(markdown)
+        var lines = cleaned.components(separatedBy: .newlines)
+
+        while let index = lines.lastIndex(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
+              isConversationalFollowUpLine(lines[index]) {
+            lines.removeSubrange(index..<lines.endIndex)
+        }
+
+        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func isConversationalFollowUpLine(_ line: String) -> Bool {
+        var cleanLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        cleanLine = cleanLine.trimmingCharacters(in: CharacterSet(charactersIn: "*_`~"))
+        cleanLine = cleanLine.replacingOccurrences(
+            of: #"^\s*(?:[-*+]\s+|>\s*)+"#,
+            with: "",
+            options: .regularExpression
+        )
+        cleanLine = cleanLine.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let lowercased = cleanLine
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+
+        let questionStarters = [
+            "would you like",
+            "do you want",
+            "want me to",
+            "should i",
+            "shall i",
+            "can i",
+            "would it help",
+            "need me to"
+        ]
+        let offerStarters = [
+            "let me know if you want",
+            "let me know if you'd like",
+            "let me know if you would like",
+            "i can also",
+            "i could also"
+        ]
+
+        return questionStarters.contains { lowercased.hasPrefix($0) }
+            || offerStarters.contains { lowercased.hasPrefix($0) }
     }
 
     private func validateHTTPResponse(_ response: URLResponse, data: Data) throws {
@@ -5450,7 +5758,7 @@ final class BrainStore: ObservableObject {
     private func rebuildSearchIndex(from loadedNotes: [Note], in brain: BrainSummary) {
         let entries = loadedNotes.flatMap { note in
             let fileName = noteIdentityDatabase?.fileName(forNoteID: note.id)
-                ?? markdownFileName(for: note.title, id: note.id)
+                ?? markdownFileName(for: note.title)
             return searchIndexEntries(for: note, fileName: fileName)
         }
         searchIndex = entries
@@ -5652,17 +5960,19 @@ final class BrainStore: ObservableObject {
 
     private func isSupportedPromptDocument(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
-        return ext == "pdf"
-            || ext == "doc"
-            || ext == "docx"
-            || ["png", "jpg", "jpeg", "gif", "heic", "tiff", "webp"].contains(ext)
+        return Self.supportedDocumentAttachmentExtensions.contains(ext)
+            || Self.supportedImageAttachmentExtensions.contains(ext)
     }
 
     private func isSupportedImageFile(_ url: URL) -> Bool {
-        ["png", "jpg", "jpeg", "gif", "heic", "tiff", "webp"].contains(url.pathExtension.lowercased())
+        Self.supportedImageAttachmentExtensions.contains(url.pathExtension.lowercased())
     }
 
-    private func attachPDFWithMistralOCR(from url: URL) {
+    private var supportedAttachmentStatusMessage: String {
+        "Only PDFs, Word documents, PowerPoint files, and images are supported"
+    }
+
+    private func attachPDFWithMistralOCR(from url: URL, storedFileURL: URL, target: AttachmentTarget) {
         guard !mistralAPIKey.isEmpty || requestAndSaveMistralAPIKey(
             title: "Mistral API Key",
             message: "Mistral OCR needs your Mistral API key before reading this PDF."
@@ -5691,20 +6001,74 @@ final class BrainStore: ObservableObject {
         Task {
             do {
                 let extractedText = try await extractPDFTextWithMistralOCR(data: data, pages: pages)
-                assistantAttachment = PromptAttachment(
-                    fileName: url.lastPathComponent,
-                    fileExtension: url.pathExtension.lowercased(),
-                    extractedText: extractedText
+                setAttachment(
+                    PromptAttachment(
+                        fileName: storedFileURL.lastPathComponent,
+                        fileExtension: storedFileURL.pathExtension.lowercased(),
+                        extractedText: extractedText,
+                        storedFileURL: storedFileURL
+                    ),
+                    for: target
                 )
 
                 if pageCount > pageLimit {
-                    status = "\(url.lastPathComponent) attached · first \(pageLimit) pages OCRed"
+                    status = "\(storedFileURL.lastPathComponent) attached · first \(pageLimit) pages OCRed"
                 } else {
-                    status = "\(url.lastPathComponent) attached"
+                    status = "\(storedFileURL.lastPathComponent) attached"
                 }
             } catch {
                 status = error.localizedDescription
             }
+        }
+    }
+
+    private func attachDocumentWithMistralOCR(from url: URL, storedFileURL: URL, target: AttachmentTarget) {
+        guard !mistralAPIKey.isEmpty || requestAndSaveMistralAPIKey(
+            title: "Mistral API Key",
+            message: "Mistral OCR needs your Mistral API key before reading this file."
+        ) else {
+            status = "Mistral API key required for OCR"
+            return
+        }
+
+        guard let data = try? Data(contentsOf: url) else {
+            status = "Could not read \(url.lastPathComponent)"
+            return
+        }
+
+        guard !exceedsMistralUploadLimit(byteCount: data.count) else {
+            status = mistralUploadLimitStatusMessage(forFileName: url.lastPathComponent)
+            return
+        }
+
+        let mimeType = documentMimeType(forFileName: storedFileURL.lastPathComponent)
+        status = "OCR reading \(storedFileURL.lastPathComponent)"
+
+        Task {
+            do {
+                let extractedText = try await extractDocumentTextWithMistralOCR(data: data, mimeType: mimeType)
+                setAttachment(
+                    PromptAttachment(
+                        fileName: storedFileURL.lastPathComponent,
+                        fileExtension: storedFileURL.pathExtension.lowercased(),
+                        extractedText: extractedText,
+                        storedFileURL: storedFileURL
+                    ),
+                    for: target
+                )
+                status = "\(storedFileURL.lastPathComponent) attached · OCRed"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    private func setAttachment(_ attachment: PromptAttachment, for target: AttachmentTarget) {
+        switch target {
+        case .assistant:
+            assistantAttachment = attachment
+        case .helpDesk:
+            helpDeskAttachment = attachment
         }
     }
 
@@ -5727,6 +6091,27 @@ final class BrainStore: ObservableObject {
         let (responseData, response) = try await URLSession.shared.data(for: request)
         try processMistralHTTPResponse(response, data: responseData)
         recordMistralOCRUsage(from: responseData, fallbackPageCount: pages.count)
+        return try extractOCRMarkdown(from: responseData)
+    }
+
+    private func extractDocumentTextWithMistralOCR(data: Data, mimeType: String) async throws -> String {
+        var request = URLRequest(url: URL(string: "https://api.mistral.ai/v1/ocr")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(mistralAPIKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": Self.mistralOCRModel,
+            "document": [
+                "type": "document_url",
+                "document_url": "data:\(mimeType);base64,\(data.base64EncodedString())"
+            ],
+            "include_image_base64": false,
+            "table_format": "markdown"
+        ])
+
+        let (responseData, response) = try await URLSession.shared.data(for: request)
+        try processMistralHTTPResponse(response, data: responseData)
+        recordMistralOCRUsage(from: responseData, fallbackPageCount: 1)
         return try extractOCRMarkdown(from: responseData)
     }
 
@@ -5800,6 +6185,60 @@ final class BrainStore: ObservableObject {
 
     private func notesFolderURL(for brain: BrainSummary) -> URL {
         brain.folderURL.appendingPathComponent("Notes", isDirectory: true)
+    }
+
+    private func filesFolderURL(for brain: BrainSummary) -> URL {
+        brain.folderURL.appendingPathComponent("Files", isDirectory: true)
+    }
+
+    private func attachmentFolderURL(forExtension fileExtension: String, in brain: BrainSummary) -> URL {
+        let ext = fileExtension.lowercased()
+        let folderName: String
+        if ext == "pdf" {
+            folderName = "PDFs"
+        } else if Self.supportedImageAttachmentExtensions.contains(ext) {
+            folderName = "Images"
+        } else {
+            folderName = "Documents"
+        }
+        return filesFolderURL(for: brain).appendingPathComponent(folderName, isDirectory: true)
+    }
+
+    private func createWorkspaceFileFolders(in brain: BrainSummary) throws {
+        try FileManager.default.createDirectory(at: filesFolderURL(for: brain), withIntermediateDirectories: true)
+        for folderName in ["PDFs", "Images", "Documents"] {
+            try FileManager.default.createDirectory(
+                at: filesFolderURL(for: brain).appendingPathComponent(folderName, isDirectory: true),
+                withIntermediateDirectories: true
+            )
+        }
+    }
+
+    private func copyAttachmentToWorkspace(from sourceURL: URL) throws -> URL {
+        guard let activeBrain else {
+            throw AssistantError.missingConfiguration("Open or create a brain first")
+        }
+
+        let destinationFolder = attachmentFolderURL(forExtension: sourceURL.pathExtension, in: activeBrain)
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+        let destinationURL = uniqueFileURL(named: sourceURL.lastPathComponent, in: destinationFolder)
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        return destinationURL
+    }
+
+    private func storeAttachmentDataInWorkspace(_ data: Data, suggestedFileName: String?, kind: WorkspaceFileKind) throws -> URL {
+        guard let activeBrain else {
+            throw AssistantError.missingConfiguration("Open or create a brain first")
+        }
+
+        let folder = filesFolderURL(for: activeBrain).appendingPathComponent(kind.folderName, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let fileName = kind == .images
+            ? promptImageFileName(suggestedFileName: suggestedFileName)
+            : ((suggestedFileName?.isEmpty == false ? suggestedFileName : nil) ?? "attached-file")
+        let destinationURL = uniqueFileURL(named: fileName, in: folder)
+        try data.write(to: destinationURL, options: .atomic)
+        return destinationURL
     }
 
     private func noteFileURLs(in brain: BrainSummary) throws -> [URL] {
@@ -6141,8 +6580,25 @@ final class BrainStore: ObservableObject {
             return "image/tiff"
         case "webp":
             return "image/webp"
+        case "avif":
+            return "image/avif"
         default:
             return "image/png"
+        }
+    }
+
+    private func documentMimeType(forFileName fileName: String) -> String {
+        switch (fileName as NSString).pathExtension.lowercased() {
+        case "doc":
+            return "application/msword"
+        case "docx":
+            return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        case "ppt":
+            return "application/vnd.ms-powerpoint"
+        case "pptx":
+            return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        default:
+            return "application/octet-stream"
         }
     }
 
@@ -6210,13 +6666,28 @@ final class BrainStore: ObservableObject {
         return String(filePath.dropFirst(prefix.count))
     }
 
-    private func markdownNoteURL(for note: Note, in brain: BrainSummary) -> URL {
-        let fileName = markdownFileName(for: note.title, id: note.id)
+    private func sidebarGroupTitle(fromRelativeFileName fileName: String) -> String? {
+        let components = fileName
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        guard components.count > 1 else { return nil }
+        return sanitizedSidebarGroupTitle(components[0])
+    }
+
+    private func markdownNoteURL(for note: Note, in brain: BrainSummary, allowing existingURL: URL? = nil) -> URL {
         let folder = sidebarGroupID(forNoteID: note.id)
             .flatMap { sidebarGroup(for: $0) }
             .map { sidebarGroupFolderURL(for: $0, in: brain) }
             ?? notesFolderURL(for: brain)
-        return folder.appendingPathComponent(fileName)
+        return markdownNoteURL(for: note, inFolder: folder, allowing: existingURL)
+    }
+
+    private func markdownNoteURL(for note: Note, inFolder folder: URL, allowing existingURL: URL? = nil) -> URL {
+        uniqueFileURL(
+            named: markdownFileName(for: note.title),
+            in: folder,
+            allowing: existingURL
+        )
     }
 
     private func sidebarGroup(for id: SidebarItem.ID) -> SidebarItem? {
@@ -6413,14 +6884,8 @@ final class BrainStore: ObservableObject {
         return note.createdAt
     }
 
-    private func markdownFileName(for title: String, id: Note.ID) -> String {
-        let slug = title
-            .lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-            .joined(separator: "-")
-        let cleanSlug = slug.isEmpty ? "untitled" : slug
-        return "\(cleanSlug)-\(id.prefix(8)).md"
+    private func markdownFileName(for title: String) -> String {
+        markdownDisplayFileName(for: title)
     }
 
     private func markdownDisplayFileName(for title: String) -> String {
@@ -6726,6 +7191,14 @@ struct PromptAttachment: Equatable {
     let fileName: String
     let fileExtension: String
     let extractedText: String
+    let storedFileURL: URL?
+
+    init(fileName: String, fileExtension: String, extractedText: String, storedFileURL: URL? = nil) {
+        self.fileName = fileName
+        self.fileExtension = fileExtension
+        self.extractedText = extractedText
+        self.storedFileURL = storedFileURL
+    }
 }
 
 struct PromptLinkedPage: Identifiable, Equatable {

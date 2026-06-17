@@ -760,7 +760,7 @@ private struct WorkspaceView: View {
 
                 guard let url else {
                     Task { @MainActor in
-                        store.status = "Only PDFs, Word documents, and images are supported"
+                        store.status = "Only PDFs, Word documents, PowerPoint files, and images are supported"
                     }
                     return
                 }
@@ -775,7 +775,7 @@ private struct WorkspaceView: View {
         guard let directProvider = providers.first(where: { provider in
             Self.directDocumentDropTypes.contains { provider.hasItemConformingToTypeIdentifier($0) }
         }) else {
-            store.status = "Only PDFs, Word documents, and images are supported"
+            store.status = "Only PDFs, Word documents, PowerPoint files, and images are supported"
             return false
         }
 
@@ -794,7 +794,7 @@ private struct WorkspaceView: View {
                   let copiedURL = copyDroppedDocumentToTemporaryURL(url, suggestedName: directProvider.suggestedName)
             else {
                 Task { @MainActor in
-                    store.status = "Only PDFs, Word documents, and images are supported"
+                    store.status = "Only PDFs, Word documents, PowerPoint files, and images are supported"
                 }
                 return
             }
@@ -829,6 +829,8 @@ private struct WorkspaceView: View {
         UTType.pdf.identifier,
         "com.microsoft.word.doc",
         "org.openxmlformats.wordprocessingml.document",
+        "com.microsoft.powerpoint.ppt",
+        "org.openxmlformats.presentationml.presentation",
         UTType.image.identifier
     ]
 
@@ -2895,6 +2897,30 @@ private struct HelpDeskMarkdownSuggestionBox: View {
     let onDismiss: () -> Void
     let onDisableForSession: () -> Void
 
+    private var suggestionMessage: AttributedString {
+        var message = AttributedString()
+
+        switch suggestion.action {
+        case .appendToExisting:
+            message.append(AttributedString("Add this answer to "))
+        case .createNew:
+            message.append(AttributedString("No matching page found. Create "))
+        }
+
+        var pageTitle = AttributedString(suggestion.pageTitle)
+        pageTitle.font = .system(size: 13, weight: .semibold)
+        message.append(pageTitle)
+
+        switch suggestion.action {
+        case .appendToExisting:
+            message.append(AttributedString("?"))
+        case .createNew:
+            message.append(AttributedString(" with this answer?"))
+        }
+
+        return message
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label("Suggested page", systemImage: "sparkles")
@@ -2918,18 +2944,7 @@ private struct HelpDeskMarkdownSuggestionBox: View {
                         .disabled(isActionDisabled)
                 }
             } else {
-                Group {
-                    switch suggestion.action {
-                    case .appendToExisting:
-                        Text("Add this answer to ") +
-                            Text(suggestion.pageTitle).fontWeight(.semibold) +
-                            Text("?")
-                    case .createNew:
-                        Text("No matching page found. Create ") +
-                            Text(suggestion.pageTitle).fontWeight(.semibold) +
-                            Text(" with this answer?")
-                    }
-                }
+                Text(suggestionMessage)
                 .font(.system(size: 13))
                 .foregroundStyle(.primary.opacity(0.9))
                 .fixedSize(horizontal: false, vertical: true)
@@ -3174,12 +3189,19 @@ private struct HomePageView: View {
             Text("Summary")
                 .font(.system(size: 22, weight: .bold))
 
-            Text(presentation.vaultSummary.isEmpty ? "No summary yet." : presentation.vaultSummary)
-                .font(.system(size: 15))
+            if presentation.vaultSummary.isEmpty {
+                Text("No summary yet.")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.primary.opacity(0.88))
+            } else {
+                MarkdownPreview(
+                    content: presentation.vaultSummary,
+                    searchHighlight: nil,
+                    openLinkedNote: { store.openLinkedNote(named: $0) }
+                )
                 .foregroundStyle(.primary.opacity(0.88))
-                .lineLimit(7)
-                .multilineTextAlignment(.leading)
                 .textSelection(.enabled)
+            }
         }
     }
 
@@ -3283,7 +3305,7 @@ private struct HomePageSummaryCard: View {
                             .rotationEffect(.degrees(isExpanded ? 90 : 0))
                     }
 
-                    Text(card.summary)
+                    HomeInlineMarkdownText(card.summary)
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .lineLimit(isExpanded ? nil : 5)
@@ -3387,7 +3409,7 @@ private struct HomeFlashcardView: View {
                 Text("Question")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.secondary)
-                Text(card.question)
+                HomeInlineMarkdownText(card.question)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.primary)
                     .multilineTextAlignment(.leading)
@@ -3397,7 +3419,7 @@ private struct HomeFlashcardView: View {
                     Text("Answer")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(.secondary)
-                    Text(card.answer)
+                    HomeInlineMarkdownText(card.answer)
                         .font(.system(size: 13))
                         .foregroundStyle(.primary.opacity(0.88))
                         .multilineTextAlignment(.leading)
@@ -3419,6 +3441,26 @@ private struct HomeFlashcardView: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
+    }
+}
+
+private struct HomeInlineMarkdownText: View {
+    let content: String
+
+    init(_ content: String) {
+        self.content = content
+    }
+
+    var body: some View {
+        renderedText
+    }
+
+    private var renderedText: Text {
+        if let attributed = try? AttributedString(markdown: content) {
+            return Text(attributed)
+        }
+
+        return Text(content)
     }
 }
 
@@ -5104,6 +5146,8 @@ private struct AssistantPreviewPanel: View {
 
 private struct AssistantConversationPanel: View {
     let response: AssistantConversationResponse
+    let addToPage: () -> Void
+    let isAddingToPage: Bool
     let exitConversation: () -> Void
     let openLinkedNote: (String) -> Void
 
@@ -5125,6 +5169,7 @@ private struct AssistantConversationPanel: View {
 
             HStack {
                 Spacer()
+                addToPageButton
                 exitConversationButton
             }
         }
@@ -5137,6 +5182,27 @@ private struct AssistantConversationPanel: View {
                 .stroke(Color.primary.opacity(0.14), lineWidth: 1)
         }
         .shadow(color: .black.opacity(0.22), radius: 22, y: 10)
+    }
+
+    private var addToPageButton: some View {
+        Button(action: addToPage) {
+            Image(systemName: "plus.circle.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.primary.opacity(isAddingToPage ? 0.42 : 0.86))
+                .frame(width: 30, height: 30)
+                .background {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .overlay {
+                            Circle()
+                                .stroke(Color.primary.opacity(0.14), lineWidth: 0.8)
+                        }
+                }
+        }
+        .buttonStyle(.plain)
+        .disabled(isAddingToPage)
+        .help("Add this answer to the page")
     }
 
     private var exitConversationButton: some View {
@@ -5402,12 +5468,18 @@ private struct PromptTextInputView: NSViewRepresentable {
             textView.textContainer?.lineFragmentPadding = 0
         }
 
-        func applyFocus(to textView: NSTextView) {
+        func applyFocus(to textView: NSTextView, retryCount: Int = 0) {
             guard isFocused else { return }
             DispatchQueue.main.async {
-                guard let window = textView.window,
-                      window.firstResponder !== textView
-                else { return }
+                guard let window = textView.window else {
+                    if retryCount < 3 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+                            self.applyFocus(to: textView, retryCount: retryCount + 1)
+                        }
+                    }
+                    return
+                }
+                guard window.firstResponder !== textView else { return }
 
                 window.makeFirstResponder(textView)
                 textView.setSelectedRange(self.clampedSelection(in: textView.string))
@@ -5623,6 +5695,10 @@ private struct AssistantFloatingPill: View {
             if let response = store.assistantConversationResponse {
                 AssistantConversationPanel(
                     response: response,
+                    addToPage: {
+                        store.addAssistantConversationResponseToCurrentNote()
+                    },
+                    isAddingToPage: store.isGeneratingAssistantResponse,
                     exitConversation: {
                         withAnimation(.easeInOut(duration: 0.18)) {
                             store.exitAssistantConversation()
@@ -5843,10 +5919,7 @@ private struct AssistantFloatingPill: View {
                 isExpandedPromptFocused = false
                 isPromptFocused = true
             } else {
-                DispatchQueue.main.async {
-                    isPromptFocused = false
-                    isExpandedPromptFocused = true
-                }
+                focusExpandedPromptAfterLayout()
             }
         } label: {
             Image(systemName: isExpandedComposerPresented ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
@@ -5931,6 +6004,9 @@ private struct AssistantFloatingPill: View {
         }
             .background(Color.primary.opacity(0.045))
             .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .onAppear {
+                focusExpandedPromptAfterLayout()
+            }
     }
 
     private var promptLinkChips: some View {
@@ -6202,8 +6278,16 @@ private struct AssistantFloatingPill: View {
         withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
             isExpandedComposerPresented = true
         }
+        focusExpandedPromptAfterLayout()
+    }
+
+    private func focusExpandedPromptAfterLayout() {
+        isPromptFocused = false
+        isExpandedPromptFocused = false
         DispatchQueue.main.async {
-            isPromptFocused = false
+            isExpandedPromptFocused = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             isExpandedPromptFocused = true
         }
     }
@@ -6294,6 +6378,7 @@ private struct AssistantFloatingPill: View {
         UTType.gif.identifier,
         "public.heic",
         "org.webmproject.webp",
+        "public.avif",
         UTType.image.identifier
     ]
 }
@@ -7388,7 +7473,7 @@ private struct UsernameConfigurationView: View {
                     Text("Your Profile")
                         .font(.system(size: 24, weight: .bold))
 
-                    Text("Your name and pronouns personalize the welcome greeting and AI responses. Occupation is optional.")
+                    Text("Your name and pronouns personalize the welcome greeting, Zirn Chat, and Home summaries. Occupation is optional.")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

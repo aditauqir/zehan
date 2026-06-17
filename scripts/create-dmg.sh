@@ -6,6 +6,7 @@ APP_PATH="${1:-$ROOT/build/Zirn.app}"
 DIST_DIR="$ROOT/dist"
 BACKGROUND="$ROOT/packaging/background.png"
 BACKGROUND_2X="$ROOT/packaging/background@2x.png"
+INSTALL_README="$ROOT/packaging/README.txt"
 STAGING="$ROOT/build/dmg-staging"
 DS_STORE_SCRIPT="$ROOT/scripts/generate-dmg-ds-store.py"
 
@@ -24,6 +25,7 @@ mkdir -p "$STAGING" "$DIST_DIR"
 ditto --norsrc --noextattr "$APP_PATH" "$STAGING/Zirn.app"
 xattr -cr "$STAGING/Zirn.app"
 ln -sf /Applications "$STAGING/Applications"
+cp "$INSTALL_README" "$STAGING/README.txt"
 rm -f "$DMG_PATH"
 
 if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then

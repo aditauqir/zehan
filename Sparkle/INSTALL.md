@@ -1,7 +1,8 @@
 # Install Zirn (for your website)
 
-Zirn release DMGs are Developer ID signed and notarized so macOS can verify the
-app on first launch.
+Zirn release DMGs include a `README.txt` first-launch notice. Zirn may not be
+notarized by Apple yet, so macOS can warn that it cannot verify the app is free
+of malware the first time it opens.
 
 ## Download
 
@@ -15,11 +16,15 @@ Requires **macOS 26.0** or later.
 2. Drag **Zirn** into **Applications**.
 3. Open Zirn from Applications or Launchpad.
 
-## If macOS still blocks the app
+## If macOS blocks the app
 
-If macOS says it cannot verify Zirn is free of malware, the downloaded release
-was not notarized correctly. Download the latest DMG again, or contact support
-so the release can be re-shipped.
+1. Open Applications in Finder.
+2. Control-click or right-click Zirn, then choose **Open**.
+3. Choose **Open** again in the warning dialog.
+
+If macOS does not show the Open button, open **System Settings > Privacy &
+Security**, find the Zirn warning, then choose **Open Anyway** and confirm
+**Open**.
 
 ## Updates
 

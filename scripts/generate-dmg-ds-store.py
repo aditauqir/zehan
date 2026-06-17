@@ -29,6 +29,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--app-y", type=int, default=230)
     parser.add_argument("--applications-x", type=int, default=90)
     parser.add_argument("--applications-y", type=int, default=230)
+    parser.add_argument("--readme-name", default="README.txt")
+    parser.add_argument("--readme-x", type=int, default=256)
+    parser.add_argument("--readme-y", type=int, default=80)
     return parser.parse_args()
 
 
@@ -97,6 +100,7 @@ def main() -> int:
         store["."]["icvl"] = ("type", b"icnv")
         store[args.app_name]["Iloc"] = (args.app_x, args.app_y)
         store["Applications"]["Iloc"] = (args.applications_x, args.applications_y)
+        store[args.readme_name]["Iloc"] = (args.readme_x, args.readme_y)
 
     print(f"wrote {ds_store_path}")
     return 0

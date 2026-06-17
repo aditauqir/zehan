@@ -5,6 +5,7 @@
 
 import AppKit
 import Sparkle
+import SwiftUI
 
 /// Presents Zirn-branded update prompts while delegating download/install UI to Sparkle.
 @MainActor
@@ -28,22 +29,64 @@ final class ZirnUpdateUserDriver: NSObject, SPUUserDriver {
         NSApp.activate(ignoringOtherApps: true)
 
         let versionTitle = ZirnUpdateVersionDisplay.title(for: appcastItem)
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "New update for Zirn \(versionTitle) available."
-        alert.informativeText = "Review what changed, then choose whether to install it now."
-        if let releaseNotesView = releaseNotesAccessoryView(for: appcastItem.itemDescription) {
-            alert.accessoryView = releaseNotesView
-        }
-        alert.addButton(withTitle: "Update")
-        alert.addButton(withTitle: "Don't Update")
-        alert.addButton(withTitle: "Skip This Version")
+        let releaseNotesHTML = appcastItem.itemDescription
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 430),
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Update available"
+        panel.titlebarAppearsTransparent = true
+        panel.isFloatingPanel = false
+        panel.isReleasedWhenClosed = false
+        panel.level = .modalPanel
+        panel.backgroundColor = .clear
+        panel.isMovableByWindowBackground = true
+        panel.animationBehavior = .alertPanel
 
-        switch alert.runModal() {
+        var didStopModal = false
+        let stopModal: (NSApplication.ModalResponse) -> Void = { response in
+            guard !didStopModal else { return }
+            didStopModal = true
+            NSApp.stopModal(withCode: response)
+        }
+
+        let closeDelegate = ZirnUpdateModalPanelDelegate {
+            stopModal(.alertSecondButtonReturn)
+        }
+        panel.delegate = closeDelegate
+
+        panel.contentView = NSHostingView(
+            rootView: ZirnUpdateFoundView(
+                version: versionTitle,
+                releaseNotesHTML: releaseNotesHTML,
+                onUpdate: { [weak panel] in
+                    stopModal(.alertFirstButtonReturn)
+                    panel?.close()
+                },
+                onDismiss: { [weak panel] in
+                    stopModal(.alertSecondButtonReturn)
+                    panel?.close()
+                },
+                onSkip: { [weak panel] in
+                    stopModal(.alertThirdButtonReturn)
+                    panel?.close()
+                }
+            )
+        )
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+
+        let response = NSApp.runModal(for: panel)
+        panel.orderOut(nil)
+        panel.delegate = nil
+
+        switch response {
         case .alertFirstButtonReturn:
             ZirnPendingUpdateStore.save(
                 version: versionTitle,
-                releaseNotesHTML: appcastItem.itemDescription
+                releaseNotesHTML: releaseNotesHTML
             )
             reply(.install)
         case .alertThirdButtonReturn:
@@ -124,80 +167,16 @@ final class ZirnUpdateUserDriver: NSObject, SPUUserDriver {
     func showUpdateInFocus() {
         standardDriver.showUpdateInFocus()
     }
+}
 
-    private func releaseNotesAccessoryView(for html: String?) -> NSView? {
-        guard let html,
-              !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else { return nil }
+private final class ZirnUpdateModalPanelDelegate: NSObject, NSWindowDelegate {
+    private let onClose: () -> Void
 
-        let container = NSStackView()
-        container.orientation = .vertical
-        container.alignment = .leading
-        container.spacing = 8
-        container.translatesAutoresizingMaskIntoConstraints = false
-
-        let title = NSTextField(labelWithString: "What's changed")
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
-        title.textColor = .labelColor
-
-        let scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = false
-        scrollView.autohidesScrollers = true
-        scrollView.drawsBackground = true
-        scrollView.backgroundColor = .textBackgroundColor.withAlphaComponent(0.72)
-        scrollView.borderType = .bezelBorder
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-
-        let textView = NSTextView()
-        textView.isEditable = false
-        textView.isSelectable = true
-        textView.drawsBackground = false
-        textView.textContainerInset = NSSize(width: 10, height: 10)
-        textView.autoresizingMask = [.width]
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.textContainer?.widthTracksTextView = true
-
-        if let attributed = attributedReleaseNotes(from: html) {
-            textView.textStorage?.setAttributedString(attributed)
-        } else {
-            textView.string = html
-        }
-
-        scrollView.documentView = textView
-        container.addArrangedSubview(title)
-        container.addArrangedSubview(scrollView)
-
-        NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: 420),
-            scrollView.widthAnchor.constraint(equalTo: container.widthAnchor),
-            scrollView.heightAnchor.constraint(equalToConstant: 190),
-        ])
-
-        return container
+    init(onClose: @escaping () -> Void) {
+        self.onClose = onClose
     }
 
-    private func attributedReleaseNotes(from html: String) -> NSAttributedString? {
-        guard let data = html.data(using: .utf8),
-              let attributed = try? NSMutableAttributedString(
-                data: data,
-                options: [
-                    .documentType: NSAttributedString.DocumentType.html,
-                    .characterEncoding: String.Encoding.utf8.rawValue,
-                ],
-                documentAttributes: nil
-              )
-        else { return nil }
-
-        let fullRange = NSRange(location: 0, length: attributed.length)
-        attributed.addAttributes(
-            [
-                .foregroundColor: NSColor.labelColor,
-                .font: NSFont.systemFont(ofSize: 12),
-            ],
-            range: fullRange
-        )
-        return attributed
+    func windowWillClose(_ notification: Notification) {
+        onClose()
     }
 }
