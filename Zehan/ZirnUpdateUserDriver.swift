@@ -105,7 +105,16 @@ final class ZirnUpdateUserDriver: NSObject, SPUUserDriver {
     }
 
     func showUpdateNotFoundWithError(_ error: any Error, acknowledgement: @escaping () -> Void) {
-        standardDriver.showUpdateNotFoundWithError(error, acknowledgement: acknowledgement)
+        let currentVersion = Self.currentVersionDisplay()
+        let originalError = error as NSError
+        let presentationError = NSError(
+            domain: originalError.domain,
+            code: originalError.code,
+            userInfo: [
+                NSLocalizedDescriptionKey: "You are up to date (\(currentVersion))",
+            ]
+        )
+        standardDriver.showUpdateNotFoundWithError(presentationError, acknowledgement: acknowledgement)
     }
 
     func showUpdaterError(_ error: any Error, acknowledgement: @escaping () -> Void) {
@@ -166,6 +175,17 @@ final class ZirnUpdateUserDriver: NSObject, SPUUserDriver {
 
     func showUpdateInFocus() {
         standardDriver.showUpdateInFocus()
+    }
+
+    private static func currentVersionDisplay() -> String {
+        let rawVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let rawVersion, !rawVersion.isEmpty else {
+            return "the current version"
+        }
+
+        return rawVersion.lowercased().hasPrefix("v") ? rawVersion : "v\(rawVersion)"
     }
 }
 
