@@ -28,26 +28,32 @@ both `build/Zirn.app` and the installer DMG before publishing artifacts. Set
 
 ### Notarization credentials
 
-Install a Developer ID Application certificate locally, then configure one of:
+Install a **Developer ID Application** certificate in Keychain, then store notary
+credentials once:
 
 ```bash
-NOTARYTOOL_PROFILE=zirn-notary
+xcrun notarytool store-credentials ZirnNotary \
+  --apple-id "you@example.com" \
+  --team-id L22992699P \
+  --password "xxxx-xxxx-xxxx-xxxx"
 ```
 
-or:
+The ship scripts default to `NOTARYTOOL_PROFILE=ZirnNotary`. Release signing runs
+in `/tmp/ZirnReleaseStage` because codesign rejects Sparkle binaries inside the
+iCloud `nosync` workspace folder.
+
+**First-time Apple Developer accounts:** after enrolling, sign all agreements at
+[developer.apple.com/account](https://developer.apple.com/account) and
+[appstoreconnect.apple.com/agreements](https://appstoreconnect.apple.com/agreements).
+The first notarization can take 15–60 minutes; if a submission stays **In
+Progress** for hours, check agreements and [Apple System Status](https://developer.apple.com/system-status/)
+before submitting again. Duplicate stuck submissions do not affect eligibility —
+wait for one result instead of uploading more copies.
+
+If `scripts/ship-update.sh` is interrupted during `--wait`, resume with:
 
 ```bash
-APPLE_ID=you@example.com
-APP_SPECIFIC_PASSWORD=xxxx-xxxx-xxxx-xxxx
-APPLE_TEAM_ID=L22992699P
-```
-
-or App Store Connect API key credentials:
-
-```bash
-APP_STORE_CONNECT_KEY_PATH=/path/to/AuthKey_XXXX.p8
-APP_STORE_CONNECT_KEY_ID=XXXX
-APP_STORE_CONNECT_ISSUER_ID=XXXX
+NOTARY_SUBMISSION_ID=<uuid-from-history> scripts/finish-notarized-release.sh
 ```
 
 ### Website download link

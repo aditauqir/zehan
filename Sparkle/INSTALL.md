@@ -1,12 +1,11 @@
 # Install Zirn (for your website)
 
-Zirn release DMGs include a `README.txt` first-launch notice. Zirn may not be
-notarized by Apple yet, so macOS can warn that it cannot verify the app is free
-of malware the first time it opens.
+Zirn release DMGs are signed with a Developer ID certificate and notarized by Apple
+before publication. macOS should open them without a Gatekeeper warning.
 
 ## Download
 
-[Download Zirn for Mac](https://github.com/aditauqir/zehan/releases/latest/download/Zirn-1.0.3.dmg)
+[Download Zirn for Mac](https://github.com/aditauqir/zehan/releases/latest/download/Zirn-1.2.dmg)
 
 Requires **macOS 26.0** or later.
 
