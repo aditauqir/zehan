@@ -39,11 +39,14 @@ fi
 xcodebuild "${BUILD_ARGS[@]}"
 
 APP_BUNDLE="$DERIVED_DATA/Build/Products/Release/Zirn.app"
+RELEASE_STAGE="/tmp/ZirnReleaseStage/Zirn.app"
 chmod +x scripts/sign-release-app.sh
 
-rm -rf "$BUILD_DIR/Zirn.app"
-ditto --norsrc --noextattr "$APP_BUNDLE" "$BUILD_DIR/Zirn.app"
-xattr -cr "$BUILD_DIR/Zirn.app"
-# Sign after copy so strict verification and notarization target the shipped bundle.
-scripts/sign-release-app.sh "$BUILD_DIR/Zirn.app"
+rm -rf /tmp/ZirnReleaseStage "$BUILD_DIR/Zirn.app"
+mkdir -p /tmp/ZirnReleaseStage "$BUILD_DIR"
+ditto --norsrc --noextattr "$APP_BUNDLE" "$RELEASE_STAGE"
+xattr -cr "$RELEASE_STAGE"
+# Sign outside the iCloud nosync workspace; codesign rejects Sparkle detritus there.
+scripts/sign-release-app.sh "$RELEASE_STAGE"
+ditto --norsrc --noextattr "$RELEASE_STAGE" "$BUILD_DIR/Zirn.app"
 echo "Built: $BUILD_DIR/Zirn.app"

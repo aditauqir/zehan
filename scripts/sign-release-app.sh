@@ -13,9 +13,20 @@ if [[ ! -d "$APP_PATH" ]]; then
 fi
 
 strip_release_metadata() {
+  dot_clean -m "$APP_PATH" 2>/dev/null || true
   xattr -cr "$APP_PATH"
-  find "$APP_PATH" -print0 | xargs -0 xattr -c 2>/dev/null || true
+  find "$APP_PATH" -print0 | while IFS= read -r -d '' path; do
+    xattr -c "$path" 2>/dev/null || true
+    xattr -d com.apple.provenance "$path" 2>/dev/null || true
+    xattr -d com.apple.FinderInfo "$path" 2>/dev/null || true
+  done
   rm -f "$APP_PATH/Contents/embedded.provisionprofile"
+}
+
+sign_path() {
+  local target="$1"
+  xattr -cr "$target" 2>/dev/null || true
+  codesign "${signing_args[@]}" "$target"
 }
 
 sign_release_app() {
@@ -39,14 +50,15 @@ sign_release_app() {
       "$sparkle_b/Sparkle"
     do
       if [[ -f "$bin" ]]; then
-        codesign "${signing_args[@]}" "$bin"
+        sign_path "$bin"
       fi
     done
-    codesign "${signing_args[@]}" "$sparkle_b/Updater.app"
-    codesign "${signing_args[@]}" "$sparkle_b"
-    codesign "${signing_args[@]}" "$APP_PATH/Contents/Frameworks/Sparkle.framework"
+    sign_path "$sparkle_b/Updater.app"
+    sign_path "$sparkle_b"
+    sign_path "$APP_PATH/Contents/Frameworks/Sparkle.framework"
   fi
 
+  xattr -cr "$APP_PATH" 2>/dev/null || true
   codesign "${signing_args[@]}" \
     --entitlements "$ENTITLEMENTS" \
     "$APP_PATH"
