@@ -188,7 +188,7 @@ private enum ZirnReleaseInfo {
 
     static var displayVersion: String {
         let version = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
-            ?? "1.1"
+            ?? "1.2"
         return "v\(version) (\(codename))"
     }
 }

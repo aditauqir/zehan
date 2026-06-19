@@ -78,6 +78,7 @@ final class BrainStore: ObservableObject {
     @Published var selectedHighlightSummaryModel: HighlightSummaryModel = .mistral
     @Published var isCompilingHighlightSummary = false
     @Published var isGeneratingHomePage = false
+    @Published var pageFlashcardStates: [Note.ID: PageFlashcardState] = [:]
     @Published var helpDeskConversations: [HelpDeskConversation] = []
     @Published var selectedHelpDeskConversationID: HelpDeskConversation.ID?
     @Published var helpDeskInput = ""
@@ -116,6 +117,7 @@ final class BrainStore: ObservableObject {
     private var autosaveTask: Task<Void, Never>?
     private var homeCompilationTask: Task<Void, Never>?
     private var lastHomeSourceDiceTokensForSimilarityCheck: [String]?
+    private var homePreparedNoteCache: [String: HomePreparedNoteCacheEntry] = [:]
     private var activeHomeGenerationID: UUID?
     private var activeHighlightGenerationID: UUID?
     private var assistantConversationMemory = LangChainConversationMemory()
@@ -145,6 +147,8 @@ final class BrainStore: ObservableObject {
     private static let homeCompilationAfterAutosaveNanoseconds: UInt64 = 300_000_000
     private static let homeDirectCharacterBudget = 18_000
     private static let homeNoteCondenseCharacterLimit = 4_500
+    private static let pageFlashcardSimilarityRegenerateThreshold = 0.99
+    private static let pageFlashcardMaxOutputTokens = 900
     private static let helpDeskContextCharacterBudget = 16_000
     private static let helpDeskRelevantBlockLimit = 10
     private static let helpDeskHistoryMessageLimit = 8
@@ -264,6 +268,10 @@ final class BrainStore: ObservableObject {
     var homePagePresentation: HomePagePresentation {
         var presentation = parseHomePagePresentation(from: homeMarkdown)
         if let sourceNotes = try? loadHomePageSourceNotes() {
+            presentation = homePresentationEnsuringAllPages(
+                presentation,
+                sourceNotes: sourceNotes
+            )
             if presentation.pageCards.isEmpty {
                 presentation = HomePagePresentation(
                     vaultSummary: presentation.vaultSummary,
@@ -989,6 +997,7 @@ final class BrainStore: ObservableObject {
             saveCurrentNote(statusText: "Autosaved")
         }
 
+        try? refreshVaultNotesForHome()
         homeCompilationTask?.cancel()
         homeCompilationTask = nil
         needsHomeRegenerationAfterCurrentCompile = false
@@ -1006,11 +1015,44 @@ final class BrainStore: ObservableObject {
         startForcedHomePageGeneration()
     }
 
+    func requestPageFlashcards(noteID: Note.ID, force: Bool = false) {
+        guard !pageFlashcardStates[noteID, default: .idle].isLoading else { return }
+        pageFlashcardStates[noteID] = PageFlashcardState(
+            isLoading: true,
+            bundle: pageFlashcardStates[noteID]?.bundle,
+            errorMessage: nil
+        )
+        status = force ? "Regenerating flashcards" : "Preparing flashcards"
+
+        Task { [weak self] in
+            await self?.loadOrGeneratePageFlashcards(noteID: noteID, force: force)
+        }
+    }
+
+    func openPageFlashcardSource(noteID: Note.ID, query: String?) {
+        openNote(id: noteID)
+        let cleanQuery = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !cleanQuery.isEmpty {
+            let normalizedQuery = normalizedSearchText(cleanQuery)
+            let blockIndex = markdownSearchBlocks(from: content)
+                .first { block in
+                    normalizedSearchText(block.text).contains(normalizedQuery)
+                }?
+                .index ?? 0
+            activeSearchHighlight = SearchHighlight(
+                noteID: noteID,
+                query: cleanQuery,
+                blockIndex: blockIndex
+            )
+        }
+    }
+
     private func openHomePage(regenerate: Bool) {
         if currentNoteID != nil, currentHighlightSummary == nil, !isShowingHomePage {
             saveCurrentNote(statusText: "Autosaved")
         }
 
+        try? refreshVaultNotesForHome()
         autosaveTask?.cancel()
         autosaveTask = nil
         pendingAssistantInsertion = nil
@@ -1026,9 +1068,7 @@ final class BrainStore: ObservableObject {
         content = homeMarkdown
         status = "Home opened"
 
-        if regenerate {
-            compileHomePageSummary()
-        }
+        compileHomePageSummary(force: regenerate)
     }
 
     func openHighlightSummary(id: HighlightSummary.ID) {
@@ -1126,7 +1166,8 @@ final class BrainStore: ObservableObject {
                similarity >= Self.homePageDiceSimilaritySkipThreshold {
                 refreshHomeSummarySourceSignature(
                     sourceFingerprint,
-                    sourceDiceTokens: currentSourceDiceTokens
+                    sourceDiceTokens: currentSourceDiceTokens,
+                    sourceNotes: sourceNotes
                 )
                 lastHomeSourceDiceTokensForSimilarityCheck = currentSourceDiceTokens
                 if isShowingHomePage {
@@ -1226,6 +1267,85 @@ final class BrainStore: ObservableObject {
             isGeneratingHomePage = false
             status = error.localizedDescription
         }
+    }
+
+    private func loadOrGeneratePageFlashcards(noteID: Note.ID, force: Bool) async {
+        do {
+            let note = try withActiveBrainAccessThrowing { () -> Note in
+                guard let noteURL = noteURL(for: noteID) else {
+                    throw CocoaError(.fileNoSuchFile)
+                }
+                return try readNote(from: noteURL)
+            }
+            let sourceTokens = pageFlashcardDiceTokens(for: note.content)
+
+            if !force,
+               let cached = try? loadPageFlashcardBundle(noteID: noteID),
+               let similarity = homeSourceDiceSimilarity(cached.sourceDiceTokens, sourceTokens),
+               similarity >= Self.pageFlashcardSimilarityRegenerateThreshold {
+                pageFlashcardStates[noteID] = PageFlashcardState(
+                    isLoading: false,
+                    bundle: cached,
+                    errorMessage: nil
+                )
+                status = "Flashcards ready"
+                return
+            }
+
+            let generated = try await generatePageFlashcards(note: note, sourceDiceTokens: sourceTokens)
+            try withActiveBrainAccessThrowing {
+                try persistPageFlashcardBundle(generated)
+            }
+            pageFlashcardStates[noteID] = PageFlashcardState(
+                isLoading: false,
+                bundle: generated,
+                errorMessage: nil
+            )
+            status = "Flashcards generated"
+        } catch {
+            pageFlashcardStates[noteID] = PageFlashcardState(
+                isLoading: false,
+                bundle: pageFlashcardStates[noteID]?.bundle,
+                errorMessage: error.localizedDescription
+            )
+            status = error.localizedDescription
+        }
+    }
+
+    private func generatePageFlashcards(note: Note, sourceDiceTokens: [String]) async throws -> PageFlashcardBundle {
+        let prompt = pageFlashcardPrompt(note: note)
+        let result: ChatCompletionResult
+        switch selectedHighlightSummaryModel {
+        case .mistral:
+            result = try await generateWithMistral(
+                system: pageFlashcardInstructions(),
+                user: prompt,
+                maxTokens: Self.pageFlashcardMaxOutputTokens
+            )
+            recordMistralUsage(
+                inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
+                outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+            )
+        case .ollama:
+            result = try await generateWithOllama(
+                system: pageFlashcardInstructions(),
+                user: prompt
+            )
+        }
+
+        let cards = try parsePageFlashcards(from: result.content, fallbackNote: note)
+        return PageFlashcardBundle(
+            noteID: note.id,
+            noteTitle: note.title,
+            sourceFingerprint: stableFingerprint(for: note.content),
+            sourceDiceTokens: sourceDiceTokens,
+            generatedAt: Date(),
+            modelTitle: selectedHighlightSummaryModel.displayModelName(
+                mistralModel: mistralModel,
+                ollamaModel: ollamaModel
+            ),
+            cards: cards
+        )
     }
 
     private func scheduleLiveHomePageCompilation(delay requestedDelay: UInt64? = nil, force: Bool = false) {
@@ -1737,6 +1857,34 @@ final class BrainStore: ObservableObject {
             }
         }
         return output
+    }
+
+    func markdownRelevanceCandidates(excluding noteID: Note.ID?) -> [MarkdownRelevanceCandidate] {
+        searchIndex
+            .filter { entry in
+                if let noteID {
+                    return entry.noteID != noteID
+                }
+                return true
+            }
+            .sorted {
+                if $0.rank != $1.rank {
+                    return $0.rank < $1.rank
+                }
+                return $0.updatedAt > $1.updatedAt
+            }
+            .prefix(320)
+            .map { entry in
+                MarkdownRelevanceCandidate(
+                    id: "\(entry.noteID)-\(entry.kind)-\(entry.blockIndex ?? -1)",
+                    noteID: entry.noteID,
+                    title: entry.title,
+                    text: entry.displayText,
+                    kind: entry.kind,
+                    rank: entry.rank,
+                    updatedAt: entry.updatedAt
+                )
+            }
     }
 
     private func scheduleAutosave() {
@@ -2477,6 +2625,23 @@ final class BrainStore: ObservableObject {
             throw capturedError
         }
         return sourceNotes
+    }
+
+    private func refreshVaultNotesForHome() throws {
+        guard let brain = activeBrain else { return }
+
+        var capturedError: Error?
+        withSecurityScopedAccess(to: brain.folderURL) {
+            do {
+                try loadNotes()
+            } catch {
+                capturedError = error
+            }
+        }
+
+        if let capturedError {
+            throw capturedError
+        }
     }
 
     private func loadSourceNotesFromVaultNoAccess(_ brain: BrainSummary) throws -> [HomePageSourceNote] {
@@ -3475,7 +3640,11 @@ final class BrainStore: ObservableObject {
 
             let duration = Date().timeIntervalSince(startedAt)
             let fallbackMarkdown = localHomePageMarkdown(vaultName: vaultName, sourceNotes: sourceNotes)
-            let markdown = normalizedHomePageMarkdown(result.content, fallbackMarkdown: fallbackMarkdown)
+            let markdown = normalizedHomePageMarkdown(
+                result.content,
+                fallbackMarkdown: fallbackMarkdown,
+                sourceNotes: sourceNotes
+            )
             let summary = HighlightSummary(
                 id: homeSummaryID,
                 sourceNoteID: "vault",
@@ -3726,11 +3895,23 @@ final class BrainStore: ObservableObject {
             Use the supplied page contents or condensed page notes for summaries and highlighted excerpts for flashcards.
             Preserve the user's writing style, rhythm, density, and vocabulary when possible.
             Every sentence must be complete. Remove fragments, dangling clauses, placeholder text, artifacts, and unfinished thoughts.
-            Strict length limits: Summary max 7 lines. Each page summary max 5 lines when previewed. Each flashcard answer max 4 lines.
-            Page summaries must be plain prose only. Do not use tables, bullet lists, numbered lists, code blocks, or other markdown formatting in page summaries.
+            Strict length limits: Summary max 100 words. Each page summary max 100 words when previewed. Each flashcard answer max 4 lines.
+            Write the Summary as one compact paragraph, not bullets. Use compact bullet lists only for page summaries. Do not use tables, numbered lists, code blocks, divider lines, separator lines, or lines made only from repeated punctuation.
             Return Markdown only. Do not include meta commentary, apologies, or code fences.
             """
         )
+    }
+
+    private func pageFlashcardInstructions() -> String {
+        """
+        You create study flashcards for exactly one Markdown page.
+        Use only the supplied page. Do not use the rest of the vault.
+        Return JSON only with a top-level "cards" array.
+        Each card must have "question", "answer", and "anchor" strings.
+        Create 3 to 6 concise cards. Answers should be direct and useful.
+        The anchor should be a short exact phrase from the source page that helps jump back to the idea.
+        Do not include Markdown fences, commentary, or divider lines.
+        """
     }
 
     private func homePageCondenseInstructions() -> String {
@@ -3792,10 +3973,10 @@ final class BrainStore: ObservableObject {
         # Home
 
         ## Summary
-        Write a coherent vault overview in at most 7 lines. Combine related ideas across pages instead of listing pages one by one.
+        Write a coherent vault overview as one compact paragraph, max 100 words total. Combine related ideas across pages instead of listing pages one by one. Do not use bullets here.
 
         ## Page Summaries
-        For each page, add a ### heading with the exact page title, then a plain-text summary paragraph. No tables, lists, code, or markdown formatting.
+        For each page, add a ### heading with the exact page title, then 2-4 short bullet points, max 100 words total for that page. No tables, numbered lists, code, divider lines, separator lines, or lines made only from repeated punctuation.
 
         ## Highlight Flashcards
         Create question-and-answer flashcards from highlighted excerpts, grouped by sidebar group.
@@ -3822,6 +4003,59 @@ final class BrainStore: ObservableObject {
         Correction-derived preferences, strongest first:
         \(learnedCorrectionMemory())\(userPersonalizationPromptSection())
         """
+    }
+
+    private func pageFlashcardPrompt(note: Note) -> String {
+        """
+        Page title:
+        \(note.title)
+
+        Markdown page content:
+        \(note.content)
+        """
+    }
+
+    private func parsePageFlashcards(from response: String, fallbackNote note: Note) throws -> [PageFlashcard] {
+        let cleaned = cleanedAssistantMarkdown(response)
+        let jsonText: String
+        if let start = cleaned.firstIndex(of: "{"),
+           let end = cleaned.lastIndex(of: "}") {
+            jsonText = String(cleaned[start...end])
+        } else {
+            jsonText = cleaned
+        }
+
+        if let data = jsonText.data(using: .utf8),
+           let payload = try? decoder.decode(PageFlashcardResponse.self, from: data) {
+            let cards = payload.cards
+                .map { card in
+                    PageFlashcard(
+                        id: UUID().uuidString,
+                        question: card.question.trimmingCharacters(in: .whitespacesAndNewlines),
+                        answer: card.answer.trimmingCharacters(in: .whitespacesAndNewlines),
+                        anchor: card.anchor.trimmingCharacters(in: .whitespacesAndNewlines)
+                    )
+                }
+                .filter { !$0.question.isEmpty && !$0.answer.isEmpty }
+            if !cards.isEmpty {
+                return cards
+            }
+        }
+
+        let summary = localPageSummary(for: HomePageSourceNote(
+            id: note.id,
+            title: note.title,
+            content: note.content,
+            updatedAt: note.updatedAt
+        ))
+        return [
+            PageFlashcard(
+                id: UUID().uuidString,
+                question: "What is the main idea of \(note.title)?",
+                answer: summary,
+                anchor: summary
+            )
+        ]
     }
 
     private func homePageSidebarGroupsDescription(sourceNotes: [HomePagePreparedNote]) -> String {
@@ -3869,11 +4103,19 @@ final class BrainStore: ObservableObject {
             let preparedMarkdown: String
 
             if shouldCondenseNote {
-                preparedMarkdown = try await condensedHomePageNote(
-                    note: note,
-                    highlights: highlights,
-                    model: model
-                )
+                let cacheKey = homePreparedNoteCacheKey(for: note)
+                if let cached = homePreparedNoteCache[cacheKey] {
+                    preparedMarkdown = cached.preparedMarkdown
+                } else {
+                    preparedMarkdown = try await condensedHomePageNote(
+                        note: note,
+                        highlights: highlights,
+                        model: model
+                    )
+                    homePreparedNoteCache[cacheKey] = HomePreparedNoteCacheEntry(
+                        preparedMarkdown: preparedMarkdown
+                    )
+                }
             } else {
                 preparedMarkdown = cleanContent
             }
@@ -3889,6 +4131,10 @@ final class BrainStore: ObservableObject {
         }
 
         return prepared
+    }
+
+    private func homePreparedNoteCacheKey(for note: HomePageSourceNote) -> String {
+        stableFingerprint(for: "\(note.id)\u{1F}\(note.title)\u{1F}\(note.content)")
     }
 
     private func condensedHomePageNote(
@@ -3974,7 +4220,7 @@ final class BrainStore: ObservableObject {
     }
 
     private func localHomePageMarkdown(vaultName: String, sourceNotes: [HomePageSourceNote]) -> String {
-        let vaultSummary = lineLimited(localVaultSummary(from: sourceNotes), maxLines: 7)
+        let vaultSummary = plainHomePageSummaryText(localVaultSummary(from: sourceNotes), maxWords: 100)
         let pageSummarySection = localPageCards(from: sourceNotes)
             .map { card in
                 """
@@ -4025,18 +4271,22 @@ final class BrainStore: ObservableObject {
         let pageCount = sourceNotes.count
         let titles = sourceNotes.map(\.title).joined(separator: ", ")
         let combinedPreview = sourceNotes
-            .map { localPageSummary(for: $0, sentenceLimit: 1) }
+            .map { localPageSummary(for: $0, sentenceLimit: 1, wordLimit: 24) }
             .filter { !$0.isEmpty }
             .joined(separator: " ")
 
         if combinedPreview.isEmpty {
-            return "This vault has \(pageCount) page\(pageCount == 1 ? "" : "s"): \(titles). Add body text to the pages and Home will summarize them automatically."
+            return wordLimited("This vault has \(pageCount) page\(pageCount == 1 ? "" : "s"): \(titles). Add body text to the pages and Home will summarize them automatically.", maxWords: 100)
         }
 
-        return "This vault has \(pageCount) page\(pageCount == 1 ? "" : "s"): \(titles). \(combinedPreview)"
+        return wordLimited("This vault has \(pageCount) page\(pageCount == 1 ? "" : "s"): \(titles). \(combinedPreview)", maxWords: 100)
     }
 
-    private func localPageSummary(for note: HomePageSourceNote, sentenceLimit: Int = 4) -> String {
+    private func localPageSummary(
+        for note: HomePageSourceNote,
+        sentenceLimit: Int = 4,
+        wordLimit: Int = 100
+    ) -> String {
         let plain = plainText(fromMarkdown: note.content)
         let withoutTitle = plain
             .replacingOccurrences(of: note.title, with: "", options: [.caseInsensitive])
@@ -4057,15 +4307,17 @@ final class BrainStore: ObservableObject {
             : sentences.prefix(sentenceLimit).joined(separator: ". ")
 
         let clean = selected.trimmingCharacters(in: .whitespacesAndNewlines)
-        return clean.hasSuffix(".") ? clean : "\(clean)."
+        let punctuated = clean.hasSuffix(".") ? clean : "\(clean)."
+        return wordLimited(punctuated, maxWords: wordLimit)
     }
 
     private func localPageCards(from sourceNotes: [HomePageSourceNote]) -> [HomePagePageCard] {
         sourceNotes.map { note in
-            HomePagePageCard(
+            let summary = localPageSummary(for: note, sentenceLimit: 8, wordLimit: 100)
+            return HomePagePageCard(
                 id: note.id,
                 title: note.title,
-                summary: plainHomePageSummaryText(localPageSummary(for: note, sentenceLimit: 8)),
+                summary: bulletedHomePageSummary(summary, maxWords: 100),
                 noteID: note.id
             )
         }
@@ -4122,30 +4374,108 @@ final class BrainStore: ObservableObject {
         return lines.prefix(maxLines).joined(separator: "\n")
     }
 
-    private func plainHomePageSummaryText(_ markdown: String) -> String {
-        let withoutTables = markdown
+    private func wordLimited(_ text: String, maxWords: Int) -> String {
+        let words = text
+            .split { $0.isWhitespace || $0.isNewline }
+            .map(String.init)
+        guard words.count > maxWords else { return text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let limited = words.prefix(maxWords).joined(separator: " ")
+        let trimmed = limited.trimmingCharacters(in: CharacterSet(charactersIn: " ,;:-"))
+        if trimmed.hasSuffix(".") || trimmed.hasSuffix("!") || trimmed.hasSuffix("?") {
+            return trimmed
+        }
+        return "\(trimmed)..."
+    }
+
+    private func bulletedHomePageSummary(_ text: String, maxWords: Int = 100) -> String {
+        let limited = wordLimited(plainText(fromMarkdown: text), maxWords: maxWords)
+        let sentences = limited
+            .components(separatedBy: CharacterSet(charactersIn: ".!?"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let items = sentences.isEmpty ? [limited] : Array(sentences.prefix(4))
+        return items
+            .map { item in
+                let clean = item.trimmingCharacters(in: .whitespacesAndNewlines)
+                return clean.hasSuffix(".") || clean.hasSuffix("!") || clean.hasSuffix("?")
+                    ? "- \(clean)"
+                    : "- \(clean)."
+            }
+            .joined(separator: "\n")
+    }
+
+    private func plainHomePageSummaryText(
+        _ markdown: String,
+        maxWords: Int = 100,
+        preserveBullets: Bool = true
+    ) -> String {
+        let cleanedLines = markdown
             .split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { line in
+            .compactMap { line -> String? in
                 let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty else { return true }
+                guard !trimmed.isEmpty else { return nil }
+                guard !isMarkdownDividerLine(trimmed) else { return nil }
                 if trimmed.contains("|") {
                     let pipeCount = trimmed.filter { $0 == "|" }.count
                     if pipeCount >= 2 || trimmed.hasPrefix("|") {
-                        return false
+                        return nil
                     }
                 }
                 if trimmed.hasPrefix("```") {
-                    return false
+                    return nil
                 }
-                return true
+                if preserveBullets,
+                   trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
+                    let body = String(trimmed.dropFirst(2))
+                    let clean = plainText(fromMarkdown: body)
+                    return clean.isEmpty ? nil : "- \(clean)"
+                }
+                return plainText(fromMarkdown: trimmed)
             }
             .joined(separator: "\n")
 
-        return withoutTables
-            .split(separator: "\n\n", omittingEmptySubsequences: true)
-            .map { plainText(fromMarkdown: String($0)) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n\n")
+        return wordLimitedMarkdownLines(cleanedLines, maxWords: maxWords)
+    }
+
+    private func wordLimitedMarkdownLines(_ text: String, maxWords: Int) -> String {
+        var remaining = maxWords
+        var output: [String] = []
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            guard remaining > 0 else { break }
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let marker: String
+            let body: String
+            if trimmed.hasPrefix("- ") {
+                marker = "- "
+                body = String(trimmed.dropFirst(2))
+            } else {
+                marker = ""
+                body = trimmed
+            }
+
+            let words = body.split { $0.isWhitespace || $0.isNewline }.map(String.init)
+            guard !words.isEmpty else { continue }
+            let takeCount = min(remaining, words.count)
+            remaining -= takeCount
+            var limited = words.prefix(takeCount).joined(separator: " ")
+            if takeCount < words.count {
+                limited = limited.trimmingCharacters(in: CharacterSet(charactersIn: " ,;:-")) + "..."
+            }
+            output.append("\(marker)\(limited)")
+        }
+
+        return output.joined(separator: "\n")
+    }
+
+    private func isMarkdownDividerLine(_ line: String) -> Bool {
+        let compact = line.filter { !$0.isWhitespace }
+        guard compact.count >= 2 else { return false }
+        return compact.allSatisfy { character in
+            character == "=" || character == "-" || character == "_" || character == "*"
+        }
     }
 
     private func extractHomeSummarySection(from markdown: String) -> String? {
@@ -4154,9 +4484,13 @@ final class BrainStore: ObservableObject {
     }
 
     private func parseHomePagePresentation(from markdown: String) -> HomePagePresentation {
-        let vaultSummary = lineLimited(
-            extractHomeSummarySection(from: markdown) ?? "",
-            maxLines: 7
+        let vaultSummary = plainHomePageSummaryText(
+            lineLimited(
+                extractHomeSummarySection(from: markdown) ?? "",
+                maxLines: 7
+            ),
+            maxWords: 100,
+            preserveBullets: false
         )
         let pageCards = parsePageSummaryCards(from: extractHomeSection("Page Summaries", from: markdown) ?? "")
         let flashcardGroups = parseFlashcardGroups(from: extractHomeSection("Highlight Flashcards", from: markdown) ?? "")
@@ -4181,8 +4515,30 @@ final class BrainStore: ObservableObject {
         }
 
         return HomePagePresentation(
-            vaultSummary: lineLimited(presentation.vaultSummary, maxLines: 7),
+            vaultSummary: plainHomePageSummaryText(
+                lineLimited(presentation.vaultSummary, maxLines: 7),
+                maxWords: 100,
+                preserveBullets: false
+            ),
             pageCards: enrichedCards,
+            flashcardGroups: presentation.flashcardGroups
+        )
+    }
+
+    private func homePresentationEnsuringAllPages(
+        _ presentation: HomePagePresentation,
+        sourceNotes: [HomePageSourceNote]
+    ) -> HomePagePresentation {
+        let existingTitles = Set(presentation.pageCards.map { normalizedLinkTitle($0.title) })
+        let missingCards = localPageCards(from: sourceNotes).filter { card in
+            !existingTitles.contains(normalizedLinkTitle(card.title))
+        }
+
+        guard !missingCards.isEmpty else { return presentation }
+
+        return HomePagePresentation(
+            vaultSummary: presentation.vaultSummary,
+            pageCards: presentation.pageCards + missingCards,
             flashcardGroups: presentation.flashcardGroups
         )
     }
@@ -4345,6 +4701,15 @@ final class BrainStore: ObservableObject {
         return Array(Set(tokens)).sorted()
     }
 
+    private func pageFlashcardDiceTokens(for content: String) -> [String] {
+        let tokenCharacters = CharacterSet.alphanumerics.inverted
+        let tokens = plainText(fromMarkdown: content)
+            .lowercased()
+            .components(separatedBy: tokenCharacters)
+            .filter { $0.count >= 2 }
+        return Array(Set(tokens)).sorted()
+    }
+
     private func homeSourceDiceSimilarity(_ previousTokens: [String], _ currentTokens: [String]) -> Double? {
         if previousTokens.isEmpty && currentTokens.isEmpty {
             return 1
@@ -4374,14 +4739,24 @@ final class BrainStore: ObservableObject {
         }
     }
 
-    private func refreshHomeSummarySourceSignature(_ fingerprint: String, sourceDiceTokens: [String]) {
+    private func refreshHomeSummarySourceSignature(
+        _ fingerprint: String,
+        sourceDiceTokens: [String],
+        sourceNotes: [HomePageSourceNote]? = nil
+    ) {
         guard let existing = latestHomeSummary else { return }
+        let markdown: String
+        if let sourceNotes {
+            markdown = homeMarkdownEnsuringAllPages(existing.markdown, sourceNotes: sourceNotes)
+        } else {
+            markdown = existing.markdown
+        }
         let updated = HighlightSummary(
             id: existing.id,
             sourceNoteID: existing.sourceNoteID,
             sourceTitle: existing.sourceTitle,
             title: existing.title,
-            markdown: existing.markdown,
+            markdown: markdown,
             compiledAt: existing.compiledAt,
             compileDuration: existing.compileDuration,
             modelTitle: existing.modelTitle,
@@ -4394,6 +4769,40 @@ final class BrainStore: ObservableObject {
         } catch {
             status = error.localizedDescription
         }
+    }
+
+    private func loadPageFlashcardBundle(noteID: Note.ID) throws -> PageFlashcardBundle? {
+        guard let brain = activeBrain else { return nil }
+        let url = pageFlashcardURL(noteID: noteID, in: brain)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try decoder.decode(PageFlashcardBundle.self, from: Data(contentsOf: url))
+    }
+
+    private func persistPageFlashcardBundle(_ bundle: PageFlashcardBundle) throws {
+        guard let brain = activeBrain else { return }
+        let folder = pageFlashcardsFolderURL(for: brain)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try ensureVaultGitignoreHidesPageFlashcards(in: brain)
+        let url = pageFlashcardURL(noteID: bundle.noteID, in: brain)
+        try encoder.encode(bundle).write(to: url, options: .atomic)
+    }
+
+    private func ensureVaultGitignoreHidesPageFlashcards(in brain: BrainSummary) throws {
+        let gitignoreURL = brain.folderURL.appendingPathComponent(".gitignore")
+        let existing = (try? String(contentsOf: gitignoreURL, encoding: .utf8)) ?? ""
+        let lines = existing
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard !lines.contains(".fcard/") else { return }
+
+        let separator = existing.isEmpty || existing.hasSuffix("\n") ? "" : "\n"
+        let updated = "\(existing)\(separator).fcard/\n"
+        try Data(updated.utf8).write(to: gitignoreURL, options: .atomic)
+    }
+
+    private func pageFlashcardURL(noteID: Note.ID, in brain: BrainSummary) -> URL {
+        pageFlashcardsFolderURL(for: brain)
+            .appendingPathComponent("\(stableFingerprint(for: noteID)).json")
     }
 
     private func stableFingerprint(for text: String) -> String {
@@ -4418,7 +4827,11 @@ final class BrainStore: ObservableObject {
         return "\(requiredHeading)\n\n\(clean)"
     }
 
-    private func normalizedHomePageMarkdown(_ markdown: String, fallbackMarkdown: String? = nil) -> String {
+    private func normalizedHomePageMarkdown(
+        _ markdown: String,
+        fallbackMarkdown: String? = nil,
+        sourceNotes: [HomePageSourceNote]? = nil
+    ) -> String {
         let clean = sanitizedHomePageMarkdown(cleanedAssistantMarkdown(markdown))
         guard !clean.isEmpty else {
             return fallbackMarkdown ?? """
@@ -4439,14 +4852,53 @@ final class BrainStore: ObservableObject {
         }
 
         let lines = clean.split(separator: "\n", omittingEmptySubsequences: false)
+        let normalized: String
         guard let first = lines.first else { return "# Home" }
         if first.trimmingCharacters(in: .whitespacesAndNewlines) == "# Home" {
-            return clean
+            normalized = clean
+        } else if first.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("# ") {
+            normalized = (["# Home"] + lines.dropFirst().map(String.init)).joined(separator: "\n")
+        } else {
+            normalized = "# Home\n\n\(clean)"
         }
-        if first.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("# ") {
-            return (["# Home"] + lines.dropFirst().map(String.init)).joined(separator: "\n")
+
+        guard let sourceNotes else { return normalized }
+        return homeMarkdownEnsuringAllPages(normalized, sourceNotes: sourceNotes)
+    }
+
+    private func homeMarkdownEnsuringAllPages(
+        _ markdown: String,
+        sourceNotes: [HomePageSourceNote]
+    ) -> String {
+        let existingCards = parsePageSummaryCards(from: extractHomeSection("Page Summaries", from: markdown) ?? "")
+        let existingTitles = Set(existingCards.map { normalizedLinkTitle($0.title) })
+        let missingCards = localPageCards(from: sourceNotes).filter { card in
+            !existingTitles.contains(normalizedLinkTitle(card.title))
         }
-        return "# Home\n\n\(clean)"
+
+        guard !missingCards.isEmpty else { return markdown }
+
+        let missingMarkdown = missingCards
+            .map { card in
+                """
+                ### \(card.title)
+
+                \(card.summary)
+                """
+            }
+            .joined(separator: "\n\n")
+
+        if markdown.range(of: "\n## Page Summaries\n") == nil {
+            return "\(markdown)\n\n## Page Summaries\n\n\(missingMarkdown)"
+        }
+
+        if let flashcardRange = markdown.range(of: "\n## Highlight Flashcards") {
+            var repaired = markdown
+            repaired.insert(contentsOf: "\n\n\(missingMarkdown)\n", at: flashcardRange.lowerBound)
+            return repaired
+        }
+
+        return "\(markdown)\n\n\(missingMarkdown)"
     }
 
     private func sanitizedHomePageMarkdown(_ markdown: String) -> String {
@@ -4457,7 +4909,8 @@ final class BrainStore: ObservableObject {
             .filter { line in
                 let clean = line.trimmingCharacters(in: .whitespacesAndNewlines)
                 let lower = clean.lowercased()
-                return !lower.hasPrefix("artifact:")
+                return !isMarkdownDividerLine(clean)
+                    && !lower.hasPrefix("artifact:")
                     && !lower.hasPrefix("incomplete")
                     && !lower.contains("undefined")
                     && !lower.contains("<|")
@@ -6309,6 +6762,11 @@ final class BrainStore: ObservableObject {
             .appendingPathComponent("HelpDesk", isDirectory: true)
     }
 
+    private func pageFlashcardsFolderURL(for brain: BrainSummary) -> URL {
+        brain.folderURL
+            .appendingPathComponent(".fcard", isDirectory: true)
+    }
+
     private func helpDeskDatabaseURL(for brain: BrainSummary) -> URL {
         hiddenHelpDeskFolderURL(for: brain)
             .appendingPathComponent("conversations.json")
@@ -7160,6 +7618,16 @@ struct NoteSearchResult: Identifiable, Equatable {
     let blockIndex: Int?
 }
 
+struct MarkdownRelevanceCandidate: Identifiable, Equatable {
+    let id: String
+    let noteID: String
+    let title: String
+    let text: String
+    let kind: String
+    let rank: Int
+    let updatedAt: Date
+}
+
 private struct NoteSearchIndexEntry {
     let noteID: String
     let title: String
@@ -7383,6 +7851,45 @@ private struct HomePagePreparedNote {
     let title: String
     let preparedMarkdown: String
     let highlights: [String]
+}
+
+private struct HomePreparedNoteCacheEntry {
+    let preparedMarkdown: String
+}
+
+struct PageFlashcardState: Equatable {
+    let isLoading: Bool
+    let bundle: PageFlashcardBundle?
+    let errorMessage: String?
+
+    static let idle = PageFlashcardState(isLoading: false, bundle: nil, errorMessage: nil)
+}
+
+struct PageFlashcardBundle: Codable, Equatable {
+    let noteID: Note.ID
+    let noteTitle: String
+    let sourceFingerprint: String
+    let sourceDiceTokens: [String]
+    let generatedAt: Date
+    let modelTitle: String
+    let cards: [PageFlashcard]
+}
+
+struct PageFlashcard: Identifiable, Codable, Equatable {
+    let id: String
+    let question: String
+    let answer: String
+    let anchor: String
+}
+
+private struct PageFlashcardResponse: Codable {
+    let cards: [Card]
+
+    struct Card: Codable {
+        let question: String
+        let answer: String
+        let anchor: String
+    }
 }
 
 struct HomePagePresentation: Equatable {

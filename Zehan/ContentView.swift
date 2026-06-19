@@ -583,6 +583,7 @@ private struct WorkspaceView: View {
                                 previewBottomInset: renderedPageInputAvoidanceInset,
                                 searchHighlight: store.activeSearchHighlight,
                                 noteTitles: store.notes.map(\.title),
+                                relevanceCandidates: store.markdownRelevanceCandidates(excluding: store.currentNoteID),
                                 openLinkedNote: { store.openLinkedNote(named: $0) },
                                 clearSearchHighlight: store.clearSearchHighlight,
                                 imageURL: store.markdownImageURL,
@@ -3239,7 +3240,7 @@ private struct HomePageView: View {
             } else {
                 LazyVGrid(columns: pageCardColumns, alignment: .leading, spacing: 14) {
                     ForEach(presentation.pageCards) { card in
-                        HomePageSummaryCard(card: card, openNote: openNote)
+                        HomePageSummaryCard(card: card, store: store, openNote: openNote)
                     }
                 }
             }
@@ -3279,55 +3280,98 @@ private struct HomePageView: View {
 
 private struct HomePageSummaryCard: View {
     let card: HomePagePageCard
+    @ObservedObject var store: BrainStore
     let openNote: (Note.ID) -> Void
     @State private var isExpanded = false
     @State private var isHovered = false
+    @State private var isFlashcardOpen = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Button {
-                withAnimation(.easeOut(duration: 0.16)) {
-                    isExpanded.toggle()
-                }
-            } label: {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 8) {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            isExpanded.toggle()
+                        }
+                    } label: {
                         Text(card.title)
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(.primary)
                             .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
 
-                        Spacer(minLength: 0)
+                    Spacer(minLength: 0)
 
+                    if let noteID = card.noteID {
+                        Button {
+                            openNote(noteID)
+                        } label: {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 24, height: 24)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open page")
+
+                        Button {
+                            withAnimation(.easeOut(duration: 0.16)) {
+                                isFlashcardOpen.toggle()
+                            }
+                            if isFlashcardOpen {
+                                store.requestPageFlashcards(noteID: noteID)
+                            }
+                        } label: {
+                            Image(systemName: "lightbulb")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(isFlashcardOpen ? Color.accentColor : .secondary)
+                                .frame(width: 24, height: 24)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Show idea flashcards")
+                    }
+
+                    Button {
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            isExpanded.toggle()
+                        }
+                    } label: {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 11, weight: .bold))
                             .foregroundStyle(.secondary)
                             .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            .frame(width: 20, height: 24)
+                            .contentShape(Circle())
                     }
-
-                    HomeInlineMarkdownText(card.summary)
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(isExpanded ? nil : 5)
-                        .multilineTextAlignment(.leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    .buttonStyle(.plain)
+                    .help(isExpanded ? "Collapse summary" : "Show full summary")
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+
+                HomeInlineMarkdownText(card.summary)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(isExpanded ? nil : 5)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.plain)
-            .help(isExpanded ? "Collapse summary" : "Show full summary")
 
-            if isExpanded, card.noteID != nil {
-                Button {
-                    if let noteID = card.noteID {
-                        openNote(noteID)
+            if isFlashcardOpen, let noteID = card.noteID {
+                HomePageCardFlashcardPanel(
+                    state: store.pageFlashcardStates[noteID] ?? .idle,
+                    regenerate: { store.requestPageFlashcards(noteID: noteID, force: true) },
+                    goTo: { query in store.openPageFlashcardSource(noteID: noteID, query: query) },
+                    close: {
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            isFlashcardOpen = false
+                        }
                     }
-                } label: {
-                    Label("Open", systemImage: "arrow.up.right.square")
-                        .font(.system(size: 12, weight: .semibold))
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                )
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .padding(14)
@@ -3340,6 +3384,114 @@ private struct HomePageSummaryCard: View {
         }
         .shadow(color: .black.opacity(isHovered ? 0.10 : 0.04), radius: isHovered ? 10 : 4, y: 3)
         .onHover { isHovered = $0 }
+    }
+}
+
+private struct HomePageCardFlashcardPanel: View {
+    let state: PageFlashcardState
+    let regenerate: () -> Void
+    let goTo: (String?) -> Void
+    let close: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Label("Idea Flashcards", systemImage: "lightbulb")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.86))
+
+                Spacer(minLength: 0)
+
+                Button(action: regenerate) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Regenerate flashcards")
+
+                Button(action: close) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Close flashcards")
+            }
+
+            if state.isLoading {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Generating from this page...")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            } else if let errorMessage = state.errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.red.opacity(0.86))
+            } else if let bundle = state.bundle {
+                VStack(alignment: .leading, spacing: 9) {
+                    ForEach(bundle.cards) { card in
+                        HomePageMiniFlashcard(card: card, goTo: { goTo(card.anchor) })
+                    }
+                }
+            } else {
+                Text("No flashcards yet.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+        }
+    }
+}
+
+private struct HomePageMiniFlashcard: View {
+    let card: PageFlashcard
+    let goTo: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Question")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(card.question)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(.primary.opacity(0.88))
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Answer")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+            Text(card.answer)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button(action: goTo) {
+                Label("Go to", systemImage: "arrow.up.right")
+                    .font(.system(size: 11.5, weight: .semibold))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .padding(.top, 2)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.045))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
@@ -3452,15 +3604,7 @@ private struct HomeInlineMarkdownText: View {
     }
 
     var body: some View {
-        renderedText
-    }
-
-    private var renderedText: Text {
-        if let attributed = try? AttributedString(markdown: content) {
-            return Text(attributed)
-        }
-
-        return Text(content)
+        Text(content)
     }
 }
 
@@ -3615,6 +3759,7 @@ private struct MarkdownEditingSurface: View {
     let previewBottomInset: CGFloat
     let searchHighlight: SearchHighlight?
     let noteTitles: [String]
+    let relevanceCandidates: [MarkdownRelevanceCandidate]
     let openLinkedNote: (String) -> Void
     let clearSearchHighlight: () -> Void
     let imageURL: (String) -> URL?
@@ -3623,6 +3768,10 @@ private struct MarkdownEditingSurface: View {
     let insertImageData: (Data, String?) -> Void
     @Binding var typingStatus: MarkdownTypingStatus
     @State private var suggestionAnchor: CGPoint?
+    @State private var relevanceAnchor: CGPoint?
+    @State private var dismissedRelevanceSuggestionID: String?
+    @State private var suppressedWikiSuggestionContent = ""
+    @State private var suppressedWikiSuggestionCaret = -1
     @State private var editorSelectionRange = NSRange(location: 0, length: 0)
 
     private var linkSuggestions: [String] {
@@ -3671,6 +3820,8 @@ private struct MarkdownEditingSurface: View {
     private var editor: some View {
         GeometryReader { proxy in
             ZStack(alignment: .topLeading) {
+                let relevanceSuggestion = visibleRelevanceSuggestion
+
                 InlineMarkdownEditor(
                     text: $content,
                     selectionRange: $editorSelectionRange,
@@ -3679,9 +3830,27 @@ private struct MarkdownEditingSurface: View {
                     linkTabCompletionTitle: linkSuggestions.first,
                     suggestionRange: activeSuggestionNSRange,
                     suggestionAnchor: $suggestionAnchor,
+                    relevanceHighlightRange: relevanceSuggestion?.phraseRange,
+                    relevanceAnchor: $relevanceAnchor,
                     insertImageData: insertImageData
                 )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if activeWikiLinkContext == nil,
+                   let relevanceSuggestion,
+                   let relevanceAnchor {
+                    RelevanceSuggestionPill(
+                        title: relevanceSuggestion.title,
+                        apply: { applyRelevanceSuggestion(relevanceSuggestion) },
+                        dismiss: { dismissedRelevanceSuggestionID = relevanceSuggestion.id }
+                    )
+                        .position(
+                            x: min(max(112, relevanceAnchor.x), max(112, proxy.size.width - 112)),
+                            y: max(24, relevanceAnchor.y - 30)
+                        )
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                        .zIndex(2)
+                }
 
                 if let context = activeWikiLinkContext,
                    !linkSuggestions.isEmpty,
@@ -3703,6 +3872,12 @@ private struct MarkdownEditingSurface: View {
         }
         .background(Color(nsColor: .textBackgroundColor).opacity(0.72))
         .animation(.easeInOut(duration: 0.14), value: linkSuggestions)
+        .animation(.easeInOut(duration: 0.16), value: visibleRelevanceSuggestion?.id)
+        .onChange(of: activeRelevanceSuggestion?.id) { _, newID in
+            if newID != dismissedRelevanceSuggestionID {
+                dismissedRelevanceSuggestionID = nil
+            }
+        }
         .onPasteCommand(of: [UTType.image]) { providers in
             insertImages(from: providers)
         }
@@ -3715,6 +3890,22 @@ private struct MarkdownEditingSurface: View {
     private var activeSuggestionNSRange: NSRange? {
         guard let context = activeWikiLinkContext else { return nil }
         return NSRange(context.range, in: content)
+    }
+
+    private var activeRelevanceSuggestion: MarkdownRelevanceSuggestion? {
+        guard activeWikiLinkContext == nil else { return nil }
+        return Self.relevanceSuggestion(
+            in: content,
+            selectionRange: editorSelectionRange,
+            candidates: relevanceCandidates
+        )
+    }
+
+    private var visibleRelevanceSuggestion: MarkdownRelevanceSuggestion? {
+        guard let suggestion = activeRelevanceSuggestion,
+              suggestion.id != dismissedRelevanceSuggestionID
+        else { return nil }
+        return suggestion
     }
 
     private var linkSuggestionMenuHeight: CGFloat {
@@ -3762,6 +3953,10 @@ private struct MarkdownEditingSurface: View {
 
         let utf16Length = (content as NSString).length
         let caretOffset = min(max(0, editorSelectionRange.location + editorSelectionRange.length), utf16Length)
+        if suppressedWikiSuggestionCaret == caretOffset,
+           suppressedWikiSuggestionContent == content {
+            return nil
+        }
         let caretIndex = String.Index(utf16Offset: caretOffset, in: content)
         let lineStart = content[..<caretIndex].lastIndex(of: "\n").map { content.index(after: $0) } ?? content.startIndex
         let lineEnd = content[caretIndex...].firstIndex(of: "\n") ?? content.endIndex
@@ -3799,6 +3994,189 @@ private struct MarkdownEditingSurface: View {
         editorSelectionRange = NSRange(location: replacementLocation + (title as NSString).length + 4, length: 0)
         suggestionAnchor = nil
     }
+
+    private func applyRelevanceSuggestion(_ suggestion: MarkdownRelevanceSuggestion) {
+        let rawText = content as NSString
+        guard suggestion.phraseRange.location >= 0,
+              suggestion.phraseRange.upperBound <= rawText.length
+        else { return }
+
+        let phrase = rawText.substring(with: suggestion.phraseRange)
+        let normalizedTitle = normalizedLinkSuggestionText(suggestion.title)
+        let normalizedPhrase = normalizedLinkSuggestionText(phrase)
+        let replacement = normalizedTitle == normalizedPhrase
+            ? "[[\(suggestion.title)]]"
+            : "[[\(suggestion.title)|\(phrase)]]"
+        guard let range = Range(suggestion.phraseRange, in: content) else { return }
+
+        content.replaceSubrange(range, with: replacement)
+        let caretLocation = suggestion.phraseRange.location + (replacement as NSString).length
+        editorSelectionRange = NSRange(location: caretLocation, length: 0)
+        suppressedWikiSuggestionContent = content
+        suppressedWikiSuggestionCaret = caretLocation
+        suggestionAnchor = nil
+        dismissedRelevanceSuggestionID = nil
+        relevanceAnchor = nil
+    }
+
+    private static func relevanceSuggestion(
+        in content: String,
+        selectionRange: NSRange,
+        candidates: [MarkdownRelevanceCandidate]
+    ) -> MarkdownRelevanceSuggestion? {
+        guard let phrase = activeRelevancePhrase(in: content, selectionRange: selectionRange) else { return nil }
+        let phraseTokens = Set(relevanceTokens(in: phrase.text))
+        guard phraseTokens.count >= 2 || phrase.text.count >= 8 else { return nil }
+
+        let normalizedPhrase = normalizedRelevanceText(phrase.text)
+        guard !normalizedPhrase.isEmpty,
+              !phrase.text.contains("[[")
+        else { return nil }
+
+        var bestSuggestion: MarkdownRelevanceSuggestion?
+        for candidate in candidates {
+            let titleTokens = Set(relevanceTokens(in: candidate.title))
+            let bodyTokens = Set(relevanceTokens(in: candidate.text))
+            guard !titleTokens.isEmpty || !bodyTokens.isEmpty else { continue }
+
+            let normalizedTitle = normalizedRelevanceText(candidate.title)
+            let titleContainmentScore: Double
+            if normalizedTitle.count >= 6,
+               (normalizedTitle.contains(normalizedPhrase) || normalizedPhrase.contains(normalizedTitle)) {
+                titleContainmentScore = 0.86
+            } else {
+                titleContainmentScore = 0
+            }
+
+            let titleOverlap = overlapRatio(source: phraseTokens, candidate: titleTokens)
+            let bodyOverlap = overlapRatio(source: phraseTokens, candidate: bodyTokens)
+            let weightedOverlap = min(1, (0.72 * titleOverlap) + (0.28 * bodyOverlap))
+            let bodyOnlyScore = 0.58 * bodyOverlap
+            let score = max(titleContainmentScore, weightedOverlap, bodyOnlyScore)
+
+            guard score >= 0.36 else { continue }
+
+            let suggestion = MarkdownRelevanceSuggestion(
+                candidateID: candidate.id,
+                title: candidate.title,
+                phrase: phrase.text,
+                phraseRange: phrase.range,
+                score: score
+            )
+
+            if let currentBest = bestSuggestion {
+                if suggestion.score > currentBest.score {
+                    bestSuggestion = suggestion
+                }
+            } else {
+                bestSuggestion = suggestion
+            }
+        }
+
+        return bestSuggestion
+    }
+
+    private static func activeRelevancePhrase(
+        in content: String,
+        selectionRange: NSRange
+    ) -> (text: String, range: NSRange)? {
+        let rawText = content as NSString
+        guard rawText.length > 0 else { return nil }
+
+        if selectionRange.length > 0,
+           selectionRange.location >= 0,
+           selectionRange.upperBound <= rawText.length {
+            return trimmedRelevancePhrase(in: rawText, range: selectionRange)
+        }
+
+        let caret = min(max(0, selectionRange.location), rawText.length)
+        if caret > 0,
+           let previousScalar = UnicodeScalar(rawText.character(at: caret - 1)),
+           CharacterSet.whitespacesAndNewlines.contains(previousScalar) {
+            return nil
+        }
+
+        var start = caret
+        let delimiters = CharacterSet.newlines.union(CharacterSet(charactersIn: ".;!?()[]{}<>|"))
+
+        while start > 0, caret - start < 96 {
+            guard let scalar = UnicodeScalar(rawText.character(at: start - 1)),
+                  !delimiters.contains(scalar)
+            else { break }
+            start -= 1
+        }
+
+        return trimmedRelevancePhrase(
+            in: rawText,
+            range: NSRange(location: start, length: caret - start)
+        )
+    }
+
+    private static func trimmedRelevancePhrase(
+        in rawText: NSString,
+        range: NSRange
+    ) -> (text: String, range: NSRange)? {
+        guard range.location >= 0,
+              range.upperBound <= rawText.length,
+              range.length > 0
+        else { return nil }
+
+        let trimSet = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "#*-_`~= >"))
+        var location = range.location
+        var upperBound = range.upperBound
+
+        while location < upperBound,
+              let scalar = UnicodeScalar(rawText.character(at: location)),
+              trimSet.contains(scalar) {
+            location += 1
+        }
+
+        while upperBound > location,
+              let scalar = UnicodeScalar(rawText.character(at: upperBound - 1)),
+              trimSet.contains(scalar) {
+            upperBound -= 1
+        }
+
+        let trimmedRange = NSRange(location: location, length: upperBound - location)
+        guard trimmedRange.length >= 4 else { return nil }
+
+        let text = rawText.substring(with: trimmedRange)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+
+        return (text, trimmedRange)
+    }
+
+    private static func relevanceTokens(in text: String) -> [String] {
+        normalizedRelevanceText(text)
+            .split(separator: " ")
+            .map(String.init)
+            .filter { token in
+                token.count >= 3 && !relevanceStopWords.contains(token)
+            }
+    }
+
+    private static func normalizedRelevanceText(_ text: String) -> String {
+        text
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .replacingOccurrences(of: #"[^a-z0-9_]+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func overlapRatio(source: Set<String>, candidate: Set<String>) -> Double {
+        guard !source.isEmpty, !candidate.isEmpty else { return 0 }
+        let overlap = source.intersection(candidate).count
+        let denominator = max(1, min(source.count, candidate.count))
+        return Double(overlap) / Double(denominator)
+    }
+
+    private static let relevanceStopWords: Set<String> = [
+        "the", "and", "for", "with", "from", "this", "that", "there", "their", "they",
+        "you", "your", "are", "was", "were", "been", "being", "into", "onto", "about",
+        "over", "under", "between", "different", "using", "used", "uses", "each", "such",
+        "page", "note", "topic", "text", "when", "then", "than", "what", "which"
+    ]
 
     private func insertImages(from providers: [NSItemProvider]) {
         for provider in providers {
@@ -3862,6 +4240,8 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
     let linkTabCompletionTitle: String?
     let suggestionRange: NSRange?
     @Binding var suggestionAnchor: CGPoint?
+    let relevanceHighlightRange: NSRange?
+    @Binding var relevanceAnchor: CGPoint?
     let insertImageData: (Data, String?) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -3870,6 +4250,8 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             selectionRange: $selectionRange,
             typingStatus: $typingStatus,
             suggestionAnchor: $suggestionAnchor,
+            relevanceAnchor: $relevanceAnchor,
+            relevanceHighlightRange: relevanceHighlightRange,
             insertImageData: insertImageData
         )
     }
@@ -3922,6 +4304,9 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         context.coordinator.insertImageData = insertImageData
         context.coordinator.linkTabCompletionTitle = linkTabCompletionTitle
         context.coordinator.suggestionRange = suggestionRange
+        context.coordinator.relevanceAnchor = $relevanceAnchor
+        let didChangeRelevanceHighlight = context.coordinator.relevanceHighlightRange != relevanceHighlightRange
+        context.coordinator.relevanceHighlightRange = relevanceHighlightRange
         scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: bottomContentInset, right: 0)
 
         guard let textView = scrollView.documentView as? NSTextView else { return }
@@ -3930,13 +4315,19 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         let didReplaceText = textView.string != text
         if didReplaceText {
             textView.string = text
-            textView.setSelectedRange(Self.clamped(selectionRange, in: text))
         }
 
-        if didReplaceText {
+        let clampedSelection = Self.clamped(selectionRange, in: text)
+        if didReplaceText || textView.selectedRange() != clampedSelection {
+            textView.setSelectedRange(clampedSelection)
+            textView.scrollRangeToVisible(clampedSelection)
+        }
+
+        if didReplaceText || didChangeRelevanceHighlight {
             context.coordinator.applyMarkdownStyling()
         }
         context.coordinator.updateSuggestionAnchor()
+        context.coordinator.updateRelevanceAnchor()
     }
 
     private static func clamped(_ range: NSRange, in text: String) -> NSRange {
@@ -3953,9 +4344,11 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         var selectionRange: Binding<NSRange>
         var typingStatus: Binding<MarkdownTypingStatus>
         var suggestionAnchor: Binding<CGPoint?>
+        var relevanceAnchor: Binding<CGPoint?>
         var insertImageData: (Data, String?) -> Void
         var linkTabCompletionTitle: String?
         var suggestionRange: NSRange?
+        var relevanceHighlightRange: NSRange?
         weak var textView: NSTextView?
         private var isApplyingMarkdownStyling = false
         private var pendingStylingWorkItem: DispatchWorkItem?
@@ -3967,12 +4360,16 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             selectionRange: Binding<NSRange>,
             typingStatus: Binding<MarkdownTypingStatus>,
             suggestionAnchor: Binding<CGPoint?>,
+            relevanceAnchor: Binding<CGPoint?>,
+            relevanceHighlightRange: NSRange?,
             insertImageData: @escaping (Data, String?) -> Void
         ) {
             self.text = text
             self.selectionRange = selectionRange
             self.typingStatus = typingStatus
             self.suggestionAnchor = suggestionAnchor
+            self.relevanceAnchor = relevanceAnchor
+            self.relevanceHighlightRange = relevanceHighlightRange
             self.insertImageData = insertImageData
         }
 
@@ -3997,6 +4394,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             updateTypingAttributesForCurrentLine(in: textView)
             scheduleMarkdownStyling()
             updateSuggestionAnchor()
+            updateRelevanceAnchor()
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
@@ -4006,6 +4404,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
                 updateTypingAttributesForCurrentLine(in: textView)
             }
             updateSuggestionAnchor()
+            updateRelevanceAnchor()
         }
 
         func pasteImageFromClipboard() -> Bool {
@@ -4063,6 +4462,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             typingStatus.wrappedValue = typingStatus(in: textView, selectedRange: newSelection)
             applyMarkdownStyling()
             updateSuggestionAnchor()
+            updateRelevanceAnchor()
         }
 
         func completeActiveLinkFromTab(in textView: NSTextView) -> Bool {
@@ -4090,6 +4490,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             typingStatus.wrappedValue = typingStatus(in: textView, selectedRange: newSelection)
             applyMarkdownStyling()
             updateSuggestionAnchor()
+            updateRelevanceAnchor()
             return true
         }
 
@@ -4132,6 +4533,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
                     typingStatus.wrappedValue = typingStatus(in: textView, selectedRange: newSelection)
                     applyMarkdownStyling()
                     updateSuggestionAnchor()
+                    updateRelevanceAnchor()
                     return false
                 }
 
@@ -4158,6 +4560,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             typingStatus.wrappedValue = typingStatus(in: textView, selectedRange: newSelection)
             applyMarkdownStyling()
             updateSuggestionAnchor()
+            updateRelevanceAnchor()
             return false
         }
 
@@ -4291,6 +4694,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             typingStatus.wrappedValue = typingStatus(in: textView, selectedRange: newSelection)
             applyMarkdownStyling()
             updateSuggestionAnchor()
+            updateRelevanceAnchor()
             return true
         }
 
@@ -4319,6 +4723,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             typingStatus.wrappedValue = typingStatus(in: textView, selectedRange: newSelection)
             applyMarkdownStyling()
             updateSuggestionAnchor()
+            updateRelevanceAnchor()
             return true
         }
 
@@ -4467,6 +4872,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             }
 
             Self.applyMultilineHighlightStyles(in: fullRange, rawText: rawText, textStorage: textStorage)
+            Self.applyRelevanceHighlightStyle(range: relevanceHighlightRange, rawText: rawText, textStorage: textStorage)
             textStorage.endEditing()
             textView.selectedRanges = selectedRanges.compactMap { value in
                 let range = value.rangeValue
@@ -4513,12 +4919,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         }
 
         func updateSuggestionAnchor() {
-            guard let textView,
-                  let layoutManager = textView.layoutManager,
-                  let textContainer = textView.textContainer,
-                  let suggestionRange,
-                  suggestionRange.location <= textView.string.count
-            else {
+            guard let anchor = anchor(for: suggestionRange) else {
                 if suggestionAnchor.wrappedValue != nil {
                     DispatchQueue.main.async {
                         self.suggestionAnchor.wrappedValue = nil
@@ -4527,21 +4928,49 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
                 return
             }
 
+            DispatchQueue.main.async {
+                self.suggestionAnchor.wrappedValue = anchor
+            }
+        }
+
+        func updateRelevanceAnchor() {
+            guard let anchor = anchor(for: relevanceHighlightRange) else {
+                if relevanceAnchor.wrappedValue != nil {
+                    DispatchQueue.main.async {
+                        self.relevanceAnchor.wrappedValue = nil
+                    }
+                }
+                return
+            }
+
+            DispatchQueue.main.async {
+                self.relevanceAnchor.wrappedValue = anchor
+            }
+        }
+
+        private func anchor(for range: NSRange?) -> CGPoint? {
+            guard let textView,
+                  let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer,
+                  let range
+            else { return nil }
+
             let textLength = (textView.string as NSString).length
-            let location = min(suggestionRange.upperBound, textLength)
+            guard range.location >= 0,
+                  range.location <= textLength,
+                  textLength > 0
+            else { return nil }
+
+            let location = min(range.upperBound, textLength)
             let characterRange = NSRange(location: max(0, location - 1), length: min(1, textLength))
             let glyphRange = layoutManager.glyphRange(forCharacterRange: characterRange, actualCharacterRange: nil)
             let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
             let visibleOrigin = textView.enclosingScrollView?.contentView.bounds.origin ?? .zero
             let inset = textView.textContainerInset
-            let anchor = CGPoint(
+            return CGPoint(
                 x: rect.maxX + inset.width - visibleOrigin.x,
                 y: rect.minY + inset.height - visibleOrigin.y
             )
-
-            DispatchQueue.main.async {
-                self.suggestionAnchor.wrappedValue = anchor
-            }
         }
 
         private static func baseAttributes() -> [NSAttributedString.Key: Any] {
@@ -4693,6 +5122,23 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
                 hideSyntax(in: textStorage, range: NSRange(location: match.range.location, length: 2))
                 hideSyntax(in: textStorage, range: NSRange(location: match.range.upperBound - 2, length: 2))
             }
+        }
+
+        private static func applyRelevanceHighlightStyle(
+            range: NSRange?,
+            rawText: NSString,
+            textStorage: NSTextStorage
+        ) {
+            guard let range,
+                  range.location >= 0,
+                  range.upperBound <= rawText.length,
+                  range.length > 0
+            else { return }
+
+            textStorage.addAttributes([
+                .backgroundColor: NSColor.systemYellow.withAlphaComponent(0.22),
+                .foregroundColor: NSColor.labelColor
+            ], range: range)
         }
 
         private static func applyRegex(
@@ -5029,6 +5475,66 @@ private final class MarkdownNSTextView: NSTextView {
 private struct WikiLinkSuggestionContext {
     let range: Range<String.Index>
     let query: String
+}
+
+private struct MarkdownRelevanceSuggestion: Identifiable, Equatable {
+    let candidateID: String
+    let title: String
+    let phrase: String
+    let phraseRange: NSRange
+    let score: Double
+
+    var id: String {
+        "\(candidateID)-\(phraseRange.location)-\(phraseRange.length)"
+    }
+}
+
+private struct RelevanceSuggestionPill: View {
+    let title: String
+    let apply: () -> Void
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button(action: apply) {
+                HStack(spacing: 7) {
+                    Image(systemName: "sparkle")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.primary.opacity(0.84))
+                        .frame(width: 15, height: 15)
+
+                    Text("Relevant to \(title)")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(.primary.opacity(0.86))
+                        .lineLimit(1)
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss suggestion")
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 7)
+        .padding(.vertical, 8)
+        .fixedSize(horizontal: true, vertical: false)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(.white.opacity(0.18), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
+        .help("Link this text to \(title)")
+    }
 }
 
 private struct LinkSuggestionMenu: View {

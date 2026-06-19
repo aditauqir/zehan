@@ -1,5 +1,16 @@
 # Patch Notes
 
+## v1.2 (Mizan)
+
+- Added liquid-glass relevance suggestions while writing Markdown, with in-place wiki-link creation and cursor placement at the end of the inserted link.
+- Added page flashcards from the Home page, with question/answer cards, source navigation, close/regenerate controls, and cached `.fcard` storage per vault.
+- Fixed Home summary refresh so Zirn reads newly added vault pages without regenerating unchanged existing page summaries.
+- Fixed Home summary formatting by keeping the vault overview as a compact paragraph and page summaries as concise bullets without divider artifacts.
+- Fixed Home reopening so cached Home content is not regenerated unless the similarity trigger or manual refresh requires it.
+- Improved relevance suggestion behavior so it persists until whitespace or dismissal, uses a system/liquid-glass star style, and no longer triggers the normal link autocomplete popup.
+- Added `.fcard/` git-ignore coverage for generated flashcard caches.
+- Changed the app version to `1.2`.
+
 ## v1.1.1 (Mizan)
 
 - Reworked the Sparkle update window into a wide layout with app/version identity on the left and a scrollable changelog on the right.

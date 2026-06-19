@@ -21,6 +21,7 @@ dist/sparkle/
 # Zirn local vault metadata
 .brain
 *.brain
+.fcard/
 
 # Local AI prompt scratch files (do not ignore shipped app prompt resources)
 .ai-prompts/

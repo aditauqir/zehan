@@ -40,9 +40,10 @@ xcodebuild "${BUILD_ARGS[@]}"
 
 APP_BUNDLE="$DERIVED_DATA/Build/Products/Release/Zirn.app"
 chmod +x scripts/sign-release-app.sh
-scripts/sign-release-app.sh "$APP_BUNDLE"
 
 rm -rf "$BUILD_DIR/Zirn.app"
 ditto --norsrc --noextattr "$APP_BUNDLE" "$BUILD_DIR/Zirn.app"
 xattr -cr "$BUILD_DIR/Zirn.app"
+# Sign after copy so strict verification and notarization target the shipped bundle.
+scripts/sign-release-app.sh "$BUILD_DIR/Zirn.app"
 echo "Built: $BUILD_DIR/Zirn.app"

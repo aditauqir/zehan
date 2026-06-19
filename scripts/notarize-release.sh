@@ -9,7 +9,7 @@ usage() {
 Usage: scripts/notarize-release.sh <path-to-app-or-dmg>
 
 Credentials, in priority order:
-  NOTARYTOOL_PROFILE=<keychain-profile>
+  NOTARYTOOL_PROFILE=<keychain-profile>   (default: ZirnNotary)
   APP_STORE_CONNECT_KEY_PATH=AuthKey_XXXX.p8 APP_STORE_CONNECT_KEY_ID=... APP_STORE_CONNECT_ISSUER_ID=...
   APPLE_ID=... APP_SPECIFIC_PASSWORD=... APPLE_TEAM_ID=...
 EOF
@@ -26,7 +26,8 @@ if [[ ! -e "$TARGET_PATH" ]]; then
 fi
 
 notary_args=()
-if [[ -n "${NOTARYTOOL_PROFILE:-}" ]]; then
+NOTARYTOOL_PROFILE="${NOTARYTOOL_PROFILE:-ZirnNotary}"
+if [[ -n "$NOTARYTOOL_PROFILE" ]]; then
   notary_args+=(--keychain-profile "$NOTARYTOOL_PROFILE")
 elif [[ -n "${APP_STORE_CONNECT_KEY_PATH:-}" && -n "${APP_STORE_CONNECT_KEY_ID:-}" && -n "${APP_STORE_CONNECT_ISSUER_ID:-}" ]]; then
   notary_args+=(
