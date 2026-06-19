@@ -6,9 +6,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 LOG="/tmp/zirn-release-deploy.log"
 
-exec > >(tee -a "$LOG") 2>&1
+log() {
+  echo "$@" | tee -a "$LOG"
+}
 
-echo "=== Zirn release deploy started $(date) ==="
+log "=== Zirn release deploy started $(date) ==="
 
 export NOTARYTOOL_PROFILE="${NOTARYTOOL_PROFILE:-ZirnNotary}"
 chmod +x scripts/finish-notarized-release.sh
@@ -65,6 +67,6 @@ else
     --notes "$NOTES"
 fi
 
-echo "=== Zirn v${VERSION} release complete $(date) ==="
-echo "OTA: https://raw.githubusercontent.com/aditauqir/zehan/main/Sparkle/appcast.xml"
-echo "DMG: https://github.com/aditauqir/zehan/releases/latest/download/Zirn-${VERSION}.dmg"
+log "=== Zirn v${VERSION} release complete $(date) ==="
+log "OTA: https://raw.githubusercontent.com/aditauqir/zehan/main/Sparkle/appcast.xml"
+log "DMG: https://github.com/aditauqir/zehan/releases/latest/download/Zirn-${VERSION}.dmg"
