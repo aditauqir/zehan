@@ -19,51 +19,61 @@ fi
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$RELEASE_APP/Contents/Info.plist")"
 BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$RELEASE_APP/Contents/Info.plist")"
 
-pick_submission_id() {
-  if [[ -n "${NOTARY_SUBMISSION_ID:-}" ]]; then
-    echo "$NOTARY_SUBMISSION_ID"
-    return
-  fi
+poll_all_submissions() {
   xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" 2>/dev/null \
-    | awk '/^    id: / { print $2; exit }'
+    | awk '/^    id: / { print $2 }'
 }
 
-SUBMISSION_ID="$(pick_submission_id)"
-if [[ -z "$SUBMISSION_ID" ]]; then
-  echo "No notary submission id found."
+wait_for_acceptance() {
+  local ids=()
+  if [[ -n "${NOTARY_SUBMISSION_ID:-}" ]]; then
+    ids=("$NOTARY_SUBMISSION_ID")
+  else
+    ids=()
+    while IFS= read -r id; do
+      [[ -n "$id" ]] && ids+=("$id")
+    done < <(poll_all_submissions)
+  fi
+
+  if ((${#ids[@]} == 0)); then
+    echo "No notary submission ids found."
+    exit 1
+  fi
+
+  echo "Release: Zirn ${VERSION} (build ${BUILD})"
+  echo "Poll every ${POLL_SECONDS}s (max ${MAX_WAIT_HOURS}h)"
+  echo "Watching submissions: ${ids[*]}"
+
+  local deadline=$(( $(date +%s) + MAX_WAIT_HOURS * 3600 ))
+  while [[ $(date +%s) -lt $deadline ]]; do
+    for SUBMISSION_ID in "${ids[@]}"; do
+      status="$(xcrun notarytool info "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE" 2>/dev/null | awk '/status:/ {print $2}')"
+      case "$status" in
+        Accepted)
+          echo "Notarization accepted: $SUBMISSION_ID"
+          return 0
+          ;;
+        Invalid|Rejected)
+          echo "Submission $SUBMISSION_ID failed ($status)."
+          xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE" || true
+          ;;
+        In|In\ Progress)
+          echo "$(date '+%H:%M:%S') — $SUBMISSION_ID: In Progress"
+          ;;
+        *)
+          echo "$(date '+%H:%M:%S') — $SUBMISSION_ID: ${status:-unknown}"
+          ;;
+      esac
+    done
+    sleep "$POLL_SECONDS"
+  done
+
+  echo "Timed out after ${MAX_WAIT_HOURS}h."
+  echo "Check agreements at developer.apple.com and Apple System Status."
   exit 1
-fi
+}
 
-echo "Waiting for notary submission: $SUBMISSION_ID"
-echo "Release: Zirn ${VERSION} (build ${BUILD})"
-echo "Poll every ${POLL_SECONDS}s (max ${MAX_WAIT_HOURS}h)"
-
-deadline=$(( $(date +%s) + MAX_WAIT_HOURS * 3600 ))
-status=""
-while [[ $(date +%s) -lt $deadline ]]; do
-  status="$(xcrun notarytool info "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE" 2>/dev/null | awk '/status:/ {print $2}')"
-  case "$status" in
-    Accepted)
-      echo "Notarization accepted: $SUBMISSION_ID"
-      break
-      ;;
-    Invalid|Rejected)
-      echo "Notarization failed ($status): $SUBMISSION_ID"
-      xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE" || true
-      exit 1
-      ;;
-    *)
-      echo "$(date '+%H:%M:%S') — status: ${status:-unknown}"
-      sleep "$POLL_SECONDS"
-      ;;
-  esac
-done
-
-if [[ "$status" != "Accepted" ]]; then
-  echo "Timed out after ${MAX_WAIT_HOURS}h. Submission still: ${status:-unknown}"
-  echo "Check https://developer.apple.com/system-status/ and Agreements in App Store Connect."
-  exit 1
-fi
+wait_for_acceptance
 
 echo "Stapling app ticket…"
 xcrun stapler staple "$RELEASE_APP"

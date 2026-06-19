@@ -74,12 +74,10 @@ https://github.com/aditauqir/zehan/releases/latest/download/Zirn-1.0.1.dmg
 
 ### First launch
 
-Each DMG includes `README.txt` with the current first-launch instructions. Zirn
-may not be notarized by Apple yet, so macOS can warn that it cannot verify the
-app is free of malware. To open it, Control-click or right-click Zirn in
-Applications, choose **Open**, then choose **Open** again. If macOS blocks it
-without an Open button, go to **System Settings > Privacy & Security** and choose
-**Open Anyway** for Zirn.
+Each DMG includes `README.txt` with install instructions. Release builds are
+**Developer ID signed and notarized** by Apple, so macOS should open them without
+a Gatekeeper warning. If macOS still blocks an older download, use **Open** from
+the Finder context menu or **Open Anyway** in **System Settings > Privacy & Security**.
 
 Full copy for your website: [Sparkle/INSTALL.md](Sparkle/INSTALL.md)
 
