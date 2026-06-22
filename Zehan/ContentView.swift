@@ -34,6 +34,9 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 1120, minHeight: 720)
+        .task {
+            await store.openPreviousBrainAfterFirstFrame()
+        }
         .sheet(isPresented: $store.isShowingModelConfiguration) {
             ModelConfigurationView(store: store)
                 .frame(width: 500)
@@ -325,6 +328,7 @@ private struct WorkspaceView: View {
     @State private var isSidebarSearchActive = false
     @State private var draggedSidebarItemID: SidebarItem.ID?
     @State private var typingStatus = MarkdownTypingStatus()
+    @State private var isEditorFlashcardOpen = false
     @FocusState private var isSidebarSearchFocused: Bool
 
     private var cleanSidebarSearchQuery: String {
@@ -338,6 +342,15 @@ private struct WorkspaceView: View {
     private var sidebarSearchResults: [NoteSearchResult] {
         guard isSearchingSidebar else { return [] }
         return store.searchNotes(matching: sidebarSearchQuery)
+    }
+
+    private var editorFlashcardNoteID: Note.ID? {
+        guard !store.isShowingHomePage,
+              !store.isShowingHelpDesk,
+              store.currentHighlightSummary == nil
+        else { return nil }
+
+        return store.currentNoteID ?? store.selectedNoteID
     }
 
     var body: some View {
@@ -536,12 +549,25 @@ private struct WorkspaceView: View {
                     HStack {
                         DocumentChromeControls(
                             canDelete: !store.isViewingGeneratedPage && (store.selectedNoteID != nil || store.currentNoteID != nil),
+                            canShowFlashcards: editorFlashcardNoteID != nil,
+                            isFlashcardOpen: isEditorFlashcardOpen,
                             newPage: {
                                 isEditingMarkdown = false
+                                isEditorFlashcardOpen = false
                                 store.newDraft()
+                            },
+                            flashcards: {
+                                guard let noteID = editorFlashcardNoteID else { return }
+                                withAnimation(.easeOut(duration: 0.16)) {
+                                    isEditorFlashcardOpen.toggle()
+                                }
+                                if isEditorFlashcardOpen {
+                                    store.requestPageFlashcards(noteID: noteID)
+                                }
                             },
                             delete: {
                                 isEditingMarkdown = false
+                                isEditorFlashcardOpen = false
                                 store.deleteSelectedNote()
                             }
                         )
@@ -657,6 +683,30 @@ private struct WorkspaceView: View {
                 }
                 .padding(.bottom, 54)
                 .frame(maxWidth: .infinity, alignment: .center)
+
+                if isEditorFlashcardOpen, let noteID = editorFlashcardNoteID {
+                    HomePageCardFlashcardPanel(
+                        state: store.pageFlashcardStates[noteID] ?? .idle,
+                        regenerate: { store.requestPageFlashcards(noteID: noteID, force: true) },
+                        goTo: { query in store.openPageFlashcardSource(noteID: noteID, query: query) },
+                        close: {
+                            withAnimation(.easeOut(duration: 0.16)) {
+                                isEditorFlashcardOpen = false
+                            }
+                        }
+                    )
+                    .frame(width: 360)
+                    .padding(.leading, 64)
+                    .padding(.top, 48)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .zIndex(3)
+                }
+            }
+        .onChange(of: editorFlashcardNoteID) { _, newID in
+            if newID == nil {
+                isEditorFlashcardOpen = false
+            }
         }
     }
 
@@ -767,7 +817,7 @@ private struct WorkspaceView: View {
                 }
 
                 Task { @MainActor in
-                    store.attachPromptDocument(from: url)
+                    attachDroppedDocument(from: url)
                 }
             }
             return true
@@ -801,16 +851,30 @@ private struct WorkspaceView: View {
             }
 
             Task { @MainActor in
-                store.attachPromptDocument(from: copiedURL)
+                attachDroppedDocument(from: copiedURL)
             }
         }
         return true
+    }
+
+    private func attachDroppedDocument(from url: URL) {
+        if store.isShowingHelpDesk {
+            store.attachHelpDeskDocument(from: url)
+        } else {
+            store.attachPromptDocument(from: url)
+        }
     }
 
     private func copyDroppedDocumentToTemporaryURL(_ url: URL, suggestedName: String?) -> URL? {
         let fallbackName = suggestedName?.isEmpty == false ? suggestedName! : url.lastPathComponent
         let destination = FileManager.default.temporaryDirectory
             .appendingPathComponent("zirn-drop-\(UUID().uuidString)-\(fallbackName)")
+        let didStart = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStart {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
 
         do {
             if FileManager.default.fileExists(atPath: destination.path) {
@@ -1051,13 +1115,24 @@ private struct DocumentDropSplash: View {
 
 private struct DocumentChromeControls: View {
     let canDelete: Bool
+    let canShowFlashcards: Bool
+    let isFlashcardOpen: Bool
     let newPage: () -> Void
+    let flashcards: () -> Void
     let delete: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
             GlassChromeIconButton(systemImage: "square.and.pencil", help: "New Page", action: newPage)
                 .keyboardShortcut("n", modifiers: .command)
+
+            GlassChromeIconButton(
+                systemImage: "lightbulb",
+                help: isFlashcardOpen ? "Hide Idea Flashcards" : "Show Idea Flashcards",
+                isActive: isFlashcardOpen,
+                action: flashcards
+            )
+            .disabled(!canShowFlashcards)
 
             Rectangle()
                 .fill(Color.primary.opacity(0.13))
@@ -1231,6 +1306,7 @@ private struct HelpCode: View {
 private struct GlassChromeIconButton: View {
     let systemImage: String
     let help: String
+    var isActive = false
     var isDestructive = false
     let action: () -> Void
 
@@ -1270,16 +1346,28 @@ private struct GlassChromeIconButton: View {
             return .red.opacity(0.92)
         }
 
+        if isActive {
+            return Color.accentColor.opacity(isHovered ? 0.98 : 0.88)
+        }
+
         return .primary.opacity(isHovered ? 0.92 : 0.58)
     }
 
     private var secondaryStyle: Color {
-        isDestructive && isHovered ? .red.opacity(0.42) : .primary.opacity(0.28)
+        if isDestructive && isHovered {
+            return .red.opacity(0.42)
+        }
+
+        return isActive ? Color.accentColor.opacity(0.34) : .primary.opacity(0.28)
     }
 
     private var highlightFill: Color {
         if isDestructive, isHovered {
             return .red.opacity(0.15)
+        }
+
+        if isActive {
+            return Color.accentColor.opacity(isHovered ? 0.16 : 0.10)
         }
 
         return .white.opacity(isHovered ? 0.13 : 0.025)
@@ -1290,12 +1378,20 @@ private struct GlassChromeIconButton: View {
             return .red.opacity(0.30)
         }
 
+        if isActive {
+            return Color.accentColor.opacity(isHovered ? 0.36 : 0.24)
+        }
+
         return .white.opacity(isHovered ? 0.22 : 0.11)
     }
 
     private var shadowColor: Color {
         if isDestructive, isHovered {
             return .red.opacity(0.12)
+        }
+
+        if isActive {
+            return Color.accentColor.opacity(isHovered ? 0.18 : 0.10)
         }
 
         return .black.opacity(isHovered ? 0.18 : 0.08)
@@ -1640,10 +1736,11 @@ private struct ContextUsageBar: View {
 
             Spacer()
 
-            Text(store.mistralRateLimitTokens == nil ? "—" : "\(store.contextUsagePercent)%")
+            Text(store.mistralRateLimitTokens == nil ? store.contextUsageLabel : "\(store.contextUsagePercent)%")
                 .font(.system(size: 11.5, weight: .semibold, design: .rounded))
                 .foregroundStyle(.secondary)
                 .contentTransition(.numericText())
+                .help("\(store.contextUsageLabel) · \(store.contextUsageDetail)")
         }
         .padding(.horizontal, 2)
         .padding(.top, 2)
@@ -2778,7 +2875,7 @@ private struct HelpDeskMessageBubble: View {
                     openLinkedNote: openLinkedNote,
                     imageURL: imageURL,
                     imageData: imageData,
-                    showsCodeCopyButton: message.role == .assistant
+                    showsCodeCopyButton: true
                 )
                 .textSelection(.enabled)
 
@@ -3431,20 +3528,30 @@ private struct HomePageCardFlashcardPanel: View {
                         .foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 4)
-            } else if let errorMessage = state.errorMessage {
-                Text(errorMessage)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.red.opacity(0.86))
-            } else if let bundle = state.bundle {
+            }
+
+            if let bundle = state.bundle {
                 VStack(alignment: .leading, spacing: 9) {
                     ForEach(bundle.cards) { card in
                         HomePageMiniFlashcard(card: card, goTo: { goTo(card.anchor) })
                     }
                 }
-            } else {
+            } else if state.errorMessage == nil {
                 Text("No flashcards yet.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
+            }
+
+            if let errorMessage = state.errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(.red.opacity(0.86))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 7)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.red.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(12)
@@ -3460,25 +3567,61 @@ private struct HomePageCardFlashcardPanel: View {
 private struct HomePageMiniFlashcard: View {
     let card: PageFlashcard
     let goTo: () -> Void
+    @State private var showsAnswer = false
+    @State private var isHovered = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Question")
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(.secondary)
-            Text(card.question)
-                .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(.primary.opacity(0.88))
-                .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(.easeOut(duration: 0.14)) {
+                    showsAnswer.toggle()
+                }
+            } label: {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Text("Question")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(.secondary)
 
-            Text("Answer")
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .padding(.top, 2)
-            Text(card.answer)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+
+                        Label(showsAnswer ? "Hide answer" : "Show answer", systemImage: showsAnswer ? "eye.slash" : "eye")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(.secondary.opacity(0.86))
+                    }
+
+                    HomeInlineMarkdownText(card.question)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.primary.opacity(0.90))
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if showsAnswer {
+                        Divider().opacity(0.35)
+                        Text("Answer")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(.secondary)
+                        HomeInlineMarkdownText(card.answer)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(.primary.opacity(0.84))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else {
+                        Text("Tap to reveal answer")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary.opacity(0.80))
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.primary.opacity(isHovered ? 0.065 : 0.045))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.primary.opacity(isHovered ? 0.13 : 0.07), lineWidth: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovered = $0 }
 
             Button(action: goTo) {
                 Label("Go to", systemImage: "arrow.up.right")
@@ -3486,12 +3629,7 @@ private struct HomePageMiniFlashcard: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .padding(.top, 2)
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.primary.opacity(0.045))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
@@ -3604,7 +3742,36 @@ private struct HomeInlineMarkdownText: View {
     }
 
     var body: some View {
-        Text(content)
+        if let attributed = try? AttributedString(markdown: normalizedMarkdown) {
+            Text(attributed)
+        } else {
+            Text(plainText(from: normalizedMarkdown))
+        }
+    }
+
+    private var normalizedMarkdown: String {
+        plainText(from: content)
+            .replacingOccurrences(
+                of: #"\[\[([^\]\|]+)\|([^\]]+)\]\]"#,
+                with: "$2",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"\[\[([^\]]+)\]\]"#,
+                with: "$1",
+                options: .regularExpression
+            )
+    }
+
+    private func plainText(from markdown: String) -> String {
+        markdown
+            .replacingOccurrences(of: #"(?s)%%.*?%%"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?s)==(.+?)=="#, with: "$1", options: .regularExpression)
+            .replacingOccurrences(of: #"</?u>"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?s)\*\*(.+?)\*\*"#, with: "$1", options: .regularExpression)
+            .replacingOccurrences(of: #"(?s)__(.+?)__"#, with: "$1", options: .regularExpression)
+            .replacingOccurrences(of: #"(?s)~~(.+?)~~"#, with: "$1", options: .regularExpression)
+            .replacingOccurrences(of: #"`([^`]+)`"#, with: "$1", options: .regularExpression)
     }
 }
 
@@ -3770,9 +3937,12 @@ private struct MarkdownEditingSurface: View {
     @State private var suggestionAnchor: CGPoint?
     @State private var relevanceAnchor: CGPoint?
     @State private var dismissedRelevanceSuggestionID: String?
+    @State private var idleRelevanceSuggestionID: String?
+    @State private var relevanceSuggestionPauseTask: Task<Void, Never>?
     @State private var suppressedWikiSuggestionContent = ""
     @State private var suppressedWikiSuggestionCaret = -1
     @State private var editorSelectionRange = NSRange(location: 0, length: 0)
+    private static let relevanceSuggestionPauseNanoseconds: UInt64 = 700_000_000
 
     private var linkSuggestions: [String] {
         guard let context = activeWikiLinkContext else { return [] }
@@ -3832,7 +4002,10 @@ private struct MarkdownEditingSurface: View {
                     suggestionAnchor: $suggestionAnchor,
                     relevanceHighlightRange: relevanceSuggestion?.phraseRange,
                     relevanceAnchor: $relevanceAnchor,
-                    insertImageData: insertImageData
+                    insertImageData: insertImageData,
+                    finishEditing: {
+                        isEditing = false
+                    }
                 )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -3873,10 +4046,24 @@ private struct MarkdownEditingSurface: View {
         .background(Color(nsColor: .textBackgroundColor).opacity(0.72))
         .animation(.easeInOut(duration: 0.14), value: linkSuggestions)
         .animation(.easeInOut(duration: 0.16), value: visibleRelevanceSuggestion?.id)
+        .onAppear {
+            scheduleRelevanceSuggestionPause()
+        }
         .onChange(of: activeRelevanceSuggestion?.id) { _, newID in
             if newID != dismissedRelevanceSuggestionID {
                 dismissedRelevanceSuggestionID = nil
             }
+            scheduleRelevanceSuggestionPause()
+        }
+        .onChange(of: content) { _, _ in
+            scheduleRelevanceSuggestionPause()
+        }
+        .onChange(of: editorSelectionRange) { _, _ in
+            scheduleRelevanceSuggestionPause()
+        }
+        .onDisappear {
+            relevanceSuggestionPauseTask?.cancel()
+            relevanceSuggestionPauseTask = nil
         }
         .onPasteCommand(of: [UTType.image]) { providers in
             insertImages(from: providers)
@@ -3903,9 +4090,27 @@ private struct MarkdownEditingSurface: View {
 
     private var visibleRelevanceSuggestion: MarkdownRelevanceSuggestion? {
         guard let suggestion = activeRelevanceSuggestion,
+              suggestion.id == idleRelevanceSuggestionID,
               suggestion.id != dismissedRelevanceSuggestionID
         else { return nil }
         return suggestion
+    }
+
+    private func scheduleRelevanceSuggestionPause() {
+        relevanceSuggestionPauseTask?.cancel()
+        relevanceSuggestionPauseTask = nil
+        idleRelevanceSuggestionID = nil
+
+        guard activeWikiLinkContext == nil,
+              let suggestion = activeRelevanceSuggestion
+        else { return }
+
+        let suggestionID = suggestion.id
+        relevanceSuggestionPauseTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: Self.relevanceSuggestionPauseNanoseconds)
+            guard !Task.isCancelled else { return }
+            idleRelevanceSuggestionID = suggestionID
+        }
     }
 
     private var linkSuggestionMenuHeight: CGFloat {
@@ -4025,14 +4230,18 @@ private struct MarkdownEditingSurface: View {
         candidates: [MarkdownRelevanceCandidate]
     ) -> MarkdownRelevanceSuggestion? {
         guard let phrase = activeRelevancePhrase(in: content, selectionRange: selectionRange) else { return nil }
+        let isSelectedPhrase = selectionRange.length > 0
         let phraseTokens = Set(relevanceTokens(in: phrase.text))
-        guard phraseTokens.count >= 2 || phrase.text.count >= 8 else { return nil }
+        let minimumTokenCount = isSelectedPhrase ? 2 : 4
+        let minimumCharacterCount = isSelectedPhrase ? 8 : 18
+        guard phraseTokens.count >= minimumTokenCount || phrase.text.count >= minimumCharacterCount else { return nil }
 
         let normalizedPhrase = normalizedRelevanceText(phrase.text)
         guard !normalizedPhrase.isEmpty,
               !phrase.text.contains("[[")
         else { return nil }
 
+        let scoreThreshold = isSelectedPhrase ? 0.46 : 0.58
         var bestSuggestion: MarkdownRelevanceSuggestion?
         for candidate in candidates {
             let titleTokens = Set(relevanceTokens(in: candidate.title))
@@ -4054,7 +4263,7 @@ private struct MarkdownEditingSurface: View {
             let bodyOnlyScore = 0.58 * bodyOverlap
             let score = max(titleContainmentScore, weightedOverlap, bodyOnlyScore)
 
-            guard score >= 0.36 else { continue }
+            guard score >= scoreThreshold else { continue }
 
             let suggestion = MarkdownRelevanceSuggestion(
                 candidateID: candidate.id,
@@ -4243,6 +4452,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
     let relevanceHighlightRange: NSRange?
     @Binding var relevanceAnchor: CGPoint?
     let insertImageData: (Data, String?) -> Void
+    let finishEditing: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -4252,7 +4462,8 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             suggestionAnchor: $suggestionAnchor,
             relevanceAnchor: $relevanceAnchor,
             relevanceHighlightRange: relevanceHighlightRange,
-            insertImageData: insertImageData
+            insertImageData: insertImageData,
+            finishEditing: finishEditing
         )
     }
 
@@ -4273,6 +4484,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         textView.isEditable = true
         textView.isSelectable = true
         textView.allowsUndo = true
+        textView.configureUndoLimit()
         textView.isRichText = true
         textView.importsGraphics = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -4305,6 +4517,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         context.coordinator.linkTabCompletionTitle = linkTabCompletionTitle
         context.coordinator.suggestionRange = suggestionRange
         context.coordinator.relevanceAnchor = $relevanceAnchor
+        context.coordinator.finishEditing = finishEditing
         let didChangeRelevanceHighlight = context.coordinator.relevanceHighlightRange != relevanceHighlightRange
         context.coordinator.relevanceHighlightRange = relevanceHighlightRange
         scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: bottomContentInset, right: 0)
@@ -4349,6 +4562,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         var linkTabCompletionTitle: String?
         var suggestionRange: NSRange?
         var relevanceHighlightRange: NSRange?
+        var finishEditing: () -> Void
         weak var textView: NSTextView?
         private var isApplyingMarkdownStyling = false
         private var pendingStylingWorkItem: DispatchWorkItem?
@@ -4362,7 +4576,8 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             suggestionAnchor: Binding<CGPoint?>,
             relevanceAnchor: Binding<CGPoint?>,
             relevanceHighlightRange: NSRange?,
-            insertImageData: @escaping (Data, String?) -> Void
+            insertImageData: @escaping (Data, String?) -> Void,
+            finishEditing: @escaping () -> Void
         ) {
             self.text = text
             self.selectionRange = selectionRange
@@ -4371,6 +4586,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             self.relevanceAnchor = relevanceAnchor
             self.relevanceHighlightRange = relevanceHighlightRange
             self.insertImageData = insertImageData
+            self.finishEditing = finishEditing
         }
 
         func focusEditorOnce() {
@@ -4389,8 +4605,18 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
+            syncTextAndSelectionAfterUndoRedo(in: textView)
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            DispatchQueue.main.async { [finishEditing] in
+                finishEditing()
+            }
+        }
+
+        func syncTextAndSelectionAfterUndoRedo(in textView: NSTextView) {
             text.wrappedValue = textView.string
-            publishSelection(from: textView)
+            publishSelection(from: textView, deferUpdate: false)
             updateTypingAttributesForCurrentLine(in: textView)
             scheduleMarkdownStyling()
             updateSuggestionAnchor()
@@ -4413,12 +4639,23 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             return true
         }
 
-        private func publishSelection(from textView: NSTextView) {
+        private func publishSelection(from textView: NSTextView, deferUpdate: Bool = true) {
             let range = textView.selectedRange()
             let status = typingStatus(in: textView, selectedRange: range)
-            DispatchQueue.main.async {
-                self.selectionRange.wrappedValue = range
-                self.typingStatus.wrappedValue = status
+
+            let apply = {
+                if !NSEqualRanges(self.selectionRange.wrappedValue, range) {
+                    self.selectionRange.wrappedValue = range
+                }
+                if self.typingStatus.wrappedValue != status {
+                    self.typingStatus.wrappedValue = status
+                }
+            }
+
+            if deferUpdate {
+                DispatchQueue.main.async(execute: apply)
+            } else {
+                apply()
             }
         }
 
@@ -4809,7 +5046,17 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             pendingStylingWorkItem?.cancel()
             pendingStylingWorkItem = nil
             isApplyingMarkdownStyling = true
-            defer { isApplyingMarkdownStyling = false }
+            let undoManager = textView.undoManager
+            let shouldRestoreUndoRegistration = undoManager?.isUndoRegistrationEnabled == true
+            if shouldRestoreUndoRegistration {
+                undoManager?.disableUndoRegistration()
+            }
+            defer {
+                if shouldRestoreUndoRegistration {
+                    undoManager?.enableUndoRegistration()
+                }
+                isApplyingMarkdownStyling = false
+            }
 
             let rawText = textView.string as NSString
             let fullRange = NSRange(location: 0, length: rawText.length)
@@ -5355,7 +5602,24 @@ private enum PasteboardImageReader {
 }
 
 private final class MarkdownNSTextView: NSTextView {
+    private static let maximumUndoLevels = 14
+
     weak var commandHandler: InlineMarkdownEditor.Coordinator?
+
+    override var undoManager: UndoManager? {
+        let manager = super.undoManager
+        manager?.levelsOfUndo = Self.maximumUndoLevels
+        return manager
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        configureUndoLimit()
+    }
+
+    func configureUndoLimit() {
+        undoManager?.levelsOfUndo = Self.maximumUndoLevels
+    }
 
     override func paste(_ sender: Any?) {
         if commandHandler?.pasteImageFromClipboard() == true {
@@ -5363,6 +5627,17 @@ private final class MarkdownNSTextView: NSTextView {
         }
 
         super.paste(sender)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let location = convert(event.locationInWindow, from: nil)
+        let horizontalInset = textContainerInset.width
+        if location.x < horizontalInset || location.x > bounds.width - horizontalInset {
+            commandHandler?.finishEditing()
+            return
+        }
+
+        super.mouseDown(with: event)
     }
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
@@ -5394,8 +5669,16 @@ private final class MarkdownNSTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if handleEscapeKeyEquivalent(event) {
+            return
+        }
+
         if event.charactersIgnoringModifiers == "\t",
            commandHandler?.completeActiveLinkFromTab(in: self) == true {
+            return
+        }
+
+        if handleUndoRedoKeyEquivalent(event) {
             return
         }
 
@@ -5414,8 +5697,16 @@ private final class MarkdownNSTextView: NSTextView {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if handleEscapeKeyEquivalent(event) {
+            return true
+        }
+
         if event.charactersIgnoringModifiers == "\t",
            commandHandler?.completeActiveLinkFromTab(in: self) == true {
+            return true
+        }
+
+        if handleUndoRedoKeyEquivalent(event) {
             return true
         }
 
@@ -5442,6 +5733,51 @@ private final class MarkdownNSTextView: NSTextView {
             }
         }
         return menu
+    }
+
+    private func handleEscapeKeyEquivalent(_ event: NSEvent) -> Bool {
+        guard event.keyCode == 53,
+              event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty
+        else {
+            return false
+        }
+
+        commandHandler?.finishEditing()
+        return true
+    }
+
+    private func handleUndoRedoKeyEquivalent(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags.contains(.command),
+              !flags.contains(.option),
+              !flags.contains(.control),
+              let characters = event.charactersIgnoringModifiers?.lowercased()
+        else {
+            return false
+        }
+
+        switch characters {
+        case "z" where flags.contains(.shift):
+            if undoManager?.canRedo == true {
+                undoManager?.redo()
+                commandHandler?.syncTextAndSelectionAfterUndoRedo(in: self)
+            }
+            return true
+        case "z":
+            if undoManager?.canUndo == true {
+                undoManager?.undo()
+                commandHandler?.syncTextAndSelectionAfterUndoRedo(in: self)
+            }
+            return true
+        case "y" where !flags.contains(.shift):
+            if undoManager?.canRedo == true {
+                undoManager?.redo()
+                commandHandler?.syncTextAndSelectionAfterUndoRedo(in: self)
+            }
+            return true
+        default:
+            return false
+        }
     }
 
     private func handleFormattingKeyEquivalent(_ event: NSEvent) -> Bool {
@@ -5833,14 +6169,6 @@ private struct PillHeightPreferenceKey: PreferenceKey {
     }
 }
 
-private struct PromptTextHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 16
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
 private struct PromptTextInputView: NSViewRepresentable {
     @Binding var text: String
     @Binding var selectionRange: NSRange
@@ -5868,7 +6196,7 @@ private struct PromptTextInputView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
         scrollView.drawsBackground = false
-        scrollView.hasVerticalScroller = false
+        scrollView.hasVerticalScroller = isExpanded
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
@@ -5923,6 +6251,7 @@ private struct PromptTextInputView: NSViewRepresentable {
         context.coordinator.submit = submit
         context.coordinator.completeLink = completeLink
         context.coordinator.textView = textView
+        scrollView.hasVerticalScroller = isExpanded
         textView.font = NSFont.systemFont(ofSize: fontSize)
         context.coordinator.updateTextInsets(in: textView)
 
@@ -6023,8 +6352,8 @@ private struct PromptTextInputView: NSViewRepresentable {
             return true
         }
 
-        func handleReturn(in textView: NSTextView) -> Bool {
-            guard submitOnReturn else { return false }
+        func handleReturn(in textView: NSTextView, forceSubmit: Bool = false) -> Bool {
+            guard forceSubmit || submitOnReturn else { return false }
             submit()
             return true
         }
@@ -6086,9 +6415,11 @@ private final class PromptNSTextView: NSTextView {
             return
         }
 
-        if event.charactersIgnoringModifiers == "\r",
-           !event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift),
-           commandHandler?.handleReturn(in: self) == true {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let isReturnKey = event.charactersIgnoringModifiers == "\r" || event.keyCode == 36 || event.keyCode == 76
+        if isReturnKey,
+           (modifiers.contains(.command) || !modifiers.contains(.shift)),
+           commandHandler?.handleReturn(in: self, forceSubmit: modifiers.contains(.command)) == true {
             return
         }
 
@@ -6147,7 +6478,6 @@ private struct AssistantFloatingPill: View {
     @State private var isSendHovered = false
     @State private var isAttachmentHovered = false
     @State private var isWritingModeHovered = false
-    @State private var measuredPromptHeight: CGFloat = 16
     @State private var promptSelectionRange = NSRange(location: 0, length: 0)
     @State private var promptSuggestionAnchor: CGPoint?
 
@@ -6265,9 +6595,6 @@ private struct AssistantFloatingPill: View {
                     .onTapGesture {
                         isPromptFocused = true
                     }
-                    .onPreferenceChange(PromptTextHeightPreferenceKey.self) { height in
-                        measuredPromptHeight = min(68, max(16, height))
-                    }
                 }
             }
             .padding(isExpandedComposerPresented ? 5 : 0)
@@ -6318,8 +6645,15 @@ private struct AssistantFloatingPill: View {
         .onChange(of: store.assistantPrompt) { _, _ in
             expandComposerIfPromptNeedsRoom()
         }
-        .onChange(of: measuredPromptHeight) { _, _ in
-            expandComposerIfPromptNeedsRoom()
+        .onChange(of: store.assistantConversationResponse) { _, response in
+            if response != nil {
+                collapseExpandedComposer(focusCompactPrompt: false)
+            }
+        }
+        .onChange(of: store.isGeneratingAssistantResponse) { wasGenerating, isGenerating in
+            if wasGenerating && !isGenerating {
+                collapseExpandedComposer(focusCompactPrompt: false)
+            }
         }
         .onPasteCommand(of: [.image, .fileURL]) { providers in
             pastePromptImages(from: providers)
@@ -6438,12 +6772,7 @@ private struct AssistantFloatingPill: View {
 
     private var sendButton: some View {
         Button {
-            submitOrPreviewThinking()
-            if isExpandedComposerPresented {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    isExpandedComposerPresented = false
-                }
-            }
+            submitPromptAndCollapseIfNeeded()
         } label: {
             if isExpandedComposerPresented {
                 HStack(spacing: 7) {
@@ -6490,7 +6819,7 @@ private struct AssistantFloatingPill: View {
         .disabled(!hasPromptInput && !isThinking)
         .opacity(!hasPromptInput && !isThinking && !isExpandedComposerPresented ? 0.42 : 1)
         .onHover { hovering in
-            isSendHovered = hovering && hasPromptInput
+            isSendHovered = hovering && (hasPromptInput || isThinking)
         }
     }
 
@@ -6504,7 +6833,7 @@ private struct AssistantFloatingPill: View {
 
             promptInput(
                 width: expandedPillWidth - 10,
-                height: store.assistantPromptLinkedPages.isEmpty ? 206 : 174,
+                height: expandedPromptInputHeight,
                 isExpanded: true
             )
         }
@@ -6537,24 +6866,19 @@ private struct AssistantFloatingPill: View {
                 text: $store.assistantPrompt,
                 selectionRange: $promptSelectionRange,
                 placeholder: promptPlaceholder,
-                fontSize: isExpanded ? 14.5 : 12.5,
+                fontSize: isExpanded ? expandedPromptFontSize : compactPromptFontSize,
                 linkTabCompletionTitle: promptLinkSuggestions.first,
                 suggestionRange: activePromptSuggestionNSRange,
                 suggestionAnchor: $promptSuggestionAnchor,
                 isExpanded: isExpanded,
                 isFocused: isExpanded ? isExpandedPromptFocused : isPromptFocused,
                 submitOnReturn: !isExpanded,
-                submit: submitOrPreviewThinking,
+                submit: submitPromptAndCollapseIfNeeded,
                 completeLink: { title in
                     completePromptWikiLink(with: title)
                 }
             )
             .frame(width: width, height: height)
-            .background {
-                if !isExpanded {
-                    promptHeightReader
-                }
-            }
             .onTapGesture {
                 if isExpanded {
                     isExpandedPromptFocused = true
@@ -6565,7 +6889,7 @@ private struct AssistantFloatingPill: View {
 
             if store.assistantPrompt.isEmpty {
                 Text(promptPlaceholder)
-                    .font(.system(size: isExpanded ? 14.5 : 12.5))
+                    .font(.system(size: isExpanded ? expandedPromptFontSize : compactPromptFontSize))
                     .foregroundStyle(.secondary.opacity(0.68))
                     .padding(.top, isExpanded ? 9 : 0)
                     .padding(.leading, isExpanded ? 10 : 0)
@@ -6589,11 +6913,17 @@ private struct AssistantFloatingPill: View {
     }
 
     private var textFieldHeight: CGFloat {
-        max(24, measuredPromptHeight)
+        promptInputHeight(
+            lineCount: compactPromptLineCount,
+            fontSize: compactPromptFontSize,
+            verticalInset: 6,
+            minHeight: 24,
+            maxHeight: 72
+        )
     }
 
     private var promptNeedsExpandedComposer: Bool {
-        estimatedPromptLineCount >= 2 || measuredPromptHeight > 24
+        compactPromptLineCount >= 2 || store.assistantPrompt.contains("\n")
     }
 
     private var pillCornerRadius: CGFloat {
@@ -6610,30 +6940,78 @@ private struct AssistantFloatingPill: View {
     }
 
     private var estimatedPromptWidth: CGFloat {
-        let characterWidth: CGFloat = 7.35
+        let characterWidth = averagePromptCharacterWidth(fontSize: compactPromptFontSize)
         return min(524, max(86, CGFloat(measuredPromptText.count) * characterWidth))
     }
 
-    private var estimatedPromptLineCount: Int {
-        let lines = store.assistantPrompt.components(separatedBy: .newlines)
-        let visualLines = lines.reduce(0) { count, line in
-            count + max(1, Int(ceil(Double(max(1, line.count)) / 58.0)))
-        }
-        return min(4, max(1, visualLines))
+    private var compactPromptLineCount: Int {
+        estimatedPromptLineCount(
+            forWidth: textFieldWidth,
+            fontSize: compactPromptFontSize,
+            horizontalInset: 0,
+            maxLines: 4
+        )
     }
 
-    private var promptHeightReader: some View {
-        Text(store.assistantPrompt.isEmpty ? promptPlaceholder : store.assistantPrompt)
-            .font(.system(size: 12.5))
-            .lineLimit(1...4)
-            .frame(width: textFieldWidth, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
-            .hidden()
-            .background {
-                GeometryReader { proxy in
-                    Color.clear.preference(key: PromptTextHeightPreferenceKey.self, value: proxy.size.height)
-                }
-            }
+    private var expandedPromptLineCount: Int {
+        estimatedPromptLineCount(
+            forWidth: expandedPillWidth - 10,
+            fontSize: expandedPromptFontSize,
+            horizontalInset: 20,
+            maxLines: 6
+        )
+    }
+
+    private var expandedPromptInputHeight: CGFloat {
+        promptInputHeight(
+            lineCount: expandedPromptLineCount,
+            fontSize: expandedPromptFontSize,
+            verticalInset: 18,
+            minHeight: 44,
+            maxHeight: store.assistantPromptLinkedPages.isEmpty ? 148 : 126
+        )
+    }
+
+    private var compactPromptFontSize: CGFloat {
+        12.5
+    }
+
+    private var expandedPromptFontSize: CGFloat {
+        14.5
+    }
+
+    private func estimatedPromptLineCount(
+        forWidth width: CGFloat,
+        fontSize: CGFloat,
+        horizontalInset: CGFloat,
+        maxLines: Int
+    ) -> Int {
+        let availableWidth = max(48, width - horizontalInset)
+        let charactersPerLine = max(8, Int(floor(availableWidth / averagePromptCharacterWidth(fontSize: fontSize))))
+        let source = store.assistantPrompt.isEmpty ? measuredPromptText : store.assistantPrompt
+        let visualLines = source.components(separatedBy: .newlines).reduce(0) { count, line in
+            let utf16Count = max(1, (line as NSString).length)
+            return count + max(1, Int(ceil(Double(utf16Count) / Double(charactersPerLine))))
+        }
+        return min(maxLines, max(1, visualLines))
+    }
+
+    private func averagePromptCharacterWidth(fontSize: CGFloat) -> CGFloat {
+        let sample = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        let font = NSFont.systemFont(ofSize: fontSize)
+        return max(5.8, measuredTextWidth(sample, font: font) / CGFloat(sample.count))
+    }
+
+    private func promptInputHeight(
+        lineCount: Int,
+        fontSize: CGFloat,
+        verticalInset: CGFloat,
+        minHeight: CGFloat,
+        maxHeight: CGFloat
+    ) -> CGFloat {
+        let lineHeight = ceil(fontSize * 1.38)
+        let calculatedHeight = CGFloat(lineCount) * lineHeight + verticalInset
+        return min(maxHeight, max(minHeight, calculatedHeight))
     }
 
     private var activePromptSuggestionNSRange: NSRange? {
@@ -6765,8 +7143,16 @@ private struct AssistantFloatingPill: View {
         isPromptFocused || isExpandedPromptFocused
     }
 
+    private func submitPromptAndCollapseIfNeeded() {
+        submitOrPreviewThinking()
+        if isExpandedComposerPresented {
+            collapseExpandedComposer(focusCompactPrompt: false)
+        }
+    }
+
     private func submitOrPreviewThinking() {
         if isThinking {
+            store.cancelAssistantResponse()
             return
         }
 
@@ -6780,11 +7166,24 @@ private struct AssistantFloatingPill: View {
     }
 
     private func expandComposerIfPromptNeedsRoom() {
-        guard promptNeedsExpandedComposer, !isExpandedComposerPresented else { return }
+        guard promptNeedsExpandedComposer, !isExpandedComposerPresented, !isThinking else { return }
         withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
             isExpandedComposerPresented = true
         }
         focusExpandedPromptAfterLayout()
+    }
+
+    private func collapseExpandedComposer(focusCompactPrompt: Bool) {
+        guard isExpandedComposerPresented else { return }
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isExpandedComposerPresented = false
+        }
+        isExpandedPromptFocused = false
+        if focusCompactPrompt {
+            DispatchQueue.main.async {
+                isPromptFocused = true
+            }
+        }
     }
 
     private func focusExpandedPromptAfterLayout() {
@@ -6979,7 +7378,7 @@ private struct MarkdownPreview: View {
         openLinkedNote: @escaping (String) -> Void,
         imageURL: @escaping (String) -> URL? = { _ in nil },
         imageData: @escaping (String) -> Data? = { _ in nil },
-        showsCodeCopyButton: Bool = false
+        showsCodeCopyButton: Bool = true
     ) {
         self.content = content
         self.searchHighlight = searchHighlight
@@ -7129,11 +7528,7 @@ private struct MarkdownPreview: View {
             .highlightedSearchBlock(isHighlighted)
 
         case .code(let text):
-            MarkdownCodeBlockView(text: text, showsCopyButton: showsCodeCopyButton) {
-                inlineText(text, highlighted: isHighlighted)
-                    .font(.system(size: 13.5, design: .monospaced))
-                    .textSelection(.enabled)
-            }
+            MarkdownCodeBlockView(text: text, showsCopyButton: showsCodeCopyButton)
             .highlightedSearchBlock(isHighlighted)
 
         case .image(let alt, let path):
@@ -7296,18 +7691,18 @@ private struct MarkdownPreview: View {
             )
 
         let underlineMatches = underlinedTextMatches(in: normalized)
-        let highlightMatches = highlightedTextMatches(in: normalized)
+        let tokenizedHighlights = markdownByTokenizingHighlightMarkers(normalized)
         let normalizedWithoutUnderlineTags = normalized
             .replacingOccurrences(of: #"</?u>"#, with: "", options: .regularExpression)
-        let normalizedWithoutInlineMarkers = markdownRemovingHighlightMarkers(normalizedWithoutUnderlineTags)
+        let normalizedWithoutUnderlineTagsAndHighlightMarkers = markdownByTokenizingHighlightMarkers(normalizedWithoutUnderlineTags)
 
-        if var attributed = try? AttributedString(markdown: normalizedWithoutInlineMarkers) {
+        if var attributed = try? AttributedString(markdown: normalizedWithoutUnderlineTagsAndHighlightMarkers.markdown) {
             applyUnderline(matches: underlineMatches, to: &attributed)
-            applyHighlight(matches: highlightMatches, to: &attributed)
+            applyHighlight(spans: normalizedWithoutUnderlineTagsAndHighlightMarkers.spans, to: &attributed)
             return Text(attributed)
         }
 
-        return Text(normalizedWithoutInlineMarkers)
+        return Text(markdownRemovingHighlightTokens(tokenizedHighlights.markdown, spans: tokenizedHighlights.spans))
     }
 
     private func underlinedTextMatches(in markdown: String) -> [String] {
@@ -7319,26 +7714,58 @@ private struct MarkdownPreview: View {
         }
     }
 
-    private func highlightedTextMatches(in markdown: String) -> [String] {
+    private func markdownByTokenizingHighlightMarkers(_ markdown: String) -> (markdown: String, spans: [MarkdownHighlightTokenSpan]) {
         guard let regex = try? NSRegularExpression(
             pattern: #"==(.+?)=="#,
             options: [.dotMatchesLineSeparators]
-        ) else { return [] }
+        ) else { return (markdown, []) }
+
         let nsMarkdown = markdown as NSString
-        return regex.matches(in: markdown, range: NSRange(location: 0, length: nsMarkdown.length)).compactMap { match in
-            guard match.numberOfRanges > 1 else { return nil }
-            return nsMarkdown.substring(with: match.range(at: 1))
+        let fullRange = NSRange(location: 0, length: nsMarkdown.length)
+        var output = ""
+        var spans: [MarkdownHighlightTokenSpan] = []
+        var cursor = 0
+
+        for (index, match) in regex.matches(in: markdown, range: fullRange).enumerated() {
+            guard match.numberOfRanges > 1 else { continue }
+            output += nsMarkdown.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+
+            let startMarker = "ZIRNHIGHLIGHTSTART\(index)ZIRN"
+            let endMarker = "ZIRNHIGHLIGHTEND\(index)ZIRN"
+            output += startMarker
+            output += nsMarkdown.substring(with: match.range(at: 1))
+            output += endMarker
+            spans.append(MarkdownHighlightTokenSpan(startMarker: startMarker, endMarker: endMarker))
+            cursor = match.range.upperBound
+        }
+
+        output += nsMarkdown.substring(from: cursor)
+        return (output, spans)
+    }
+
+    private func markdownRemovingHighlightTokens(_ markdown: String, spans: [MarkdownHighlightTokenSpan]) -> String {
+        spans.reduce(markdown) { output, span in
+            output
+                .replacingOccurrences(of: span.startMarker, with: "")
+                .replacingOccurrences(of: span.endMarker, with: "")
         }
     }
 
-    private func markdownRemovingHighlightMarkers(_ markdown: String) -> String {
-        guard let regex = try? NSRegularExpression(
-            pattern: #"==(.+?)=="#,
-            options: [.dotMatchesLineSeparators]
-        ) else { return markdown }
+    private func applyHighlight(spans: [MarkdownHighlightTokenSpan], to attributed: inout AttributedString) {
+        guard !spans.isEmpty else { return }
 
-        let fullRange = NSRange(location: 0, length: (markdown as NSString).length)
-        return regex.stringByReplacingMatches(in: markdown, range: fullRange, withTemplate: "$1")
+        var searchStart = attributed.startIndex
+        for span in spans {
+            guard let startRange = attributed[searchStart...].range(of: span.startMarker) else { continue }
+            let highlightStart = startRange.lowerBound
+            attributed.replaceSubrange(startRange, with: AttributedString(""))
+
+            guard let endRange = attributed[highlightStart...].range(of: span.endMarker) else { continue }
+            let highlightRange = highlightStart..<endRange.lowerBound
+            attributed[highlightRange].backgroundColor = .yellow.opacity(0.42)
+            attributed.replaceSubrange(endRange, with: AttributedString(""))
+            searchStart = highlightRange.upperBound
+        }
     }
 
     private func applyUnderline(matches: [String], to attributed: inout AttributedString) {
@@ -7348,17 +7775,6 @@ private struct MarkdownPreview: View {
         for match in matches where !match.isEmpty {
             guard let range = attributed[searchStart...].range(of: match) else { continue }
             attributed[range].underlineStyle = .single
-            searchStart = range.upperBound
-        }
-    }
-
-    private func applyHighlight(matches: [String], to attributed: inout AttributedString) {
-        guard !matches.isEmpty else { return }
-
-        var searchStart = attributed.startIndex
-        for match in matches where !match.isEmpty {
-            guard let range = attributed[searchStart...].range(of: match) else { continue }
-            attributed[range].backgroundColor = .yellow.opacity(0.42)
             searchStart = range.upperBound
         }
     }
@@ -7418,21 +7834,32 @@ private struct MarkdownPreview: View {
     }
 }
 
-private struct MarkdownCodeBlockView<Content: View>: View {
+private struct MarkdownHighlightTokenSpan {
+    let startMarker: String
+    let endMarker: String
+}
+
+private struct MarkdownCodeBlockView: View {
     let text: String
     let showsCopyButton: Bool
-    @ViewBuilder let content: () -> Content
     @State private var didCopy = false
     @State private var isCopyHovered = false
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            content()
-                .padding(12)
-                .padding(.top, showsCopyButton ? 10 : 0)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary.opacity(0.45))
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            ScrollView(.horizontal) {
+                Text(text)
+                    .font(.system(size: 13.5, design: .monospaced))
+                    .lineSpacing(3)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .padding(12)
+                    .padding(.top, showsCopyButton ? 10 : 0)
+            }
+            .scrollIndicators(.visible)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary.opacity(0.45))
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
 
             if showsCopyButton {
                 Button {

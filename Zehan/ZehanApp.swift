@@ -101,6 +101,23 @@ struct ZirnApp: App {
                 .disabled(store.activeBrain == nil)
             }
 
+            CommandGroup(replacing: .undoRedo) {
+                Button("Undo") {
+                    NSApp.sendAction(Selector(("undo:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("z", modifiers: .command)
+
+                Button("Redo") {
+                    NSApp.sendAction(Selector(("redo:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("y", modifiers: .command)
+
+                Button("Redo") {
+                    NSApp.sendAction(Selector(("redo:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+            }
+
             CommandGroup(after: .pasteboard) {
                 Button("Bold") {
                     NSApp.sendAction(NSSelectorFromString("toggleBoldface:"), to: nil, from: nil)

@@ -39,6 +39,15 @@ private enum WorkspaceFileKind {
     }
 }
 
+enum AssistantGenerationPhase: Equatable {
+    case idle
+    case preparingContext
+    case requesting
+    case streaming
+    case timedOut
+    case failed(String)
+}
+
 @MainActor
 final class BrainStore: ObservableObject {
     @Published var activeBrain: BrainSummary?
@@ -58,6 +67,8 @@ final class BrainStore: ObservableObject {
     @Published var assistantPromptLinkedPages: [PromptLinkedPage] = []
     @Published var isAssistantWritingMode = false
     @Published var isGeneratingAssistantResponse = false
+    @Published private(set) var assistantGenerationPhase: AssistantGenerationPhase = .idle
+    @Published private(set) var lastAssistantGenerationDiagnostics: AssistantGenerationDiagnostics?
     @Published var isUsingWebSearch = false
     @Published var isShowingModelConfiguration = false
     @Published var isShowingMarkdownHelp = false
@@ -115,9 +126,14 @@ final class BrainStore: ObservableObject {
     private var ollamaModel = BrainStore.defaultOllamaModel
     private var ollamaURL = BrainStore.defaultOllamaURL
     private var autosaveTask: Task<Void, Never>?
+    private var assistantGenerationTask: Task<Void, Never>?
     private var homeCompilationTask: Task<Void, Never>?
     private var lastHomeSourceDiceTokensForSimilarityCheck: [String]?
     private var homePreparedNoteCache: [String: HomePreparedNoteCacheEntry] = [:]
+    private var cachedHomeSourceNotes: [HomePageSourceNote]?
+    private var cachedHomePagePresentationMarkdown: String?
+    private var cachedHomePagePresentationSourceSignature: String?
+    private var cachedHomePagePresentation: HomePagePresentation?
     private var activeHomeGenerationID: UUID?
     private var activeHighlightGenerationID: UUID?
     private var assistantConversationMemory = LangChainConversationMemory()
@@ -131,6 +147,7 @@ final class BrainStore: ObservableObject {
     private lazy var semanticSearchEmbedding = NLEmbedding.wordEmbedding(for: .english)
     private var helpDeskDatabase = HelpDeskDatabase(vaultID: nil, conversations: [])
     private var helpDeskSessionDatabase: HelpDeskSessionDatabase?
+    private var didAttemptDeferredPreviousBrainOpen = false
 
     static let defaultMistralModel = "mistral-large-latest"
     static let defaultOllamaModel = "llama3.1"
@@ -143,6 +160,12 @@ final class BrainStore: ObservableObject {
     private static let supportedImageAttachmentExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "tif", "tiff", "webp", "avif"]
     private static let supportedDocumentAttachmentExtensions: Set<String> = ["pdf", "doc", "docx", "ppt", "pptx"]
     private static let maxAssistantOutputTokens = 4096
+    private static let assistantConversationOutputTokens = 1_600
+    private static let assistantConversationInsertionOutputTokens = 2_500
+    private static let assistantConversationContextBudget = 9_000
+    private static let assistantConversationRetryContextBudget = 4_500
+    private static let assistantConversationSmallPageCharacterLimit = 6_000
+    private static let mistralChatTimeoutSeconds: TimeInterval = 220
     private static let homeCompilationDebounceNanoseconds: UInt64 = 1_500_000_000
     private static let homeCompilationAfterAutosaveNanoseconds: UInt64 = 300_000_000
     private static let homeDirectCharacterBudget = 18_000
@@ -165,7 +188,6 @@ final class BrainStore: ObservableObject {
         decoder.dateDecodingStrategy = .iso8601
         loadRecentVaults()
         loadAssistantConfiguration()
-        openPreviousBrainOnLaunch()
     }
 
     var documentStats: String {
@@ -173,6 +195,16 @@ final class BrainStore: ObservableObject {
             .split { $0.isWhitespace || $0.isNewline }
             .count
         return "\(wordCount) words · \(content.count.formatted()) characters"
+    }
+
+    func openPreviousBrainAfterFirstFrame() async {
+        guard !didAttemptDeferredPreviousBrainOpen else { return }
+        didAttemptDeferredPreviousBrainOpen = true
+
+        await Task.yield()
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        guard activeBrain == nil else { return }
+        openPreviousBrainOnLaunch()
     }
 
     var contextUsageFraction: Double {
@@ -266,8 +298,18 @@ final class BrainStore: ObservableObject {
     }
 
     var homePagePresentation: HomePagePresentation {
-        var presentation = parseHomePagePresentation(from: homeMarkdown)
-        if let sourceNotes = try? loadHomePageSourceNotes() {
+        let markdown = homeMarkdown
+        let sourceNotes = cachedHomeSourceNotes
+        let sourceSignature = sourceNotes.map { homePresentationSourceSignature($0) }
+
+        if cachedHomePagePresentationMarkdown == markdown,
+           cachedHomePagePresentationSourceSignature == sourceSignature,
+           let cachedHomePagePresentation {
+            return cachedHomePagePresentation
+        }
+
+        var presentation = parseHomePagePresentation(from: markdown)
+        if let sourceNotes {
             presentation = homePresentationEnsuringAllPages(
                 presentation,
                 sourceNotes: sourceNotes
@@ -294,7 +336,11 @@ final class BrainStore: ObservableObject {
                 )
             }
         }
-        return enrichHomePagePresentation(presentation)
+        let enriched = enrichHomePagePresentation(presentation)
+        cachedHomePagePresentationMarkdown = markdown
+        cachedHomePagePresentationSourceSignature = sourceSignature
+        cachedHomePagePresentation = enriched
+        return enriched
     }
 
     func createBrainVaultFromUser() {
@@ -425,9 +471,8 @@ final class BrainStore: ObservableObject {
                 resetDraft()
                 try loadNotes()
                 try loadHighlightSummaries()
-                syncHomeSourceSimilarityCache()
                 try loadHelpDeskDatabase()
-                openHomePageAndCompile()
+                openHomePageForLaunch()
                 recordRecentVault(note: notes.first)
                 status = "\(brain.vault.name) opened"
             } catch {
@@ -445,6 +490,8 @@ final class BrainStore: ObservableObject {
         homeCompilationTask?.cancel()
         homeCompilationTask = nil
         lastHomeSourceDiceTokensForSimilarityCheck = nil
+        cachedHomeSourceNotes = nil
+        invalidateHomePagePresentationCache()
         needsHomeRegenerationAfterCurrentCompile = false
         pendingAssistantInsertion = nil
         pendingAssistantPreview = nil
@@ -509,6 +556,7 @@ final class BrainStore: ObservableObject {
         title = uniqueTitle
         content = contentBySettingDocumentTitle(uniqueTitle, in: content)
         updateCurrentNoteSummaryTitle(to: uniqueTitle)
+        updateCachedHomeSourceNoteForCurrentEditor()
         scheduleAutosave()
         scheduleLiveHomePageCompilation()
     }
@@ -527,6 +575,7 @@ final class BrainStore: ObservableObject {
             content = newContent
         }
         learnFromUserCorrectionIfNeeded(revisedContent: newContent)
+        updateCachedHomeSourceNoteForCurrentEditor()
         scheduleAutosave()
         scheduleLiveHomePageCompilation()
     }
@@ -704,7 +753,31 @@ final class BrainStore: ObservableObject {
     }
 
     func openHomePageAndCompile() {
-        openHomePage(regenerate: true)
+        regenerateHomePage()
+    }
+
+    private func openHomePageForLaunch() {
+        autosaveTask?.cancel()
+        autosaveTask = nil
+        pendingAssistantInsertion = nil
+        pendingAssistantPreview = nil
+        activeSearchHighlight = nil
+        currentHighlightSummary = nil
+        isShowingHomePage = true
+        isShowingHelpDesk = false
+        currentNoteID = nil
+        selectedNoteID = nil
+        selectedSidebarGroupID = nil
+        title = "Home"
+        content = homeMarkdown
+        status = "Home opened"
+
+        guard latestHomeSummary == nil else {
+            isGeneratingHomePage = false
+            return
+        }
+
+        compileHomePageSummary(force: false)
     }
 
     func openHelpDesk() {
@@ -993,6 +1066,11 @@ final class BrainStore: ObservableObject {
     }
 
     func regenerateHomePage() {
+        guard isShowingHomePage else {
+            openHomePage()
+            return
+        }
+
         if currentNoteID != nil, currentHighlightSummary == nil, !isShowingHomePage {
             saveCurrentNote(statusText: "Autosaved")
         }
@@ -1017,6 +1095,11 @@ final class BrainStore: ObservableObject {
 
     func requestPageFlashcards(noteID: Note.ID, force: Bool = false) {
         guard !pageFlashcardStates[noteID, default: .idle].isLoading else { return }
+        if noteID == currentNoteID,
+           currentHighlightSummary == nil,
+           !isShowingHomePage {
+            saveCurrentNote(statusText: force ? "Regenerating flashcards" : "Preparing flashcards")
+        }
         pageFlashcardStates[noteID] = PageFlashcardState(
             isLoading: true,
             bundle: pageFlashcardStates[noteID]?.bundle,
@@ -1052,9 +1135,17 @@ final class BrainStore: ObservableObject {
             saveCurrentNote(statusText: "Autosaved")
         }
 
-        try? refreshVaultNotesForHome()
         autosaveTask?.cancel()
         autosaveTask = nil
+        if !regenerate {
+            homeCompilationTask?.cancel()
+            homeCompilationTask = nil
+            activeHomeGenerationID = nil
+            needsHomeRegenerationAfterCurrentCompile = false
+            needsForcedHomeRegenerationAfterCurrentCompile = false
+            isGeneratingHomePage = false
+            isCompilingHighlightSummary = activeHighlightGenerationID != nil
+        }
         pendingAssistantInsertion = nil
         pendingAssistantPreview = nil
         activeSearchHighlight = nil
@@ -1068,7 +1159,9 @@ final class BrainStore: ObservableObject {
         content = homeMarkdown
         status = "Home opened"
 
-        compileHomePageSummary(force: regenerate)
+        if regenerate {
+            compileHomePageSummary(force: true)
+        }
     }
 
     func openHighlightSummary(id: HighlightSummary.ID) {
@@ -1278,6 +1371,7 @@ final class BrainStore: ObservableObject {
                 return try readNote(from: noteURL)
             }
             let sourceTokens = pageFlashcardDiceTokens(for: note.content)
+            let localFallback = localPageFlashcardBundle(note: note, sourceDiceTokens: sourceTokens)
 
             if !force,
                let cached = try? loadPageFlashcardBundle(noteID: noteID),
@@ -1292,10 +1386,33 @@ final class BrainStore: ObservableObject {
                 return
             }
 
-            let generated = try await generatePageFlashcards(note: note, sourceDiceTokens: sourceTokens)
-            try withActiveBrainAccessThrowing {
-                try persistPageFlashcardBundle(generated)
+            guard force else {
+                pageFlashcardStates[noteID] = PageFlashcardState(
+                    isLoading: false,
+                    bundle: localFallback,
+                    errorMessage: nil
+                )
+                status = "Flashcards ready"
+                return
             }
+
+            let generated: PageFlashcardBundle
+            do {
+                generated = try await generatePageFlashcards(note: note, sourceDiceTokens: sourceTokens)
+                try withActiveBrainAccessThrowing {
+                    try persistPageFlashcardBundle(generated)
+                }
+            } catch {
+                let message = flashcardErrorMessage(from: error)
+                pageFlashcardStates[noteID] = PageFlashcardState(
+                    isLoading: false,
+                    bundle: pageFlashcardStates[noteID]?.bundle ?? localFallback,
+                    errorMessage: message
+                )
+                status = message
+                return
+            }
+
             pageFlashcardStates[noteID] = PageFlashcardState(
                 isLoading: false,
                 bundle: generated,
@@ -1306,10 +1423,59 @@ final class BrainStore: ObservableObject {
             pageFlashcardStates[noteID] = PageFlashcardState(
                 isLoading: false,
                 bundle: pageFlashcardStates[noteID]?.bundle,
-                errorMessage: error.localizedDescription
+                errorMessage: flashcardErrorMessage(from: error)
             )
-            status = error.localizedDescription
+            status = flashcardErrorMessage(from: error)
         }
+    }
+
+    private func localPageFlashcardBundle(note: Note, sourceDiceTokens: [String]) -> PageFlashcardBundle {
+        let highlights = highlightedTextFragments(in: note.content)
+            .map { cleanedFlashcardText($0) }
+            .filter { !$0.isEmpty }
+
+        let cards: [PageFlashcard]
+        if highlights.isEmpty {
+            let summary = cleanedFlashcardText(
+                localPageSummary(
+                    for: HomePageSourceNote(
+                        id: note.id,
+                        title: note.title,
+                        content: note.content,
+                        updatedAt: note.updatedAt
+                    ),
+                    sentenceLimit: 4,
+                    wordLimit: 80
+                )
+            )
+            cards = [
+                PageFlashcard(
+                    id: "\(note.id)-local-main-idea",
+                    question: "What is the main idea of \(note.title)?",
+                    answer: summary,
+                    anchor: summary
+                )
+            ]
+        } else {
+            cards = highlights.prefix(6).enumerated().map { index, highlight in
+                PageFlashcard(
+                    id: "\(note.id)-local-\(index)",
+                    question: localFlashcardQuestion(for: highlight, pageTitle: note.title),
+                    answer: lineLimited(highlight, maxLines: 4),
+                    anchor: String(highlight.prefix(120)).trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            }
+        }
+
+        return PageFlashcardBundle(
+            noteID: note.id,
+            noteTitle: note.title,
+            sourceFingerprint: stableFingerprint(for: note.content),
+            sourceDiceTokens: sourceDiceTokens,
+            generatedAt: Date(),
+            modelTitle: "Local instant flashcards",
+            cards: cards
+        )
     }
 
     private func generatePageFlashcards(note: Note, sourceDiceTokens: [String]) async throws -> PageFlashcardBundle {
@@ -1502,10 +1668,12 @@ final class BrainStore: ObservableObject {
             assistantConversationMemory.clear()
         }
         isGeneratingAssistantResponse = true
+        assistantGenerationPhase = .preparingContext
         isUsingWebSearch = selectedAssistantModel.supportsWebSearch && promptSuggestsWebSearch(prompt)
         status = intent == .writing ? "\(selectedAssistantModel.title) is writing" : "\(selectedAssistantModel.title) is answering"
 
-        Task {
+        assistantGenerationTask?.cancel()
+        assistantGenerationTask = Task {
             switch intent {
             case .writing:
                 await generateAssistantResponse(for: prompt, linkedPageTitles: linkedPageTitles)
@@ -1513,6 +1681,16 @@ final class BrainStore: ObservableObject {
                 await generateAssistantConversationResponse(for: prompt, linkedPageTitles: linkedPageTitles)
             }
         }
+    }
+
+    func cancelAssistantResponse() {
+        guard isGeneratingAssistantResponse else { return }
+        assistantGenerationTask?.cancel()
+        assistantGenerationTask = nil
+        isGeneratingAssistantResponse = false
+        isUsingWebSearch = false
+        assistantGenerationPhase = .idle
+        status = "Answer cancelled"
     }
 
     func addAssistantPromptLink(title: String) {
@@ -1549,10 +1727,12 @@ final class BrainStore: ObservableObject {
         else { return }
 
         isGeneratingAssistantResponse = true
+        assistantGenerationPhase = .requesting
         isUsingWebSearch = false
         status = "\(response.providerTitle) is adding the answer to the page"
 
-        Task {
+        assistantGenerationTask?.cancel()
+        assistantGenerationTask = Task {
             await generateAssistantConversationInsertion(from: response)
         }
     }
@@ -2093,54 +2273,7 @@ final class BrainStore: ObservableObject {
     }
 
     func attachPromptDocument(from url: URL) {
-        guard isSupportedPromptDocument(url) else {
-            status = supportedAttachmentStatusMessage
-            return
-        }
-
-        let didStart = url.startAccessingSecurityScopedResource()
-        defer {
-            if didStart {
-                url.stopAccessingSecurityScopedResource()
-            }
-        }
-
-        let storedFileURL: URL
-        do {
-            storedFileURL = try copyAttachmentToWorkspace(from: url)
-        } catch {
-            status = error.localizedDescription
-            return
-        }
-
-        if let fileSize = fileByteCount(at: url), exceedsMistralUploadLimit(byteCount: fileSize) {
-            status = mistralUploadLimitStatusMessage(forFileName: url.lastPathComponent)
-            return
-        }
-
-        switch url.pathExtension.lowercased() {
-        case "pdf":
-            attachPDFWithMistralOCR(from: url, storedFileURL: storedFileURL, target: .assistant)
-        case "doc", "docx":
-            let extractedText = extractedPromptDocumentText(from: url)
-            assistantAttachment = PromptAttachment(
-                fileName: storedFileURL.lastPathComponent,
-                fileExtension: storedFileURL.pathExtension.lowercased(),
-                extractedText: extractedText,
-                storedFileURL: storedFileURL
-            )
-            status = "\(storedFileURL.lastPathComponent) attached"
-        case "ppt", "pptx":
-            attachDocumentWithMistralOCR(from: url, storedFileURL: storedFileURL, target: .assistant)
-        case let ext where Self.supportedImageAttachmentExtensions.contains(ext):
-            guard let data = try? Data(contentsOf: url) else {
-                status = "Could not read \(url.lastPathComponent)"
-                return
-            }
-            attachPromptImage(data: data, suggestedFileName: storedFileURL.lastPathComponent, storedFileURL: storedFileURL)
-        default:
-            status = supportedAttachmentStatusMessage
-        }
+        attachDocument(from: url, target: .assistant)
     }
 
     func attachPromptImage(data: Data, suggestedFileName: String? = nil, storedFileURL: URL? = nil) {
@@ -2210,7 +2343,11 @@ final class BrainStore: ObservableObject {
         attachPromptDocument(from: url)
     }
 
-    private func attachHelpDeskDocument(from url: URL) {
+    func attachHelpDeskDocument(from url: URL) {
+        attachDocument(from: url, target: .helpDesk)
+    }
+
+    private func attachDocument(from url: URL, target: AttachmentTarget) {
         guard isSupportedPromptDocument(url) else {
             status = supportedAttachmentStatusMessage
             return
@@ -2231,61 +2368,61 @@ final class BrainStore: ObservableObject {
             return
         }
 
-        if let fileSize = fileByteCount(at: url), exceedsMistralUploadLimit(byteCount: fileSize) {
-            status = mistralUploadLimitStatusMessage(forFileName: url.lastPathComponent)
-            return
-        }
-
         switch url.pathExtension.lowercased() {
         case "pdf":
-            attachPDFWithMistralOCR(from: url, storedFileURL: storedFileURL, target: .helpDesk)
+            setAttachment(
+                PromptAttachment(
+                    fileName: storedFileURL.lastPathComponent,
+                    fileExtension: storedFileURL.pathExtension.lowercased(),
+                    extractedText: extractedPromptDocumentText(from: url),
+                    storedFileURL: storedFileURL
+                ),
+                for: target
+            )
+            status = "\(storedFileURL.lastPathComponent) attached"
+            attachPDFWithMistralOCRIfAvailable(from: url, storedFileURL: storedFileURL, target: target)
         case "doc", "docx":
             let extractedText = extractedPromptDocumentText(from: url)
-            helpDeskAttachment = PromptAttachment(
-                fileName: storedFileURL.lastPathComponent,
-                fileExtension: storedFileURL.pathExtension.lowercased(),
-                extractedText: extractedText,
-                storedFileURL: storedFileURL
+            setAttachment(
+                PromptAttachment(
+                    fileName: storedFileURL.lastPathComponent,
+                    fileExtension: storedFileURL.pathExtension.lowercased(),
+                    extractedText: extractedText,
+                    storedFileURL: storedFileURL
+                ),
+                for: target
             )
             status = "\(storedFileURL.lastPathComponent) attached"
         case "ppt", "pptx":
-            attachDocumentWithMistralOCR(from: url, storedFileURL: storedFileURL, target: .helpDesk)
+            setAttachment(
+                PromptAttachment(
+                    fileName: storedFileURL.lastPathComponent,
+                    fileExtension: storedFileURL.pathExtension.lowercased(),
+                    extractedText: "",
+                    storedFileURL: storedFileURL
+                ),
+                for: target
+            )
+            status = "\(storedFileURL.lastPathComponent) attached"
+            attachDocumentWithMistralOCRIfAvailable(from: url, storedFileURL: storedFileURL, target: target)
         case let ext where Self.supportedImageAttachmentExtensions.contains(ext):
-            guard !mistralAPIKey.isEmpty || requestAndSaveMistralAPIKey(
-                title: "Mistral API Key",
-                message: "Mistral OCR needs your Mistral API key before reading this image."
-            ) else {
-                status = "Mistral API key required for OCR"
-                return
-            }
-
             guard let data = try? Data(contentsOf: url) else {
                 status = "Could not read \(url.lastPathComponent)"
                 return
             }
 
             let fileName = storedFileURL.lastPathComponent
-            guard !exceedsMistralUploadLimit(byteCount: data.count) else {
-                status = mistralUploadLimitStatusMessage(forFileName: fileName)
-                return
-            }
-
-            let mimeType = imageMimeType(forFileName: fileName)
-            status = "OCR reading \(fileName)"
-            Task {
-                do {
-                    let extractedText = try await extractImageTextWithMistralOCR(data: data, mimeType: mimeType)
-                    helpDeskAttachment = PromptAttachment(
-                        fileName: fileName,
-                        fileExtension: (fileName as NSString).pathExtension.lowercased(),
-                        extractedText: extractedText,
-                        storedFileURL: storedFileURL
-                    )
-                    status = "\(fileName) attached · OCRed"
-                } catch {
-                    status = error.localizedDescription
-                }
-            }
+            setAttachment(
+                PromptAttachment(
+                    fileName: fileName,
+                    fileExtension: (fileName as NSString).pathExtension.lowercased(),
+                    extractedText: "",
+                    storedFileURL: storedFileURL
+                ),
+                for: target
+            )
+            status = "\(fileName) attached"
+            attachImageWithMistralOCRIfAvailable(data: data, storedFileURL: storedFileURL, target: target)
         default:
             status = supportedAttachmentStatusMessage
         }
@@ -2606,9 +2743,14 @@ final class BrainStore: ObservableObject {
         notes = orderedNotesForSidebar(from: loadedSummaries)
         graphLinks = buildGraphLinks(from: loadedNotes)
         rebuildSearchIndex(from: loadedNotes, in: brain)
+        cacheHomeSourceNotes(from: loadedNotes)
     }
 
     private func loadHomePageSourceNotes() throws -> [HomePageSourceNote] {
+        if let cachedHomeSourceNotes {
+            return cachedHomeSourceNotes
+        }
+
         guard let brain = activeBrain else { return [] }
 
         var sourceNotes: [HomePageSourceNote] = []
@@ -2624,6 +2766,8 @@ final class BrainStore: ObservableObject {
         if let capturedError {
             throw capturedError
         }
+        cachedHomeSourceNotes = sourceNotes
+        invalidateHomePagePresentationCache()
         return sourceNotes
     }
 
@@ -2706,6 +2850,81 @@ final class BrainStore: ObservableObject {
         }
 
         return sourceNotes
+    }
+
+    private func cacheHomeSourceNotes(from loadedNotes: [Note]) {
+        let loadedNotesByID = Dictionary(grouping: loadedNotes, by: \.id)
+            .compactMapValues { $0.first }
+        let loadedNotesByTitle = Dictionary(grouping: loadedNotes) { normalizedLinkTitle($0.title) }
+            .compactMapValues { $0.first }
+
+        var sourceNotes: [HomePageSourceNote] = []
+        var seenIDs = Set<Note.ID>()
+        var seenTitles = Set<String>()
+
+        func append(_ note: Note) {
+            let normalizedTitle = normalizedLinkTitle(note.title)
+            guard !seenIDs.contains(note.id),
+                  !seenTitles.contains(normalizedTitle)
+            else { return }
+
+            sourceNotes.append(
+                HomePageSourceNote(
+                    id: note.id,
+                    title: note.title,
+                    content: note.content,
+                    updatedAt: note.updatedAt
+                )
+            )
+            seenIDs.insert(note.id)
+            seenTitles.insert(normalizedTitle)
+        }
+
+        for summary in notes {
+            if let note = loadedNotesByID[summary.id] ?? loadedNotesByTitle[normalizedLinkTitle(summary.title)] {
+                append(note)
+            }
+        }
+
+        for note in loadedNotes.sorted(by: { $0.updatedAt > $1.updatedAt }) {
+            append(note)
+        }
+
+        cachedHomeSourceNotes = sourceNotes
+        invalidateHomePagePresentationCache()
+    }
+
+    private func updateCachedHomeSourceNoteForCurrentEditor() {
+        guard let currentNoteID,
+              var cachedHomeSourceNotes,
+              let index = cachedHomeSourceNotes.firstIndex(where: { $0.id == currentNoteID })
+        else {
+            invalidateHomePagePresentationCache()
+            return
+        }
+
+        cachedHomeSourceNotes[index] = HomePageSourceNote(
+            id: currentNoteID,
+            title: title,
+            content: content,
+            updatedAt: Date()
+        )
+        self.cachedHomeSourceNotes = cachedHomeSourceNotes
+        invalidateHomePagePresentationCache()
+    }
+
+    private func invalidateHomePagePresentationCache() {
+        cachedHomePagePresentationMarkdown = nil
+        cachedHomePagePresentationSourceSignature = nil
+        cachedHomePagePresentation = nil
+    }
+
+    private func homePresentationSourceSignature(_ sourceNotes: [HomePageSourceNote]) -> String {
+        sourceNotes
+            .map { note in
+                "\(note.id)|\(note.title)|\(note.updatedAt.timeIntervalSince1970)|\(note.content.count)"
+            }
+            .joined(separator: "\n")
     }
 
     private func syncSidebarItems(
@@ -3289,6 +3508,8 @@ final class BrainStore: ObservableObject {
         defer {
             isGeneratingAssistantResponse = false
             isUsingWebSearch = false
+            assistantGenerationPhase = .idle
+            assistantGenerationTask = nil
         }
 
         do {
@@ -3318,23 +3539,25 @@ final class BrainStore: ObservableObject {
         defer {
             isGeneratingAssistantResponse = false
             isUsingWebSearch = false
+            if case .timedOut = assistantGenerationPhase {
+            } else if case .failed = assistantGenerationPhase {
+            } else {
+                assistantGenerationPhase = .idle
+            }
+            assistantGenerationTask = nil
         }
 
         do {
             let providerTitle = selectedAssistantModel.title
-            let input = assistantConversationInput(for: prompt, linkedPageTitles: linkedPageTitles)
-            let messages = assistantConversationMessages(currentUserInput: input)
-            let result = try await generateWithMistral(
-                system: assistantConversationInstructions(),
-                messages: messages,
-                maxTokens: Self.maxAssistantOutputTokens
+            let startedAt = Date()
+            let answer = try await streamAssistantConversationAnswer(
+                prompt: prompt,
+                linkedPageTitles: linkedPageTitles,
+                providerTitle: providerTitle,
+                contextBudget: Self.assistantConversationContextBudget,
+                retryOnTimeout: true,
+                startedAt: startedAt
             )
-            recordMistralUsage(
-                inputTokens: result.inputTokens ?? estimatedTokenCount(for: input + assistantConversationTranscript()),
-                outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
-            )
-
-            let answer = cleanedAssistantMarkdown(result.content)
             guard !answer.isEmpty else {
                 throw AssistantError.requestFailed("The model returned no answer.")
             }
@@ -3349,7 +3572,13 @@ final class BrainStore: ObservableObject {
             assistantConversationMemory.append(response)
             clearSubmittedAssistantPromptIfUnchanged(prompt: prompt, linkedPageTitles: linkedPageTitles)
             status = "\(providerTitle) answered"
+        } catch is CancellationError {
+            status = "Answer cancelled"
+        } catch let error as URLError where error.code == .timedOut {
+            assistantGenerationPhase = .timedOut
+            status = "Response timed out. Try again with shorter context or switch to quick answer mode."
         } catch {
+            assistantGenerationPhase = .failed(error.localizedDescription)
             status = error.localizedDescription
         }
     }
@@ -3358,6 +3587,8 @@ final class BrainStore: ObservableObject {
         defer {
             isGeneratingAssistantResponse = false
             isUsingWebSearch = false
+            assistantGenerationPhase = .idle
+            assistantGenerationTask = nil
         }
 
         do {
@@ -3365,7 +3596,7 @@ final class BrainStore: ObservableObject {
             let result = try await generateWithMistral(
                 system: assistantConversationInsertionInstructions(),
                 user: prompt,
-                maxTokens: Self.maxAssistantOutputTokens
+                maxTokens: Self.assistantConversationInsertionOutputTokens
             )
             recordMistralUsage(
                 inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
@@ -3705,6 +3936,106 @@ final class BrainStore: ObservableObject {
         )
     }
 
+    private func streamAssistantConversationAnswer(
+        prompt: String,
+        linkedPageTitles: [String],
+        providerTitle: String,
+        contextBudget: Int,
+        retryOnTimeout: Bool,
+        startedAt: Date
+    ) async throws -> String {
+        assistantGenerationPhase = .preparingContext
+        status = "Preparing context"
+        let context = assistantConversationContext(
+            for: prompt,
+            linkedPageTitles: linkedPageTitles,
+            characterBudget: contextBudget
+        )
+        let messages = assistantConversationMessages(currentUserInput: context.input)
+        let requestByteCount = try mistralRequestBodyByteCount(
+            system: assistantConversationInstructions(),
+            messages: messages,
+            maxTokens: Self.assistantConversationOutputTokens,
+            stream: true
+        )
+        lastAssistantGenerationDiagnostics = AssistantGenerationDiagnostics(
+            contextBuildSeconds: context.buildDuration,
+            requestByteCount: requestByteCount,
+            estimatedInputTokens: context.estimatedTokens + estimatedTokenCount(for: assistantConversationTranscript()),
+            responseSeconds: 0,
+            includedSources: context.includedSources,
+            errorType: nil
+        )
+
+        assistantGenerationPhase = .requesting
+        status = "Sending to Mistral · ~\(lastAssistantGenerationDiagnostics?.estimatedInputTokens ?? context.estimatedTokens) tokens"
+        var streamedAnswer = ""
+        let responseStartedAt = Date()
+        var streamingResponse: AssistantConversationResponse?
+
+        do {
+            try await generateWithMistralStreaming(
+                system: assistantConversationInstructions(),
+                messages: messages,
+                maxTokens: Self.assistantConversationOutputTokens
+            ) { delta in
+                guard !delta.isEmpty else { return }
+                if assistantGenerationPhase != .streaming {
+                    assistantGenerationPhase = .streaming
+                    status = "Answering..."
+                }
+                streamedAnswer += delta
+                let cleanedAnswer = cleanedAssistantMarkdown(streamedAnswer)
+                guard !cleanedAnswer.isEmpty else { return }
+                var updated = streamingResponse ?? AssistantConversationResponse(
+                    prompt: prompt,
+                    answer: cleanedAnswer,
+                    providerTitle: providerTitle,
+                    createdAt: Date()
+                )
+                updated.answer = cleanedAnswer
+                streamingResponse = updated
+                assistantConversationResponse = updated
+            }
+        } catch let error as URLError where error.code == .timedOut && retryOnTimeout {
+            assistantGenerationPhase = .timedOut
+            status = "Response timed out. Retrying with shorter context..."
+            lastAssistantGenerationDiagnostics = AssistantGenerationDiagnostics(
+                contextBuildSeconds: context.buildDuration,
+                requestByteCount: requestByteCount,
+                estimatedInputTokens: context.estimatedTokens,
+                responseSeconds: Date().timeIntervalSince(responseStartedAt),
+                includedSources: context.includedSources,
+                errorType: "timedOut"
+            )
+            assistantConversationResponse = nil
+            return try await streamAssistantConversationAnswer(
+                prompt: prompt,
+                linkedPageTitles: linkedPageTitles,
+                providerTitle: providerTitle,
+                contextBudget: Self.assistantConversationRetryContextBudget,
+                retryOnTimeout: false,
+                startedAt: startedAt
+            )
+        }
+
+        let answer = cleanedAssistantMarkdown(streamedAnswer)
+        lastAssistantGenerationDiagnostics = AssistantGenerationDiagnostics(
+            contextBuildSeconds: context.buildDuration,
+            requestByteCount: requestByteCount,
+            estimatedInputTokens: context.estimatedTokens,
+            responseSeconds: Date().timeIntervalSince(responseStartedAt),
+            includedSources: context.includedSources,
+            errorType: nil
+        )
+        recordMistralUsage(
+            inputTokens: context.estimatedTokens,
+            outputTokens: estimatedTokenCount(for: answer)
+        )
+        status = "\(providerTitle) answered · \(String(format: "%.1f", Date().timeIntervalSince(startedAt)))s"
+        return answer
+    }
+
     private func generateWithMistral(
         system: String,
         user: String,
@@ -3722,6 +4053,45 @@ final class BrainStore: ObservableObject {
         )
     }
 
+    private func mistralRequestBody(
+        system: String,
+        messages: [[String: String]],
+        maxTokens: Int,
+        stream: Bool
+    ) -> [String: Any] {
+        var requestMessages = [
+            [
+                "role": "system",
+                "content": system
+            ]
+        ]
+        requestMessages.append(contentsOf: messages)
+
+        return [
+            "model": mistralModel,
+            "messages": requestMessages,
+            "temperature": 0.35,
+            "max_tokens": maxTokens,
+            "stream": stream
+        ]
+    }
+
+    private func mistralRequestBodyByteCount(
+        system: String,
+        messages: [[String: String]],
+        maxTokens: Int,
+        stream: Bool
+    ) throws -> Int {
+        try JSONSerialization.data(
+            withJSONObject: mistralRequestBody(
+                system: system,
+                messages: messages,
+                maxTokens: maxTokens,
+                stream: stream
+            )
+        ).count
+    }
+
     private func generateWithMistral(
         system: String,
         messages: [[String: String]],
@@ -3731,29 +4101,64 @@ final class BrainStore: ObservableObject {
             throw AssistantError.missingConfiguration("Add a Mistral API key in Settings > Configure Model.")
         }
 
-        var requestMessages = [
-            [
-                "role": "system",
-                "content": system
-            ]
-        ]
-        requestMessages.append(contentsOf: messages)
-
         var request = URLRequest(url: URL(string: "https://api.mistral.ai/v1/chat/completions")!)
         request.httpMethod = "POST"
+        request.timeoutInterval = Self.mistralChatTimeoutSeconds
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(mistralAPIKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": mistralModel,
-            "messages": requestMessages,
-            "temperature": 0.35,
-            "max_tokens": maxTokens,
-            "stream": false
-        ])
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: mistralRequestBody(
+                system: system,
+                messages: messages,
+                maxTokens: maxTokens,
+                stream: false
+            )
+        )
 
         let (data, response) = try await URLSession.shared.data(for: request)
         try processMistralHTTPResponse(response, data: data)
         return try extractChatCompletionResult(from: data)
+    }
+
+    private func generateWithMistralStreaming(
+        system: String,
+        messages: [[String: String]],
+        maxTokens: Int,
+        onDelta: (String) -> Void
+    ) async throws {
+        guard !mistralAPIKey.isEmpty else {
+            throw AssistantError.missingConfiguration("Add a Mistral API key in Settings > Configure Model.")
+        }
+
+        var request = URLRequest(url: URL(string: "https://api.mistral.ai/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = Self.mistralChatTimeoutSeconds
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(mistralAPIKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: mistralRequestBody(
+                system: system,
+                messages: messages,
+                maxTokens: maxTokens,
+                stream: true
+            )
+        )
+
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        try processMistralHTTPResponse(response, data: Data())
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            guard line.hasPrefix("data:") else { continue }
+            let payload = line
+                .dropFirst(5)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if payload == "[DONE]" { break }
+            guard let data = payload.data(using: .utf8),
+                  let delta = try? extractChatCompletionDelta(from: data),
+                  !delta.isEmpty
+            else { continue }
+            onDelta(delta)
+        }
     }
 
     private func verifyMistralAPIKey(_ apiKey: String) async throws {
@@ -4029,11 +4434,12 @@ final class BrainStore: ObservableObject {
            let payload = try? decoder.decode(PageFlashcardResponse.self, from: data) {
             let cards = payload.cards
                 .map { card in
-                    PageFlashcard(
+                    let answer = cleanedFlashcardText(card.answer)
+                    return PageFlashcard(
                         id: UUID().uuidString,
-                        question: card.question.trimmingCharacters(in: .whitespacesAndNewlines),
-                        answer: card.answer.trimmingCharacters(in: .whitespacesAndNewlines),
-                        anchor: card.anchor.trimmingCharacters(in: .whitespacesAndNewlines)
+                        question: cleanedFlashcardText(card.question, preservingLineBreaks: false),
+                        answer: answer,
+                        anchor: cleanedFlashcardText(card.anchor.isEmpty ? answer : card.anchor, preservingLineBreaks: false)
                     )
                 }
                 .filter { !$0.question.isEmpty && !$0.answer.isEmpty }
@@ -4042,12 +4448,14 @@ final class BrainStore: ObservableObject {
             }
         }
 
-        let summary = localPageSummary(for: HomePageSourceNote(
-            id: note.id,
-            title: note.title,
-            content: note.content,
-            updatedAt: note.updatedAt
-        ))
+        let summary = cleanedFlashcardText(
+            localPageSummary(for: HomePageSourceNote(
+                id: note.id,
+                title: note.title,
+                content: note.content,
+                updatedAt: note.updatedAt
+            ))
+        )
         return [
             PageFlashcard(
                 id: UUID().uuidString,
@@ -4329,6 +4737,8 @@ final class BrainStore: ObservableObject {
 
         for note in sourceNotes {
             let highlights = highlightedTextFragments(in: note.content)
+                .map { cleanedFlashcardText($0) }
+                .filter { !$0.isEmpty }
             guard !highlights.isEmpty else { continue }
 
             let groupTitle = sidebarGroupTitle(forNoteID: note.id)
@@ -4342,7 +4752,7 @@ final class BrainStore: ObservableObject {
                     HomePageFlashcard(
                         id: "\(note.id)-\(index)",
                         question: localFlashcardQuestion(for: highlight, pageTitle: note.title),
-                        answer: highlight
+                        answer: lineLimited(highlight, maxLines: 4)
                     )
                 )
             }
@@ -4355,12 +4765,91 @@ final class BrainStore: ObservableObject {
     }
 
     private func localFlashcardQuestion(for highlight: String, pageTitle: String) -> String {
-        let trimmed = highlight.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = cleanedFlashcardText(highlight, preservingLineBreaks: false)
+            .replacingOccurrences(of: "• ", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.count <= 100 {
             return "What key idea from \(pageTitle) is captured here?"
         }
         let preview = String(trimmed.prefix(90)).trimmingCharacters(in: .whitespacesAndNewlines)
         return "Explain the highlighted concept from \(pageTitle): \"\(preview)...\""
+    }
+
+    private func cleanedFlashcardText(_ text: String, preservingLineBreaks: Bool = true) -> String {
+        var output = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
+        let replacements: [(pattern: String, template: String)] = [
+            (#"(?s)%%.*?%%"#, ""),
+            (#"\[\[([^\]\|]+)\|([^\]]+)\]\]"#, "$2"),
+            (#"\[\[([^\]]+)\]\]"#, "$1"),
+            (#"!\[([^\]]*)\]\([^)]+\)"#, "$1"),
+            (#"\[([^\]]+)\]\([^)]+\)"#, "$1"),
+            (#"(?s)==(.+?)=="#, "$1"),
+            (#"</?u>"#, ""),
+            (#"(?s)\*\*(.+?)\*\*"#, "$1"),
+            (#"(?s)__(.+?)__"#, "$1"),
+            (#"(?s)~~(.+?)~~"#, "$1"),
+            (#"`([^`]+)`"#, "$1"),
+            (#"(?<!\*)\*([^*\n]+)\*(?!\*)"#, "$1"),
+            (#"(?<!_)_([^_\n]+)_(?!_)"#, "$1")
+        ]
+
+        for replacement in replacements {
+            output = output.replacingOccurrences(
+                of: replacement.pattern,
+                with: replacement.template,
+                options: .regularExpression
+            )
+        }
+
+        let lines = output
+            .components(separatedBy: .newlines)
+            .map { rawLine -> String in
+                var line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                line = line.replacingOccurrences(of: #"^#{1,6}\s+"#, with: "", options: .regularExpression)
+                line = line.replacingOccurrences(of: #"^>\s?"#, with: "", options: .regularExpression)
+                line = line.replacingOccurrences(of: #"^[-*+]\s+"#, with: "• ", options: .regularExpression)
+                line = line.replacingOccurrences(of: #"^\d+[\.)]\s+"#, with: "", options: .regularExpression)
+                return line
+            }
+            .filter { !$0.isEmpty }
+
+        if preservingLineBreaks {
+            return lines.joined(separator: "\n")
+        }
+
+        return lines.joined(separator: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func flashcardErrorMessage(from error: Error) -> String {
+        let rawMessage = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if rawMessage.localizedCaseInsensitiveContains("rate_limited")
+            || rawMessage.localizedCaseInsensitiveContains("rate limit")
+            || rawMessage.contains("\"429\"")
+            || rawMessage.contains(":429") {
+            return "Rate limit hit. Showing local flashcards; try regenerate again in a moment."
+        }
+
+        if let data = rawMessage.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let message = json["message"] as? String, !message.isEmpty {
+                return message
+            }
+
+            if let object = json["object"] as? String,
+               object == "error",
+               let code = json["code"] as? String,
+               !code.isEmpty {
+                return "Flashcard generation failed: \(code)."
+            }
+        }
+
+        return rawMessage.isEmpty ? "Flashcard generation failed." : rawMessage
     }
 
     private func lineLimited(_ text: String, maxLines: Int) -> String {
@@ -4634,10 +5123,13 @@ final class BrainStore: ObservableObject {
         for line in body.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.hasPrefix("Q:") {
-                currentQuestion = String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                currentQuestion = cleanedFlashcardText(
+                    String(trimmed.dropFirst(2)),
+                    preservingLineBreaks: false
+                )
             } else if trimmed.hasPrefix("A:"), let question = currentQuestion {
                 let answer = lineLimited(
-                    String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines),
+                    cleanedFlashcardText(String(trimmed.dropFirst(2))),
                     maxLines: 4
                 )
                 cards.append(
@@ -4721,22 +5213,6 @@ final class BrainStore: ObservableObject {
         let current = Set(currentTokens)
         let intersectionCount = previous.intersection(current).count
         return (2 * Double(intersectionCount)) / Double(previous.count + current.count)
-    }
-
-    private func syncHomeSourceSimilarityCache() {
-        guard activeBrain != nil,
-              let sourceNotes = try? loadHomePageSourceNotes() else {
-            lastHomeSourceDiceTokensForSimilarityCheck = nil
-            return
-        }
-
-        let fingerprint = homeSourceFingerprint(for: sourceNotes)
-        if latestHomeSummary?.sourceFingerprint == fingerprint {
-            lastHomeSourceDiceTokensForSimilarityCheck = latestHomeSummary?.sourceDiceTokens
-                ?? homeSourceDiceTokens(for: sourceNotes)
-        } else {
-            lastHomeSourceDiceTokensForSimilarityCheck = nil
-        }
     }
 
     private func refreshHomeSummarySourceSignature(
@@ -4990,26 +5466,159 @@ final class BrainStore: ObservableObject {
     }
 
     private func assistantConversationInput(for prompt: String, linkedPageTitles: [String]) -> String {
-        return """
+        assistantConversationContext(
+            for: prompt,
+            linkedPageTitles: linkedPageTitles,
+            characterBudget: Self.assistantConversationContextBudget
+        ).input
+    }
+
+    private func assistantConversationContext(
+        for prompt: String,
+        linkedPageTitles: [String],
+        characterBudget: Int
+    ) -> AssistantConversationContext {
+        let startedAt = Date()
+        var remainingBudget = characterBudget
+        var includedSources: [String] = []
+        var sections: [String] = []
+
+        func appendSection(_ title: String, _ body: String) {
+            guard remainingBudget > 0 else { return }
+            let section = "\(title):\n\(body.trimmingCharacters(in: .whitespacesAndNewlines))"
+            let excerpt = promptExcerpt(section, characterLimit: remainingBudget)
+            remainingBudget -= excerpt.count
+            sections.append(excerpt)
+        }
+
+        let linkedPages = assistantPromptLinksContext(linkedPageTitles)
+        appendSection("Linked Markdown pages selected in the prompt", linkedPages)
+        if linkedPages != "None" {
+            includedSources.append("linked pages")
+        }
+
+        let attachmentLimit = min(3_500, max(1_200, characterBudget / 3))
+        let attachmentContext = assistantAttachmentContext(
+            for: prompt,
+            linkedPageTitles: linkedPageTitles,
+            intent: .conversation,
+            characterLimit: attachmentLimit
+        )
+        appendSection("Attached document", attachmentContext)
+        if !attachmentContext.hasPrefix("None") {
+            includedSources.append("attachment")
+        }
+
+        let currentPageContext = currentPageConversationContext(
+            prompt: prompt,
+            characterBudget: max(1_200, remainingBudget)
+        )
+        appendSection("Current Markdown document", currentPageContext.text)
+        includedSources.append(currentPageContext.sourceSummary)
+
+        let input = """
         User question:
         \(prompt.isEmpty && linkedPageTitles.isEmpty ? "Answer using the attached document and current note as context." : prompt)
-
-        Linked Markdown pages selected in the prompt:
-        \(assistantPromptLinksContext(linkedPageTitles))
-
-        Attached document:
-        \(assistantAttachmentContext(for: prompt, linkedPageTitles: linkedPageTitles, intent: .conversation))
 
         Current document title:
         \(title)
 
-        Current Markdown document:
-        \(promptExcerpt(content, characterLimit: 12_000))
+        Context:
+        \(sections.joined(separator: "\n\n"))
 
         Required output:
         Answer the user. Do not rewrite the Markdown file.
         If the question has typos or missing spaces, silently infer the intended words from context.
         """
+
+        return AssistantConversationContext(
+            input: input,
+            estimatedTokens: estimatedTokenCount(for: input),
+            includedSources: includedSources.joined(separator: ", "),
+            buildDuration: Date().timeIntervalSince(startedAt),
+            characterBudget: characterBudget
+        )
+    }
+
+    private func currentPageConversationContext(prompt: String, characterBudget: Int) -> (text: String, sourceSummary: String) {
+        let cleanContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleanContent.count <= min(Self.assistantConversationSmallPageCharacterLimit, characterBudget) {
+            return (cleanContent, "full current page")
+        }
+
+        var remainingBudget = characterBudget
+        var sections: [String] = []
+
+        func appendChunk(_ chunk: String) {
+            guard remainingBudget > 0 else { return }
+            let excerpt = promptExcerpt(chunk, characterLimit: remainingBudget)
+            remainingBudget -= excerpt.count
+            sections.append(excerpt)
+        }
+
+        let headings = markdownHeadings(in: content).prefix(24).joined(separator: "\n")
+        if !headings.isEmpty {
+            appendChunk("Page outline:\n\(headings)")
+        }
+
+        let rankedBlocks = rankedCurrentPageBlocks(for: prompt)
+        let selectedBlocks = rankedBlocks.isEmpty
+            ? markdownSearchBlocks(from: content).prefix(5).map { $0.text }
+            : rankedBlocks.prefix(8).map { $0.text }
+
+        for block in selectedBlocks {
+            appendChunk(block)
+        }
+
+        let summary = rankedBlocks.isEmpty
+            ? "current page outline + opening blocks"
+            : "current page outline + \(min(8, rankedBlocks.count)) ranked blocks"
+        return (sections.joined(separator: "\n\n"), summary)
+    }
+
+    private func rankedCurrentPageBlocks(for prompt: String) -> [HelpDeskContextCandidate] {
+        let tokens = helpDeskRetrievalTokens(in: prompt)
+        guard !tokens.isEmpty else { return [] }
+        let normalizedQuery = normalizedSearchText(prompt)
+        return markdownSearchBlocks(from: content).compactMap { block -> HelpDeskContextCandidate? in
+            let blockText = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !blockText.isEmpty else { return nil }
+            let normalizedBlock = normalizedSearchText(blockText)
+            let blockTokens = searchTokens(in: blockText)
+            var score = 0.0
+            for token in tokens {
+                if normalizedBlock.contains(token) {
+                    score += 5
+                } else if blockTokens.contains(where: { helpDeskTokensMatch(token, $0) }) {
+                    score += 3
+                }
+            }
+            if !normalizedQuery.isEmpty, normalizedBlock.contains(normalizedQuery) {
+                score += 18
+            }
+            guard score > 0 else { return nil }
+            return HelpDeskContextCandidate(
+                noteID: currentNoteID ?? "current",
+                title: title,
+                text: blockText,
+                score: score,
+                updatedAt: Date()
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            return lhs.text.count > rhs.text.count
+        }
+    }
+
+    private func markdownHeadings(in markdown: String) -> [String] {
+        markdown
+            .components(separatedBy: .newlines)
+            .compactMap { line -> String? in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard trimmed.hasPrefix("#") else { return nil }
+                return trimmed
+            }
     }
 
     private func assistantConversationInsertionInput(for response: AssistantConversationResponse) -> String {
@@ -5828,13 +6437,18 @@ final class BrainStore: ObservableObject {
         return .conversation
     }
 
-    private func assistantAttachmentContext(for prompt: String, linkedPageTitles: [String], intent: AssistantPromptIntent) -> String {
+    private func assistantAttachmentContext(
+        for prompt: String,
+        linkedPageTitles: [String],
+        intent: AssistantPromptIntent,
+        characterLimit: Int? = nil
+    ) -> String {
         guard let assistantAttachment else { return "None" }
         let markdownContext = "\(title)\n\(content)\n\(linkedPageTitles.joined(separator: " "))"
         guard shouldUseAttachmentContext(prompt: prompt, markdownContext: markdownContext, attachment: assistantAttachment) else {
             return "None. Prefer the current Markdown and linked pages; the attached file was not needed for this request."
         }
-        let limit = intent == .writing ? 24_000 : 12_000
+        let limit = characterLimit ?? (intent == .writing ? 24_000 : 12_000)
         return attachmentContext(assistantAttachment, characterLimit: limit)
     }
 
@@ -6058,6 +6672,27 @@ final class BrainStore: ObservableObject {
             outputTokens: usage?["completion_tokens"] as? Int
                 ?? usage?["output_tokens"] as? Int
         )
+    }
+
+    private func extractChatCompletionDelta(from data: Data) throws -> String {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let firstChoice = choices.first,
+              let delta = firstChoice["delta"] as? [String: Any]
+        else {
+            return ""
+        }
+
+        if let text = delta["content"] as? String {
+            return text
+        }
+        if let chunks = delta["content"] as? [[String: Any]] {
+            return chunks.compactMap { chunk in
+                chunk["text"] as? String ?? chunk["content"] as? String
+            }
+            .joined()
+        }
+        return ""
     }
 
     private func recordMistralUsage(inputTokens: Int, outputTokens: Int) {
@@ -6426,21 +7061,17 @@ final class BrainStore: ObservableObject {
     }
 
     private func attachPDFWithMistralOCR(from url: URL, storedFileURL: URL, target: AttachmentTarget) {
-        guard !mistralAPIKey.isEmpty || requestAndSaveMistralAPIKey(
-            title: "Mistral API Key",
-            message: "Mistral OCR needs your Mistral API key before reading this PDF."
-        ) else {
-            status = "Mistral API key required for OCR"
+        guard !mistralAPIKey.isEmpty else {
             return
         }
 
         guard let data = try? Data(contentsOf: url) else {
-            status = "Could not read \(url.lastPathComponent)"
+            status = "\(storedFileURL.lastPathComponent) attached · OCR could not read file"
             return
         }
 
         guard !exceedsMistralUploadLimit(byteCount: data.count) else {
-            status = mistralUploadLimitStatusMessage(forFileName: url.lastPathComponent)
+            status = "\(storedFileURL.lastPathComponent) attached · too large for OCR"
             return
         }
 
@@ -6476,21 +7107,17 @@ final class BrainStore: ObservableObject {
     }
 
     private func attachDocumentWithMistralOCR(from url: URL, storedFileURL: URL, target: AttachmentTarget) {
-        guard !mistralAPIKey.isEmpty || requestAndSaveMistralAPIKey(
-            title: "Mistral API Key",
-            message: "Mistral OCR needs your Mistral API key before reading this file."
-        ) else {
-            status = "Mistral API key required for OCR"
+        guard !mistralAPIKey.isEmpty else {
             return
         }
 
         guard let data = try? Data(contentsOf: url) else {
-            status = "Could not read \(url.lastPathComponent)"
+            status = "\(storedFileURL.lastPathComponent) attached · OCR could not read file"
             return
         }
 
         guard !exceedsMistralUploadLimit(byteCount: data.count) else {
-            status = mistralUploadLimitStatusMessage(forFileName: url.lastPathComponent)
+            status = "\(storedFileURL.lastPathComponent) attached · too large for OCR"
             return
         }
 
@@ -6510,6 +7137,46 @@ final class BrainStore: ObservableObject {
                     for: target
                 )
                 status = "\(storedFileURL.lastPathComponent) attached · OCRed"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    private func attachPDFWithMistralOCRIfAvailable(from url: URL, storedFileURL: URL, target: AttachmentTarget) {
+        guard !mistralAPIKey.isEmpty else { return }
+        attachPDFWithMistralOCR(from: url, storedFileURL: storedFileURL, target: target)
+    }
+
+    private func attachDocumentWithMistralOCRIfAvailable(from url: URL, storedFileURL: URL, target: AttachmentTarget) {
+        guard !mistralAPIKey.isEmpty else { return }
+        attachDocumentWithMistralOCR(from: url, storedFileURL: storedFileURL, target: target)
+    }
+
+    private func attachImageWithMistralOCRIfAvailable(data: Data, storedFileURL: URL, target: AttachmentTarget) {
+        guard !mistralAPIKey.isEmpty else { return }
+
+        let fileName = storedFileURL.lastPathComponent
+        guard !exceedsMistralUploadLimit(byteCount: data.count) else {
+            status = "\(fileName) attached · too large for OCR"
+            return
+        }
+
+        let mimeType = imageMimeType(forFileName: fileName)
+        status = "OCR reading \(fileName)"
+        Task {
+            do {
+                let extractedText = try await extractImageTextWithMistralOCR(data: data, mimeType: mimeType)
+                setAttachment(
+                    PromptAttachment(
+                        fileName: fileName,
+                        fileExtension: (fileName as NSString).pathExtension.lowercased(),
+                        extractedText: extractedText,
+                        storedFileURL: storedFileURL
+                    ),
+                    for: target
+                )
+                status = "\(fileName) attached · OCRed"
             } catch {
                 status = error.localizedDescription
             }
@@ -6672,11 +7339,13 @@ final class BrainStore: ObservableObject {
             throw AssistantError.missingConfiguration("Open or create a brain first")
         }
 
-        let destinationFolder = attachmentFolderURL(forExtension: sourceURL.pathExtension, in: activeBrain)
-        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
-        let destinationURL = uniqueFileURL(named: sourceURL.lastPathComponent, in: destinationFolder)
-        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
-        return destinationURL
+        return try withActiveBrainAccessThrowing {
+            let destinationFolder = attachmentFolderURL(forExtension: sourceURL.pathExtension, in: activeBrain)
+            try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+            let destinationURL = uniqueFileURL(named: sourceURL.lastPathComponent, in: destinationFolder)
+            try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+            return destinationURL
+        }
     }
 
     private func storeAttachmentDataInWorkspace(_ data: Data, suggestedFileName: String?, kind: WorkspaceFileKind) throws -> URL {
@@ -6684,14 +7353,16 @@ final class BrainStore: ObservableObject {
             throw AssistantError.missingConfiguration("Open or create a brain first")
         }
 
-        let folder = filesFolderURL(for: activeBrain).appendingPathComponent(kind.folderName, isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let fileName = kind == .images
-            ? promptImageFileName(suggestedFileName: suggestedFileName)
-            : ((suggestedFileName?.isEmpty == false ? suggestedFileName : nil) ?? "attached-file")
-        let destinationURL = uniqueFileURL(named: fileName, in: folder)
-        try data.write(to: destinationURL, options: .atomic)
-        return destinationURL
+        return try withActiveBrainAccessThrowing {
+            let folder = filesFolderURL(for: activeBrain).appendingPathComponent(kind.folderName, isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let fileName = kind == .images
+                ? promptImageFileName(suggestedFileName: suggestedFileName)
+                : ((suggestedFileName?.isEmpty == false ? suggestedFileName : nil) ?? "attached-file")
+            let destinationURL = uniqueFileURL(named: fileName, in: folder)
+            try data.write(to: destinationURL, options: .atomic)
+            return destinationURL
+        }
     }
 
     private func noteFileURLs(in brain: BrainSummary) throws -> [URL] {
@@ -6868,6 +7539,7 @@ final class BrainStore: ObservableObject {
         let folder = hiddenSummariesFolderURL(for: brain)
         guard FileManager.default.fileExists(atPath: folder.path) else {
             generatedSummaries = []
+            invalidateHomePagePresentationCache()
             return
         }
 
@@ -6880,12 +7552,14 @@ final class BrainStore: ObservableObject {
         generatedSummaries = try summaryURLs
             .compactMap { try readHighlightSummary(from: $0) }
             .sorted { $0.compiledAt > $1.compiledAt }
+        invalidateHomePagePresentationCache()
     }
 
     private func upsertHighlightSummary(_ summary: HighlightSummary) {
         generatedSummaries.removeAll { $0.id == summary.id }
         generatedSummaries.insert(summary, at: 0)
         generatedSummaries.sort { $0.compiledAt > $1.compiledAt }
+        invalidateHomePagePresentationCache()
     }
 
     private func persistHighlightSummary(_ summary: HighlightSummary) throws {
@@ -7769,7 +8443,7 @@ struct AssistantPreview: Identifiable, Equatable {
 struct AssistantConversationResponse: Identifiable, Equatable {
     let id = UUID()
     let prompt: String
-    let answer: String
+    var answer: String
     let providerTitle: String
     let createdAt: Date
 }
@@ -7829,6 +8503,23 @@ private struct ChatCompletionResult {
     let content: String
     let inputTokens: Int?
     let outputTokens: Int?
+}
+
+struct AssistantGenerationDiagnostics: Equatable {
+    let contextBuildSeconds: TimeInterval
+    let requestByteCount: Int
+    let estimatedInputTokens: Int
+    let responseSeconds: TimeInterval
+    let includedSources: String
+    let errorType: String?
+}
+
+private struct AssistantConversationContext {
+    let input: String
+    let estimatedTokens: Int
+    let includedSources: String
+    let buildDuration: TimeInterval
+    let characterBudget: Int
 }
 
 private struct HomePageSourceNote {
