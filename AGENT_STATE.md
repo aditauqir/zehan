@@ -5,7 +5,7 @@
 > **Refresh factual data:** `scripts/update-agent-state.sh`  
 > **How to maintain narrative sections:** `.cursor/skills/agent-state/SKILL.md`
 
-**Last narrative update:** 2026-06-20 (Cursor)  
+**Last narrative update:** 2026-06-22 (Codex)  
 **Maintained by skill:** `agent-state`
 
 ---
@@ -13,42 +13,50 @@
 ## Snapshot (auto)
 
 <!-- AGENT_STATE:AUTO:START -->
-**Generated:** 2026-06-20 21:53 UTC
+**Generated:** 2026-06-22 03:55 UTC
 
 | Field | Value |
 |---|---|
 | Repo branch | `feature` |
-| Dev version | 1.2 (build 11) |
-| GitHub latest release | Zirn v1.1 (Mizan) — tag v1.1 |
-| main vs remote | main ahead 5, behind 0 vs main/main |
+| Dev version | 1.3 (build 11) |
+| GitHub latest release | Zirn v1.2 (Mizan) — tag v1.2 |
+| main vs remote | main ahead 0, behind 0 vs main/main |
 | Deploy watcher | Not running |
 
 **Git status**
 ```
 ## feature
- M scripts/finish-notarized-release.sh
-?? .cursor/skills/agent-state/
-?? AGENT_STATE.md
-?? changelog_for_me.md
-?? scripts/update-agent-state.sh
+ M AGENT_STATE.md
+ M Zehan.xcodeproj/project.pbxproj
+ M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-128.png
+ M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-128@2x.png
+ M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-16.png
+ M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-16@2x.png
+ M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-256.png
+ M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-256@2x.png
+ M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-32.png
+ M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-32@2x.png
+ M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-512.png
+ M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-512@2x.png
 ```
 
 **Branch heads**
 ```
-main 4f7d5ee Fix deploy log tee so background watcher keeps polling.
-feature 4f7d5ee Fix deploy log tee so background watcher keeps polling.
-debug 4f7d5ee Fix deploy log tee so background watcher keeps polling.
-bug f07a88a Improve update notes, attachments, and assistant flows
+main 856c368 Ship Zirn v1.2 with notarized DMG and Sparkle OTA.
+feature e53444d Add AGENT_STATE.md and agent-state skill for AI handoffs.
+debug 856c368 Ship Zirn v1.2 with notarized DMG and Sparkle OTA.
 ```
 
 **Release staging**
-- Staged /tmp/ZirnReleaseStage/Zirn.app — v1.2 (build 11) — source=Unnotarized Developer ID
+- Staged /tmp/ZirnReleaseStage/Zirn.app — v1.2 (build 11) — source=Notarized Developer ID
 
 **Apple notary**
-3 recent submissions — Accepted: 0, In Progress: 3, Failed: 0
-  - e3c0877e-9ee6-4614-901c-33e8e0444734: In Progress
-  - 7826de24-7b64-4f82-918c-20e5c692b9d0: In Progress
-  - d3e425e1-463b-4128-a20f-6ba00c7c39e4: In Progress
+5 recent submissions — Accepted: 5, In Progress: 0, Failed: 0
+  - 5f52d218-fe9a-42f5-b41f-c85501612b59: Accepted
+  - b0f504d0-df40-474b-93b9-0c731155b487: Accepted
+  - e3c0877e-9ee6-4614-901c-33e8e0444734: Accepted
+  - 7826de24-7b64-4f82-918c-20e5c692b9d0: Accepted
+  - d3e425e1-463b-4128-a20f-6ba00c7c39e4: Accepted
 
 **Useful commands**
 - Refresh this block: `scripts/update-agent-state.sh`
@@ -60,19 +68,19 @@ bug f07a88a Improve update notes, attachments, and assistant flows
 
 ## Active focus
 
-- **Development line:** v1.2 code on all canonical branches; **do not bump to v1.3** until the user explicitly asks.
-- **User intent:** Continue v1.3 feature work is **on hold** — wait for user go-ahead before version bump.
-- **Do not** push `main` or publish OTA until v1.2 notarization completes.
+- **Development line:** v1.3 is active on `feature`; build number remains 11.
+- **User intent:** Replace the macOS app icon with `/Users/aditauqir/Pictures/Affinity Projects/logov4.svg`, delete local `bug`, sync `feature` and `debug` to the same head, then launch a fresh Debug app for testing.
+- **Do not** push `main`, publish OTA, or overwrite the v1.3/logo work unless the user explicitly asks.
 
 ## Release pipeline
 
 | Stage | Version | Status |
 |---|---|---|
-| Public (GitHub) | v1.1 | Shipped — latest GitHub Release |
-| Pending ship | v1.2 (build 11) | Code on local `main` (+5 vs remote). **Not notarized.** 3 Apple submissions still **In Progress** since 2026-06-19. |
-| In development | — | **Hold v1.3** until user requests version bump |
+| Public (GitHub) | v1.2 | Shipped — latest GitHub Release; local `main` matches `main/main`. |
+| Installed app | v1.2 (build 11) | Installed at `/Applications/Zirn.app` from `dist/Zirn-1.2.dmg`; Gatekeeper accepted and code signature verified. |
+| In development | v1.3 (build 11) | `MARKETING_VERSION` bump and v4 app icon work on `feature`; clean Debug build target is `/tmp/ZehanDerivedData/Build/Products/Debug/Zirn.app`. |
 
-**When v1.2 notary accepts:** run `scripts/deploy-after-notary.sh` from a clean `main` tree (staged app must exist at `/tmp/ZirnReleaseStage/Zirn.app`).
+The v1.2 notary submissions are accepted. Do not re-run deploy/release automation unless the user explicitly asks for OTA or release work.
 
 ## Branch workflow
 
@@ -80,24 +88,26 @@ Canonical branches (see `zirn-branch-flow` skill):
 
 - `feature` — active implementation (**current**)
 - `debug` — testing mirror of `feature`
-- `main` — shipping branch (hold until v1.2 deploy)
+- `main` — shipping branch (currently v1.2 release)
 
-`feature`, `debug`, and local `main` share commit `4f7d5ee`. Local `main` is **5 commits ahead** of `main/main` (v1.2 + notarization automation).
+`main` and `debug` are at `856c368` (v1.2 release). `feature` is at `e53444d` with uncommitted v1.3/logo state before the sync commit.
 
 ## Blockers and waiting on
 
-- Apple notarization for v1.2 — three submissions stuck **In Progress** (oldest ~2026-06-19 14:11 UTC).
-- Deploy watcher is **not running**; re-run `scripts/deploy-after-notary.sh` after notary accepts.
+- `feature` still needs to be committed and mirrored to `debug` before final testing.
+- Local `bug` branch was deleted after Git reported it merged into `main`.
 
 ## Recent decisions
 
 - Added `AGENT_STATE.md` + `agent-state` skill for AI agent handoffs (2026-06-20).
-- v1.3 version bump **deferred** — user will say when to start v1.3.
+- User explicitly requested the v1.3 Debug launch; Codex bumped `MARKETING_VERSION` to 1.3 on `feature`, built cleanly, and launched `/tmp/ZehanDerivedData/Build/Products/Debug/Zirn.app` (2026-06-22).
+- For install simulation, Codex removed non-1.3 app bundles, installed v1.2 from `dist/Zirn-1.2.dmg`, and verified notarization/code signing (2026-06-22).
+- User requested the v4 logo from `logov4.svg`; Codex rasterized it to the existing `AppIcon.appiconset` PNG sizes and deleted local branch `bug` (2026-06-22).
 
 ## Handoff notes for next agent
 
 1. Read this file, then run `scripts/update-agent-state.sh`.
-2. Work on `feature`; mirror to `debug` for testing.
-3. **Do not bump to v1.3** until the user explicitly requests it.
-4. Leave `main` alone until v1.2 ships via `deploy-after-notary.sh`.
+2. Preserve and test the v1.3 app icon work on `feature`.
+3. Keep `feature` and `debug` at the same head after testing; do not force-reset divergent branches.
+4. Use `/Applications/Zirn.app` for shipped v1.2 install behavior and `/tmp/ZehanDerivedData/Build/Products/Debug/Zirn.app` for v1.3 Debug testing.
 5. `changelog_for_me.md` is personal notes — do not treat as project state.
