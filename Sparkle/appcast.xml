@@ -3,6 +3,27 @@
     <channel>
         <title>Zirn</title>
         <item>
+            <title>1.2</title>
+            <pubDate>Sun, 21 Jun 2026 23:36:26 -0400</pubDate>
+            <link>https://github.com/aditauqir/zehan</link>
+            <sparkle:version>11</sparkle:version>
+            <sparkle:shortVersionString>1.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>Zirn v1.2</h2>
+<ul>
+  <li>Added liquid-glass relevance suggestions while writing Markdown, with in-place wiki-link creation and cursor placement at the end of the inserted link.</li>
+  <li>Added page flashcards from the Home page, with question/answer cards, source navigation, close/regenerate controls, and cached <code>.fcard</code> storage per vault.</li>
+  <li>Fixed Home summary refresh so Zirn reads newly added vault pages without regenerating unchanged existing page summaries.</li>
+  <li>Fixed Home summary formatting by keeping the vault overview as a compact paragraph and page summaries as concise bullets without divider artifacts.</li>
+  <li>Fixed Home reopening so cached Home content is not regenerated unless the similarity trigger or manual refresh requires it.</li>
+  <li>Improved relevance suggestion behavior so it persists until whitespace or dismissal, uses a system/liquid-glass star style, and no longer triggers the normal link autocomplete popup.</li>
+  <li>Added <code>.fcard/</code> git-ignore coverage for generated flashcard caches.</li>
+  <li>Changed the app version to <code>1.2</code>.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.2/Zirn-1.2.zip" length="5991242" type="application/octet-stream" sparkle:edSignature="gQh2mtesyJ4FpzyKkbL8kwNdVH+PaL45E+RVsvy2hljRdM6NBFZXFOdohwVmvPNLqVQve0Hxol84wH4kS+jGCg=="/>
+        </item>
+        <item>
             <title>1.1</title>
             <pubDate>Mon, 15 Jun 2026 19:16:55 -0400</pubDate>
             <link>https://github.com/aditauqir/zehan</link>

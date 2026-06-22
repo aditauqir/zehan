@@ -10,6 +10,35 @@ INSTALL_README="$ROOT/packaging/README.txt"
 STAGING="$ROOT/build/dmg-staging"
 DS_STORE_SCRIPT="$ROOT/scripts/generate-dmg-ds-store.py"
 
+find_developer_id_identity() {
+  security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n 's/.*"\(Developer ID Application:.*\)".*/\1/p' \
+    | head -n 1
+}
+
+sign_installer_dmg() {
+  local dmg="$1"
+  local identity="${SIGN_IDENTITY:-$(find_developer_id_identity)}"
+
+  if [[ -z "$identity" ]]; then
+    cat >&2 <<'EOF'
+Missing Developer ID Application signing identity for DMG.
+
+Install a "Developer ID Application" certificate or set SIGN_IDENTITY.
+EOF
+    exit 1
+  fi
+
+  echo "Signing DMG with: $identity"
+  codesign --force --sign "$identity" --timestamp "$dmg"
+  if ! codesign --verify --verbose=2 "$dmg" 2>/dev/null; then
+    echo "DMG signature verification failed."
+    codesign --verify --verbose=2 "$dmg" 2>&1 || true
+    exit 1
+  fi
+  echo "Signed: $dmg"
+}
+
 if [[ ! -d "$APP_PATH" ]]; then
   echo "Missing app bundle: $APP_PATH"
   echo "Run scripts/build-release.sh first."
@@ -37,7 +66,7 @@ if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
     -format UDZO \
     "$DMG_PATH" >/dev/null
   rm -rf "$STAGING"
-  echo "Created: $DMG_PATH"
+  echo "Created: $DMG_PATH (unsigned — CI has no Developer ID certificate)"
   exit 0
 fi
 
@@ -142,4 +171,5 @@ hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_PATH" >/d
 rm -f "$RW_DMG"
 rm -rf "$STAGING"
 
+sign_installer_dmg "$DMG_PATH"
 echo "Created: $DMG_PATH"
