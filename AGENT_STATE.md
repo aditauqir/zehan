@@ -82,7 +82,7 @@ Canonical branches (see `zirn-branch-flow` skill):
 
 ## Blockers and waiting on
 
-- Fresh Debug build and launch still need to run after the final handoff-state commit.
+- Fresh Debug build succeeded and `/tmp/ZehanDerivedData/Build/Products/Debug/Zirn.app` was launched for testing.
 - Local `bug` branch was deleted after Git reported it merged into `main`.
 
 ## Recent decisions
@@ -91,11 +91,12 @@ Canonical branches (see `zirn-branch-flow` skill):
 - User explicitly requested the v1.3 Debug launch; Codex bumped `MARKETING_VERSION` to 1.3 on `feature`, built cleanly, and launched `/tmp/ZehanDerivedData/Build/Products/Debug/Zirn.app` (2026-06-22).
 - For install simulation, Codex removed non-1.3 app bundles, installed v1.2 from `dist/Zirn-1.2.dmg`, and verified notarization/code signing (2026-06-22).
 - User requested the v4 logo from `logov4.svg`; Codex rasterized it to the existing `AppIcon.appiconset` PNG sizes and deleted local branch `bug` (2026-06-22).
+- Codex synchronized `feature` and `debug` to the same head, then launched the fresh v1.3 Debug app (2026-06-22).
 
 ## Handoff notes for next agent
 
 1. Read this file, then run `scripts/update-agent-state.sh`.
-2. Preserve and test the v1.3 app icon work on `feature`.
-3. Keep `feature` and `debug` at the same head after testing; do not force-reset divergent branches.
+2. Preserve the v1.3 app icon work on `feature`.
+3. Keep `feature` and `debug` at the same head; do not force-reset divergent branches.
 4. Use `/Applications/Zirn.app` for shipped v1.2 install behavior and `/tmp/ZehanDerivedData/Build/Products/Debug/Zirn.app` for v1.3 Debug testing.
 5. `changelog_for_me.md` is personal notes — do not treat as project state.
