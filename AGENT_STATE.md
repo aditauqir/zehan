@@ -13,7 +13,7 @@
 ## Snapshot (auto)
 
 <!-- AGENT_STATE:AUTO:START -->
-**Generated:** 2026-06-22 03:55 UTC
+**Generated:** 2026-06-22 03:57 UTC
 
 | Field | Value |
 |---|---|
@@ -26,25 +26,13 @@
 **Git status**
 ```
 ## feature
- M AGENT_STATE.md
- M Zehan.xcodeproj/project.pbxproj
- M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-128.png
- M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-128@2x.png
- M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-16.png
- M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-16@2x.png
- M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-256.png
- M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-256@2x.png
- M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-32.png
- M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-32@2x.png
- M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-512.png
- M Zehan/Assets.xcassets/AppIcon.appiconset/app-icon-512@2x.png
 ```
 
 **Branch heads**
 ```
 main 856c368 Ship Zirn v1.2 with notarized DMG and Sparkle OTA.
-feature e53444d Add AGENT_STATE.md and agent-state skill for AI handoffs.
-debug 856c368 Ship Zirn v1.2 with notarized DMG and Sparkle OTA.
+feature ffc19ed Merge v1.2 release into feature
+debug ffc19ed Merge v1.2 release into feature
 ```
 
 **Release staging**
@@ -90,11 +78,11 @@ Canonical branches (see `zirn-branch-flow` skill):
 - `debug` — testing mirror of `feature`
 - `main` — shipping branch (currently v1.2 release)
 
-`main` and `debug` are at `856c368` (v1.2 release). `feature` is at `e53444d` with uncommitted v1.3/logo state before the sync commit.
+`feature` and `debug` are synchronized at `ffc19ed` with the v1.2 release merged in, the v1.3 version bump, and the v4 app icon work. `main` remains at the shipped v1.2 release (`856c368`).
 
 ## Blockers and waiting on
 
-- `feature` still needs to be committed and mirrored to `debug` before final testing.
+- Fresh Debug build and launch still need to run after the final handoff-state commit.
 - Local `bug` branch was deleted after Git reported it merged into `main`.
 
 ## Recent decisions
