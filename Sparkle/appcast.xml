@@ -3,6 +3,28 @@
     <channel>
         <title>Zirn</title>
         <item>
+            <title>1.4.1</title>
+            <pubDate>Tue, 23 Jun 2026 17:35:20 -0400</pubDate>
+            <link>https://github.com/aditauqir/zehan</link>
+            <sparkle:version>13</sparkle:version>
+            <sparkle:shortVersionString>1.4.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>Zirn v1.4.1</h2>
+<ul>
+  <li>Redesigned the Zirn Chat start screen with PT Serif branding, the full-color app icon, and a centered composer that animates into place when a conversation begins.</li>
+  <li>Added recent conversations below the chat input on the start screen, showing the three latest chats with a Show more popover for the rest.</li>
+  <li>Reworked the active chat composer so it floats above the thread, sits closer to the footer, and grows dynamically from one line up to five lines before scrolling inside the field.</li>
+  <li>Fixed chat input caret alignment, Return vs Shift-Return behavior, and copy/paste routing so Cmd-C works on selected response text without stealing focus from the input field.</li>
+  <li>Added multi-conversation Zirn Chat history with conversation switching, new-chat creation, deletion, and persisted session storage per vault.</li>
+  <li>Added a menu bar usage gauge that tracks combined Mistral, Mistral OCR, and DeepSeek spend against a soft $10 budget, with per-provider breakdowns.</li>
+  <li>Improved launch responsiveness by deferring automatic vault reopen until after the first frame instead of blocking startup on the main thread.</li>
+  <li>Fixed Home regeneration so highlight-only Markdown edits no longer trigger unnecessary Home recompilation.</li>
+  <li>Changed the app version to <code>1.4.1</code> and kept the codename <code>Raxat</code>.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.1/Zirn-1.4.1.zip" length="6213471" type="application/octet-stream" sparkle:edSignature="vVFMmeJ5waiqxLSAOTNz7lhlHmcr7qi6hu8Pyl8POTG+DAgaCDuy8uTCqCgjxAh1oA85Hbo3lbgzAzhtShO4Dg=="/>
+        </item>
+        <item>
             <title>1.4</title>
             <pubDate>Mon, 22 Jun 2026 23:35:55 -0400</pubDate>
             <link>https://github.com/aditauqir/zehan</link>
@@ -54,31 +76,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.2/Zirn-1.2.zip" length="5991242" type="application/octet-stream" sparkle:edSignature="gQh2mtesyJ4FpzyKkbL8kwNdVH+PaL45E+RVsvy2hljRdM6NBFZXFOdohwVmvPNLqVQve0Hxol84wH4kS+jGCg=="/>
-        </item>
-        <item>
-            <title>1.1</title>
-            <pubDate>Mon, 15 Jun 2026 19:16:55 -0400</pubDate>
-            <link>https://github.com/aditauqir/zehan</link>
-            <sparkle:version>8</sparkle:version>
-            <sparkle:shortVersionString>1.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <description><![CDATA[<h2>Zirn v1.1 (Mizan)</h2>
-<ul>
-  <li>Added on-device Dice-Sorensen source similarity for Home generation so reopening a vault can skip unnecessary model calls when the vault has only marginal changes.</li>
-  <li>Added persisted Home source signatures in generated summary metadata so similarity checks can work across vault reopen sessions.</li>
-  <li>Added an automatic Sparkle update checker flow that notifies users when an update is available, shows what changed, and offers Update, Don&#x27;t Update, or Skip This Version.</li>
-  <li>Added release-note generation from <code>PATCH_NOTES.md</code> so OTA popup copy and GitHub release notes can use the same versioned source of truth.</li>
-  <li>Added automatic reopening of the previous workspace on launch, plus a File menu Go to Home shortcut that returns to the greeting start page.</li>
-  <li>Added centered Personalize and Configure buttons under the welcome greeting for faster profile and model setup.</li>
-  <li>Changed the About Zirn panel to show <code>v1.1 (Mizan)</code> instead of the internal Sparkle build number.</li>
-  <li>Fixed release delivery safety by requiring Developer ID signing for public builds and adding notarization support before Sparkle/GitHub distribution.</li>
-  <li>Changed the app version to <code>1.1</code>.</li>
-  <li>Improved rendered page spacing near the floating input pill so end-of-page text is not covered.</li>
-  <li>Added git ignore coverage for local <code>.brain</code> vault files.</li>
-  <li>Notes: OTA publishing, appcast updates, and release uploads should still only happen after an explicit ship/release instruction.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.1/Zirn-1.1.zip" length="5662855" type="application/octet-stream" sparkle:edSignature="/x6/hki5n5JdTiGJtBYmG3grQ64yx3vEEd7oAZ6xL/EnsiW1oOUwq94mJR8e/UwEw4Zfdff+6ZYpB3TpmyOhAw=="/>
         </item>
         <item>
             <title>1.0.2</title>
