@@ -5,7 +5,7 @@ before publication. macOS should open them without a Gatekeeper warning.
 
 ## Download
 
-[Download Zirn for Mac](https://github.com/aditauqir/zehan/releases/latest/download/Zirn-1.2.dmg)
+[Download Zirn for Mac](https://github.com/aditauqir/zehan/releases/latest/download/Zirn-1.4.dmg)
 
 Requires **macOS 26.0** or later.
 

@@ -1,5 +1,27 @@
 # Patch Notes
 
+## v1.4 (Raxat)
+
+- Added DeepSeek as a beta model provider with API key verification, model persistence, and Apple Keychain saving/loading alongside Mistral.
+- Added one Configure Models sheet that replaces the old split settings and lets users route content generation, Home page generation, and flashcard generation independently.
+- Added equal-size Mistral/DeepSeek logo switches in Configure Models and the prompt input field so provider selection no longer stretches around text labels.
+- Added a Document Reading Service row in Configure Models and kept document OCR on Mistral OCR because DeepSeek's current API does not expose OCR/document-reading support.
+- Added native Undo/Redo menu handling so Cmd-Z, Cmd-Y, and Cmd-Shift-Z work reliably in the editor.
+- Added a Word-style Markdown ribbon with Bold, Italic, Underline, and Highlight controls in the editor header.
+- Fixed editor highlighting so highlights persist in the Markdown/rendered page instead of disappearing after render.
+- Changed the editor header controls from circular chrome buttons to flatter hover-only ribbon icons.
+- Added a dedicated editor flashcard page opened from the header, instead of showing flashcards as a popup.
+- Added cached page flashcard files with source fingerprints and similarity checks so Zirn loads local flashcards first and avoids unnecessary model calls.
+- Fixed flashcard generation fallbacks so rate-limit/error text does not become the displayed flashcard content.
+- Removed Highlight Flashcards from Home and page summaries while preserving the normal highlighter.
+- Removed page-summary flashcard UI and stopped Home generation from asking the model to create page-summary flashcards.
+- Improved Home and flashcard generation routing so regenerations use the configured provider instead of one shared model choice.
+- Tamed automatic relevance suggestions with steadier dismissal/pause behavior so suggestions do not keep taking over the editor.
+- Fixed the follow-up prompt composer so Cmd-Enter submits and the input grows by estimated line count instead of trapping Enter behind an oversized field.
+- Updated the app icon assets for the Raxat release.
+- Added internal agent/release-state tracking so future handoffs can preserve release status more safely.
+- Changed the app version to `1.4` and codename to `Raxat`.
+
 ## v1.2 (Mizan)
 
 - Added liquid-glass relevance suggestions while writing Markdown, with in-place wiki-link creation and cursor placement at the end of the inserted link.

@@ -174,12 +174,8 @@ struct ZirnApp: App {
 
                 Divider()
 
-                Button("Configure Model") {
+                Button("Configure Models") {
                     store.configureModelFromUser()
-                }
-
-                Button("Models Used Where") {
-                    store.showUsedModelsConfiguration()
                 }
 
                 Divider()
@@ -201,11 +197,11 @@ struct ZirnApp: App {
 }
 
 private enum ZirnReleaseInfo {
-    static let codename = "Mizan"
+    static let codename = "Raxat"
 
     static var displayVersion: String {
         let version = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
-            ?? "1.2"
+            ?? "1.4"
         return "v\(version) (\(codename))"
     }
 }

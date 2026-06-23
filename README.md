@@ -58,14 +58,14 @@ In the app, open `Settings > Configure Model`.
 - Mistral OCR uses `mistral-ocr-latest` for PDF uploads.
 - Your Mistral API key is stored locally in the app. Use **Add to Keychain** in Configure Model to save it to Apple Passwords as **Zirn** for `api.mistral.ai`.
 
-Add your Mistral API key in the Configure Model sheet before using assistant generation or OCR.
+Add your Mistral or DeepSeek API key in the Configure Models sheet before using assistant generation. Document OCR currently uses Mistral OCR.
 
 ## Install Zirn (new users)
 
 Download the latest **Zirn.dmg** from [GitHub Releases](https://github.com/aditauqir/zehan/releases/latest):
 
 ```
-https://github.com/aditauqir/zehan/releases/latest/download/Zirn-1.0.1.dmg
+https://github.com/aditauqir/zehan/releases/latest/download/Zirn-1.4.dmg
 ```
 
 1. Open the DMG.

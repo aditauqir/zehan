@@ -86,7 +86,8 @@ final class BrainStore: ObservableObject {
     @Published var isShowingHomePage = false
     @Published var isShowingHelpDesk = false
     @Published var sidebarItems: [SidebarItem] = []
-    @Published var selectedHighlightSummaryModel: HighlightSummaryModel = .mistral
+    @Published var selectedHomeGenerationModel: HighlightSummaryModel = .mistral
+    @Published var selectedFlashcardGenerationModel: HighlightSummaryModel = .mistral
     @Published var isCompilingHighlightSummary = false
     @Published var isGeneratingHomePage = false
     @Published var pageFlashcardStates: [Note.ID: PageFlashcardState] = [:]
@@ -111,11 +112,15 @@ final class BrainStore: ObservableObject {
     private let openAIModelKey = "Assistant.OpenAIModel"
     private let mistralAPIKeyKey = "Assistant.MistralAPIKey"
     private let mistralModelKey = "Assistant.MistralModel"
+    private let deepSeekAPIKeyKey = "Assistant.DeepSeekAPIKey"
+    private let deepSeekModelKey = "Assistant.DeepSeekModel"
     private let mistralBudgetSpentUSDKey = "Assistant.MistralBudgetSpentUSD"
     private let mistralOCRPagesUsedKey = "Assistant.MistralOCRPagesUsed"
     private let mistralTokensConsumedKey = "Assistant.MistralTokensConsumed"
     private let selectedAssistantModelKey = "Assistant.SelectedModel"
     private let selectedHighlightSummaryModelKey = "Assistant.HighlightSummaryModel"
+    private let selectedHomeGenerationModelKey = "Assistant.HomeGenerationModel"
+    private let selectedFlashcardGenerationModelKey = "Assistant.FlashcardGenerationModel"
     private let ollamaModelKey = "Assistant.OllamaModel"
     private let ollamaURLKey = "Assistant.OllamaURL"
     private let userNameKey = "User.Name"
@@ -123,6 +128,8 @@ final class BrainStore: ObservableObject {
     private let homeSummaryID = "home-summary"
     private var mistralAPIKey = ""
     private var mistralModel = BrainStore.defaultMistralModel
+    private var deepSeekAPIKey = ""
+    private var deepSeekModel = BrainStore.defaultDeepSeekModel
     private var ollamaModel = BrainStore.defaultOllamaModel
     private var ollamaURL = BrainStore.defaultOllamaURL
     private var autosaveTask: Task<Void, Never>?
@@ -150,6 +157,7 @@ final class BrainStore: ObservableObject {
     private var didAttemptDeferredPreviousBrainOpen = false
 
     static let defaultMistralModel = "mistral-large-latest"
+    static let defaultDeepSeekModel = "deepseek-v4-flash"
     static let defaultOllamaModel = "llama3.1"
     static let defaultOllamaURL = "http://localhost:11434"
 
@@ -252,7 +260,12 @@ final class BrainStore: ObservableObject {
     }
 
     var assistantConnectionStatus: AssistantConnectionStatus {
-        mistralAPIKey.isEmpty ? .offline : .online
+        switch selectedAssistantModel {
+        case .mistral:
+            return mistralAPIKey.isEmpty ? .offline : .online
+        case .deepseek:
+            return deepSeekAPIKey.isEmpty ? .offline : .online
+        }
     }
 
     var isViewingHighlightSummary: Bool {
@@ -286,10 +299,6 @@ final class BrainStore: ObservableObject {
         ## Page Summaries
 
         \(pageList)
-
-        ## Highlight Flashcards
-
-        No highlighted text has been added yet.
         """
     }
 
@@ -318,21 +327,14 @@ final class BrainStore: ObservableObject {
                 presentation = HomePagePresentation(
                     vaultSummary: presentation.vaultSummary,
                     pageCards: localPageCards(from: sourceNotes),
-                    flashcardGroups: presentation.flashcardGroups
-                )
-            }
-            if presentation.flashcardGroups.isEmpty {
-                presentation = HomePagePresentation(
-                    vaultSummary: presentation.vaultSummary,
-                    pageCards: presentation.pageCards,
-                    flashcardGroups: localFlashcardGroups(from: sourceNotes)
+                    flashcardGroups: []
                 )
             }
             if presentation.vaultSummary.isEmpty {
                 presentation = HomePagePresentation(
                     vaultSummary: lineLimited(localVaultSummary(from: sourceNotes), maxLines: 7),
                     pageCards: presentation.pageCards,
-                    flashcardGroups: presentation.flashcardGroups
+                    flashcardGroups: []
                 )
             }
         }
@@ -419,6 +421,7 @@ final class BrainStore: ObservableObject {
                     ai: BrainAIPreferences(
                         provider: "mistral",
                         mistralModel: Self.defaultMistralModel,
+                        deepSeekModel: Self.defaultDeepSeekModel,
                         ollamaModel: nil,
                         ollamaURL: nil,
                         appleModel: nil
@@ -715,7 +718,7 @@ final class BrainStore: ObservableObject {
     }
 
     func showUsedModelsConfiguration() {
-        isShowingUsedModelsConfiguration = true
+        isShowingModelConfiguration = true
     }
 
     func configureUsernameFromUser() {
@@ -1102,7 +1105,7 @@ final class BrainStore: ObservableObject {
         }
         pageFlashcardStates[noteID] = PageFlashcardState(
             isLoading: true,
-            bundle: pageFlashcardStates[noteID]?.bundle,
+            bundle: existingGeneratedPageFlashcardBundle(for: noteID),
             errorMessage: nil
         )
         status = force ? "Regenerating flashcards" : "Preparing flashcards"
@@ -1203,7 +1206,7 @@ final class BrainStore: ObservableObject {
     }
 
     func compileCurrentHighlightSummary() {
-        compileCurrentHighlightSummary(using: selectedHighlightSummaryModel)
+        compileCurrentHighlightSummary(using: selectedFlashcardGenerationModel)
     }
 
     private func compileHomePageSummary(force: Bool = false) {
@@ -1272,7 +1275,7 @@ final class BrainStore: ObservableObject {
                 return
             }
 
-            let model = selectedHighlightSummaryModel
+            let model = selectedHomeGenerationModel
             isGeneratingHomePage = true
             persistImmediateHomeSummary(
                 vaultName: activeBrain.name,
@@ -1330,7 +1333,7 @@ final class BrainStore: ObservableObject {
                 return
             }
 
-            let model = selectedHighlightSummaryModel
+            let model = selectedHomeGenerationModel
             let sourceDiceTokens = homeSourceDiceTokens(for: sourceNotes)
             let generationID = UUID()
             activeHomeGenerationID = generationID
@@ -1371,28 +1374,53 @@ final class BrainStore: ObservableObject {
                 return try readNote(from: noteURL)
             }
             let sourceTokens = pageFlashcardDiceTokens(for: note.content)
-            let localFallback = localPageFlashcardBundle(note: note, sourceDiceTokens: sourceTokens)
+            let cachedRecord = try? loadPageFlashcardCache(noteID: noteID)
 
-            if !force,
-               let cached = try? loadPageFlashcardBundle(noteID: noteID),
-               let similarity = homeSourceDiceSimilarity(cached.sourceDiceTokens, sourceTokens),
-               similarity >= Self.pageFlashcardSimilarityRegenerateThreshold {
+            if let cachedRecord {
+                let similarity = homeSourceDiceSimilarity(cachedRecord.bundle.sourceDiceTokens, sourceTokens)
+                let refreshedRecord = refreshedPageFlashcardCache(
+                    cachedRecord,
+                    latestSimilarityScore: similarity
+                )
+                try? withActiveBrainAccessThrowing {
+                    try persistPageFlashcardCache(refreshedRecord)
+                }
+
+                if let similarity,
+                   similarity >= Self.pageFlashcardSimilarityRegenerateThreshold {
+                    pageFlashcardStates[noteID] = PageFlashcardState(
+                        isLoading: false,
+                        bundle: refreshedRecord.bundle,
+                        errorMessage: nil
+                    )
+                    status = force ? "Flashcards unchanged; skipped regeneration" : "Flashcards ready"
+                    return
+                }
+
+                guard force else {
+                    pageFlashcardStates[noteID] = PageFlashcardState(
+                        isLoading: false,
+                        bundle: refreshedRecord.bundle,
+                        errorMessage: nil
+                    )
+                    status = "Flashcards ready from cache"
+                    return
+                }
+
                 pageFlashcardStates[noteID] = PageFlashcardState(
-                    isLoading: false,
-                    bundle: cached,
+                    isLoading: true,
+                    bundle: refreshedRecord.bundle,
                     errorMessage: nil
                 )
-                status = "Flashcards ready"
-                return
             }
 
             guard force else {
                 pageFlashcardStates[noteID] = PageFlashcardState(
                     isLoading: false,
-                    bundle: localFallback,
+                    bundle: existingGeneratedPageFlashcardBundle(for: noteID),
                     errorMessage: nil
                 )
-                status = "Flashcards ready"
+                status = "No generated flashcards cached"
                 return
             }
 
@@ -1400,13 +1428,24 @@ final class BrainStore: ObservableObject {
             do {
                 generated = try await generatePageFlashcards(note: note, sourceDiceTokens: sourceTokens)
                 try withActiveBrainAccessThrowing {
-                    try persistPageFlashcardBundle(generated)
+                    let latestSimilarity = cachedRecord.flatMap {
+                        homeSourceDiceSimilarity($0.bundle.sourceDiceTokens, sourceTokens)
+                    }
+                    let cache = PageFlashcardCacheFile(
+                        version: PageFlashcardCacheFile.currentVersion,
+                        bundle: generated,
+                        previousSimilarityScore: cachedRecord?.latestSimilarityScore,
+                        latestSimilarityScore: cachedRecord == nil ? 1 : latestSimilarity,
+                        similarityThreshold: Self.pageFlashcardSimilarityRegenerateThreshold,
+                        lastCheckedAt: Date()
+                    )
+                    try persistPageFlashcardCache(cache)
                 }
             } catch {
                 let message = flashcardErrorMessage(from: error)
                 pageFlashcardStates[noteID] = PageFlashcardState(
                     isLoading: false,
-                    bundle: pageFlashcardStates[noteID]?.bundle ?? localFallback,
+                    bundle: existingGeneratedPageFlashcardBundle(for: noteID) ?? cachedRecord?.bundle,
                     errorMessage: message
                 )
                 status = message
@@ -1422,7 +1461,7 @@ final class BrainStore: ObservableObject {
         } catch {
             pageFlashcardStates[noteID] = PageFlashcardState(
                 isLoading: false,
-                bundle: pageFlashcardStates[noteID]?.bundle,
+                bundle: existingGeneratedPageFlashcardBundle(for: noteID),
                 errorMessage: flashcardErrorMessage(from: error)
             )
             status = flashcardErrorMessage(from: error)
@@ -1481,7 +1520,8 @@ final class BrainStore: ObservableObject {
     private func generatePageFlashcards(note: Note, sourceDiceTokens: [String]) async throws -> PageFlashcardBundle {
         let prompt = pageFlashcardPrompt(note: note)
         let result: ChatCompletionResult
-        switch selectedHighlightSummaryModel {
+        let model = selectedFlashcardGenerationModel
+        switch model {
         case .mistral:
             result = try await generateWithMistral(
                 system: pageFlashcardInstructions(),
@@ -1491,6 +1531,12 @@ final class BrainStore: ObservableObject {
             recordMistralUsage(
                 inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
                 outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+            )
+        case .deepseek:
+            result = try await generateWithDeepSeek(
+                system: pageFlashcardInstructions(),
+                user: prompt,
+                maxTokens: Self.pageFlashcardMaxOutputTokens
             )
         case .ollama:
             result = try await generateWithOllama(
@@ -1506,8 +1552,9 @@ final class BrainStore: ObservableObject {
             sourceFingerprint: stableFingerprint(for: note.content),
             sourceDiceTokens: sourceDiceTokens,
             generatedAt: Date(),
-            modelTitle: selectedHighlightSummaryModel.displayModelName(
+            modelTitle: model.displayModelName(
                 mistralModel: mistralModel,
+                deepSeekModel: deepSeekModel,
                 ollamaModel: ollamaModel
             ),
             cards: cards
@@ -1543,7 +1590,7 @@ final class BrainStore: ObservableObject {
             return
         }
 
-        selectedHighlightSummaryModel = model
+        selectedFlashcardGenerationModel = model
         isShowingHighlightSummaryCompiler = false
         let generationID = UUID()
         activeHighlightGenerationID = generationID
@@ -1571,46 +1618,31 @@ final class BrainStore: ObservableObject {
     var assistantConfigurationSnapshot: AssistantConfiguration {
         AssistantConfiguration(
             mistralAPIKey: mistralAPIKey,
-            mistralModel: mistralModel
+            mistralModel: mistralModel,
+            deepSeekAPIKey: deepSeekAPIKey,
+            deepSeekModel: deepSeekModel
         )
-    }
-
-    var ollamaConfigurationSnapshot: OllamaConfiguration {
-        OllamaConfiguration(
-            model: ollamaModel,
-            baseURL: ollamaURL
-        )
-    }
-
-    func saveUsedModelConfiguration(
-        promptModel: AssistantModel,
-        summaryModel: HighlightSummaryModel,
-        ollamaBaseURL: String,
-        ollamaModel: String
-    ) {
-        selectedAssistantModel = promptModel
-        selectedHighlightSummaryModel = summaryModel
-        self.ollamaURL = cleanOllamaURL(ollamaBaseURL)
-        let cleanOllamaModel = ollamaModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.ollamaModel = cleanOllamaModel.isEmpty ? Self.defaultOllamaModel : cleanOllamaModel
-
-        do {
-            try saveAssistantConfiguration()
-            isShowingUsedModelsConfiguration = false
-            status = "Model usage saved"
-        } catch {
-            status = error.localizedDescription
-        }
     }
 
     func saveModelConfiguration(
         mistralAPIKey: String,
-        mistralModel: String
+        mistralModel: String,
+        deepSeekAPIKey: String,
+        deepSeekModel: String,
+        contentModel: AssistantModel,
+        homeGenerationModel: HighlightSummaryModel,
+        flashcardGenerationModel: HighlightSummaryModel
     ) {
         self.mistralAPIKey = mistralAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         self.mistralModel = mistralModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.deepSeekAPIKey = deepSeekAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.deepSeekModel = deepSeekModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        selectedAssistantModel = contentModel
+        selectedHomeGenerationModel = homeGenerationModel
+        selectedFlashcardGenerationModel = flashcardGenerationModel
 
         if self.mistralModel.isEmpty { self.mistralModel = Self.defaultMistralModel }
+        if self.deepSeekModel.isEmpty { self.deepSeekModel = Self.defaultDeepSeekModel }
 
         do {
             try saveAssistantConfiguration()
@@ -1631,10 +1663,22 @@ final class BrainStore: ObservableObject {
         try await verifyMistralAPIKey(cleanAPIKey)
         mistralAPIKey = cleanAPIKey
         mistralModel = Self.defaultMistralModel
-        selectedAssistantModel = .mistral
         try saveAssistantConfiguration()
         refreshMistralAccountLimitsIfNeeded()
         status = "Mistral API key verified"
+    }
+
+    func verifyAndSaveDeepSeekAPIKey(_ apiKey: String) async throws {
+        let cleanAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanAPIKey.isEmpty else {
+            throw AssistantError.missingConfiguration("Paste a DeepSeek API key.")
+        }
+
+        try await verifyDeepSeekAPIKey(cleanAPIKey)
+        deepSeekAPIKey = cleanAPIKey
+        deepSeekModel = Self.defaultDeepSeekModel
+        try saveAssistantConfiguration()
+        status = "DeepSeek API key verified"
     }
 
     @discardableResult
@@ -1648,6 +1692,20 @@ final class BrainStore: ObservableObject {
         status = location == .applePasswords
             ? "Mistral API key saved to Apple Passwords"
             : "Mistral API key saved to Apple Passwords on this Mac"
+        return location
+    }
+
+    @discardableResult
+    func saveDeepSeekAPIKeyToKeychain(_ apiKey: String) async throws -> MistralKeychainStore.SaveLocation {
+        let cleanAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanAPIKey.isEmpty else {
+            throw AssistantError.missingConfiguration("Add and verify a DeepSeek API key first.")
+        }
+
+        let location = try await MistralKeychainStore.saveDeepSeekAPIKey(cleanAPIKey)
+        status = location == .applePasswords
+            ? "DeepSeek API key saved to Apple Passwords"
+            : "DeepSeek API key saved to Apple Passwords on this Mac"
         return location
     }
 
@@ -3513,11 +3571,18 @@ final class BrainStore: ObservableObject {
         }
 
         do {
-            let result = try await generateWithMistral(prompt: prompt, linkedPageTitles: linkedPageTitles)
-            recordMistralUsage(
-                inputTokens: result.inputTokens ?? estimatedTokenCount(for: assistantInput(for: prompt, linkedPageTitles: linkedPageTitles)),
-                outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+            let assistantInput = assistantInput(for: prompt, linkedPageTitles: linkedPageTitles)
+            let result = try await generateWithSelectedAssistantModel(
+                system: assistantInstructions(),
+                user: assistantInput,
+                maxTokens: Self.maxAssistantOutputTokens
             )
+            if selectedAssistantModel == .mistral {
+                recordMistralUsage(
+                    inputTokens: result.inputTokens ?? estimatedTokenCount(for: assistantInput),
+                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+                )
+            }
             let providerTitle = selectedAssistantModel.title
             let output = result.content
 
@@ -3550,14 +3615,56 @@ final class BrainStore: ObservableObject {
         do {
             let providerTitle = selectedAssistantModel.title
             let startedAt = Date()
-            let answer = try await streamAssistantConversationAnswer(
-                prompt: prompt,
-                linkedPageTitles: linkedPageTitles,
-                providerTitle: providerTitle,
-                contextBudget: Self.assistantConversationContextBudget,
-                retryOnTimeout: true,
-                startedAt: startedAt
-            )
+            let answer: String
+            switch selectedAssistantModel {
+            case .mistral:
+                answer = try await streamAssistantConversationAnswer(
+                    prompt: prompt,
+                    linkedPageTitles: linkedPageTitles,
+                    providerTitle: providerTitle,
+                    contextBudget: Self.assistantConversationContextBudget,
+                    retryOnTimeout: true,
+                    startedAt: startedAt
+                )
+            case .deepseek:
+                let context = assistantConversationContext(
+                    for: prompt,
+                    linkedPageTitles: linkedPageTitles,
+                    characterBudget: Self.assistantConversationContextBudget
+                )
+                let messages = assistantConversationMessages(currentUserInput: context.input)
+                lastAssistantGenerationDiagnostics = AssistantGenerationDiagnostics(
+                    contextBuildSeconds: context.buildDuration,
+                    requestByteCount: try deepSeekRequestBodyByteCount(
+                        system: assistantConversationInstructions(),
+                        messages: messages,
+                        maxTokens: Self.assistantConversationOutputTokens,
+                        stream: false
+                    ),
+                    estimatedInputTokens: context.estimatedTokens + estimatedTokenCount(for: assistantConversationTranscript()),
+                    responseSeconds: 0,
+                    includedSources: context.includedSources,
+                    errorType: nil
+                )
+                assistantGenerationPhase = .requesting
+                status = "Sending to DeepSeek · ~\(lastAssistantGenerationDiagnostics?.estimatedInputTokens ?? context.estimatedTokens) tokens"
+                let responseStartedAt = Date()
+                let result = try await generateWithDeepSeek(
+                    system: assistantConversationInstructions(),
+                    messages: messages,
+                    maxTokens: Self.assistantConversationOutputTokens
+                )
+                let cleanAnswer = cleanedAssistantMarkdown(result.content)
+                lastAssistantGenerationDiagnostics = AssistantGenerationDiagnostics(
+                    contextBuildSeconds: context.buildDuration,
+                    requestByteCount: lastAssistantGenerationDiagnostics?.requestByteCount ?? 0,
+                    estimatedInputTokens: result.inputTokens ?? context.estimatedTokens,
+                    responseSeconds: Date().timeIntervalSince(responseStartedAt),
+                    includedSources: context.includedSources,
+                    errorType: nil
+                )
+                answer = cleanAnswer
+            }
             guard !answer.isEmpty else {
                 throw AssistantError.requestFailed("The model returned no answer.")
             }
@@ -3593,15 +3700,17 @@ final class BrainStore: ObservableObject {
 
         do {
             let prompt = assistantConversationInsertionInput(for: response)
-            let result = try await generateWithMistral(
+            let result = try await generateWithSelectedAssistantModel(
                 system: assistantConversationInsertionInstructions(),
                 user: prompt,
                 maxTokens: Self.assistantConversationInsertionOutputTokens
             )
-            recordMistralUsage(
-                inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
-                outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
-            )
+            if selectedAssistantModel == .mistral {
+                recordMistralUsage(
+                    inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
+                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+                )
+            }
 
             let markdown = cleanedWritingAssistantMarkdown(result.content)
             guard !markdown.isEmpty else {
@@ -3669,7 +3778,7 @@ final class BrainStore: ObservableObject {
                 ]
             )
 
-            let result = try await generateWithMistral(
+            let result = try await generateWithSelectedAssistantModel(
                 system: helpDeskInstructions(),
                 messages: messages,
                 maxTokens: Self.maxAssistantOutputTokens
@@ -3677,10 +3786,12 @@ final class BrainStore: ObservableObject {
             let estimatedInput = messages.reduce(helpDeskInstructions().count) { total, message in
                 total + (message["content"]?.count ?? 0)
             }
-            recordMistralUsage(
-                inputTokens: result.inputTokens ?? estimatedTokenCount(forCharacterCount: estimatedInput),
-                outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
-            )
+            if selectedAssistantModel == .mistral {
+                recordMistralUsage(
+                    inputTokens: result.inputTokens ?? estimatedTokenCount(forCharacterCount: estimatedInput),
+                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
+                )
+            }
 
             let answer = cleanedAssistantMarkdown(result.content)
             guard !answer.isEmpty else {
@@ -3774,6 +3885,12 @@ final class BrainStore: ObservableObject {
                     inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
                     outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
                 )
+            case .deepseek:
+                result = try await generateWithDeepSeek(
+                    system: highlightSummaryInstructions(),
+                    user: prompt,
+                    maxTokens: Self.maxAssistantOutputTokens
+                )
             case .ollama:
                 result = try await generateWithOllama(
                     system: highlightSummaryInstructions(),
@@ -3796,6 +3913,7 @@ final class BrainStore: ObservableObject {
                 compileDuration: duration,
                 modelTitle: model.displayModelName(
                     mistralModel: mistralModel,
+                    deepSeekModel: deepSeekModel,
                     ollamaModel: ollamaModel
                 ),
                 sourceFingerprint: nil,
@@ -3858,6 +3976,12 @@ final class BrainStore: ObservableObject {
                     inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
                     outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
                 )
+            case .deepseek:
+                result = try await generateWithDeepSeek(
+                    system: homePageSummaryInstructions(),
+                    user: prompt,
+                    maxTokens: Self.maxAssistantOutputTokens
+                )
             case .ollama:
                 result = try await generateWithOllama(
                     system: homePageSummaryInstructions(),
@@ -3886,6 +4010,7 @@ final class BrainStore: ObservableObject {
                 compileDuration: duration,
                 modelTitle: model.displayModelName(
                     mistralModel: mistralModel,
+                    deepSeekModel: deepSeekModel,
                     ollamaModel: ollamaModel
                 ),
                 sourceFingerprint: sourceFingerprint,
@@ -3934,6 +4059,32 @@ final class BrainStore: ObservableObject {
             user: assistantInput(for: prompt, linkedPageTitles: linkedPageTitles),
             maxTokens: Self.maxAssistantOutputTokens
         )
+    }
+
+    private func generateWithSelectedAssistantModel(
+        system: String,
+        user: String,
+        maxTokens: Int
+    ) async throws -> ChatCompletionResult {
+        switch selectedAssistantModel {
+        case .mistral:
+            return try await generateWithMistral(system: system, user: user, maxTokens: maxTokens)
+        case .deepseek:
+            return try await generateWithDeepSeek(system: system, user: user, maxTokens: maxTokens)
+        }
+    }
+
+    private func generateWithSelectedAssistantModel(
+        system: String,
+        messages: [[String: String]],
+        maxTokens: Int
+    ) async throws -> ChatCompletionResult {
+        switch selectedAssistantModel {
+        case .mistral:
+            return try await generateWithMistral(system: system, messages: messages, maxTokens: maxTokens)
+        case .deepseek:
+            return try await generateWithDeepSeek(system: system, messages: messages, maxTokens: maxTokens)
+        }
     }
 
     private func streamAssistantConversationAnswer(
@@ -4092,13 +4243,52 @@ final class BrainStore: ObservableObject {
         ).count
     }
 
+    private func deepSeekRequestBody(
+        system: String,
+        messages: [[String: String]],
+        maxTokens: Int,
+        stream: Bool
+    ) -> [String: Any] {
+        var requestMessages = [
+            [
+                "role": "system",
+                "content": system
+            ]
+        ]
+        requestMessages.append(contentsOf: messages)
+
+        return [
+            "model": deepSeekModel,
+            "messages": requestMessages,
+            "temperature": 0.35,
+            "max_tokens": maxTokens,
+            "stream": stream
+        ]
+    }
+
+    private func deepSeekRequestBodyByteCount(
+        system: String,
+        messages: [[String: String]],
+        maxTokens: Int,
+        stream: Bool
+    ) throws -> Int {
+        try JSONSerialization.data(
+            withJSONObject: deepSeekRequestBody(
+                system: system,
+                messages: messages,
+                maxTokens: maxTokens,
+                stream: stream
+            )
+        ).count
+    }
+
     private func generateWithMistral(
         system: String,
         messages: [[String: String]],
         maxTokens: Int
     ) async throws -> ChatCompletionResult {
         guard !mistralAPIKey.isEmpty else {
-            throw AssistantError.missingConfiguration("Add a Mistral API key in Settings > Configure Model.")
+            throw AssistantError.missingConfiguration("Add a Mistral API key in Settings > Configure Models.")
         }
 
         var request = URLRequest(url: URL(string: "https://api.mistral.ai/v1/chat/completions")!)
@@ -4127,7 +4317,7 @@ final class BrainStore: ObservableObject {
         onDelta: (String) -> Void
     ) async throws {
         guard !mistralAPIKey.isEmpty else {
-            throw AssistantError.missingConfiguration("Add a Mistral API key in Settings > Configure Model.")
+            throw AssistantError.missingConfiguration("Add a Mistral API key in Settings > Configure Models.")
         }
 
         var request = URLRequest(url: URL(string: "https://api.mistral.ai/v1/chat/completions")!)
@@ -4170,6 +4360,60 @@ final class BrainStore: ObservableObject {
         try processMistralHTTPResponse(response, data: data)
     }
 
+    private func generateWithDeepSeek(
+        system: String,
+        user: String,
+        maxTokens: Int
+    ) async throws -> ChatCompletionResult {
+        try await generateWithDeepSeek(
+            system: system,
+            messages: [
+                [
+                    "role": "user",
+                    "content": user
+                ]
+            ],
+            maxTokens: maxTokens
+        )
+    }
+
+    private func generateWithDeepSeek(
+        system: String,
+        messages: [[String: String]],
+        maxTokens: Int
+    ) async throws -> ChatCompletionResult {
+        guard !deepSeekAPIKey.isEmpty else {
+            throw AssistantError.missingConfiguration("Add a DeepSeek API key in Settings > Configure Models.")
+        }
+
+        var request = URLRequest(url: URL(string: "https://api.deepseek.com/chat/completions")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = Self.mistralChatTimeoutSeconds
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(deepSeekAPIKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: deepSeekRequestBody(
+                system: system,
+                messages: messages,
+                maxTokens: maxTokens,
+                stream: false
+            )
+        )
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validateHTTPResponse(response, data: data)
+        return try extractChatCompletionResult(from: data)
+    }
+
+    private func verifyDeepSeekAPIKey(_ apiKey: String) async throws {
+        var request = URLRequest(url: URL(string: "https://api.deepseek.com/models")!)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validateHTTPResponse(response, data: data)
+    }
+
     private func refreshMistralAccountLimitsIfNeeded() {
         guard !mistralAPIKey.isEmpty else { return }
         Task {
@@ -4180,7 +4424,7 @@ final class BrainStore: ObservableObject {
     private func generateWithOllama(system: String, user: String) async throws -> ChatCompletionResult {
         let base = cleanOllamaURL(ollamaURL)
         guard let url = URL(string: base)?.appendingPathComponent("api/chat") else {
-            throw AssistantError.missingConfiguration("Set a valid Ollama URL in Settings > Models Used Where.")
+            throw AssistantError.missingConfiguration("Set a valid Ollama URL in Settings > Configure Models.")
         }
 
         var request = URLRequest(url: url)
@@ -4297,10 +4541,10 @@ final class BrainStore: ObservableObject {
         personalizedSystemInstructions(
             """
             You are Zirn's Home page compiler. You synthesize every page in the user's vault into one read-only Home document.
-            Use the supplied page contents or condensed page notes for summaries and highlighted excerpts for flashcards.
+            Use the supplied page contents or condensed page notes for summaries.
             Preserve the user's writing style, rhythm, density, and vocabulary when possible.
             Every sentence must be complete. Remove fragments, dangling clauses, placeholder text, artifacts, and unfinished thoughts.
-            Strict length limits: Summary max 100 words. Each page summary max 100 words when previewed. Each flashcard answer max 4 lines.
+            Strict length limits: Summary max 100 words. Each page summary max 100 words when previewed.
             Write the Summary as one compact paragraph, not bullets. Use compact bullet lists only for page summaries. Do not use tables, numbered lists, code blocks, divider lines, separator lines, or lines made only from repeated punctuation.
             Return Markdown only. Do not include meta commentary, apologies, or code fences.
             """
@@ -4362,14 +4606,6 @@ final class BrainStore: ObservableObject {
             }
             .joined(separator: "\n\n")
 
-        let highlightChunks = sourceNotes.compactMap { note in
-            pageHighlightChunk(title: note.title, highlights: note.highlights)
-        }
-        let highlightBody = highlightChunks.isEmpty
-            ? "No highlighted text was found."
-            : highlightChunks.joined(separator: "\n\n")
-        let groupBody = homePageSidebarGroupsDescription(sourceNotes: sourceNotes)
-
         return """
         Vault:
         \(vaultName)
@@ -4383,24 +4619,8 @@ final class BrainStore: ObservableObject {
         ## Page Summaries
         For each page, add a ### heading with the exact page title, then 2-4 short bullet points, max 100 words total for that page. No tables, numbered lists, code, divider lines, separator lines, or lines made only from repeated punctuation.
 
-        ## Highlight Flashcards
-        Create question-and-answer flashcards from highlighted excerpts, grouped by sidebar group.
-        Use this exact format for every group that has highlights:
-        ### Group: Group Name
-        Q: question
-        A: answer
-
-        Q: question
-        A: answer
-
-        Sidebar groups and pages:
-        \(groupBody)
-
         Page contents or condensed page notes:
         \(pageBody)
-
-        Assembled highlighted data in the vault:
-        \(highlightBody)
 
         Learned user writing samples:
         \(learnedStyleMemory())
@@ -4564,6 +4784,12 @@ final class BrainStore: ObservableObject {
                 inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
                 outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
             )
+        case .deepseek:
+            result = try await generateWithDeepSeek(
+                system: homePageCondenseInstructions(),
+                user: prompt,
+                maxTokens: 1_500
+            )
         case .ollama:
             result = try await generateWithOllama(
                 system: homePageCondenseInstructions(),
@@ -4642,22 +4868,6 @@ final class BrainStore: ObservableObject {
             ? "No pages yet. Press Cmd N to start a new page."
             : pageSummarySection
 
-        let flashcardSection = localFlashcardGroups(from: sourceNotes)
-            .map { group in
-                let cards = group.cards
-                    .map { "Q: \($0.question)\nA: \($0.answer)" }
-                    .joined(separator: "\n\n")
-                return """
-                ### Group: \(group.title)
-
-                \(cards)
-                """
-            }
-            .joined(separator: "\n\n")
-        let flashcardBody = flashcardSection.isEmpty
-            ? "No highlighted text has been added yet."
-            : flashcardSection
-
         return """
         # Home
 
@@ -4668,10 +4878,6 @@ final class BrainStore: ObservableObject {
         ## Page Summaries
 
         \(pageCardsBody)
-
-        ## Highlight Flashcards
-
-        \(flashcardBody)
         """
     }
 
@@ -4982,12 +5188,11 @@ final class BrainStore: ObservableObject {
             preserveBullets: false
         )
         let pageCards = parsePageSummaryCards(from: extractHomeSection("Page Summaries", from: markdown) ?? "")
-        let flashcardGroups = parseFlashcardGroups(from: extractHomeSection("Highlight Flashcards", from: markdown) ?? "")
 
         return HomePagePresentation(
             vaultSummary: vaultSummary.trimmingCharacters(in: .whitespacesAndNewlines),
             pageCards: pageCards,
-            flashcardGroups: flashcardGroups
+            flashcardGroups: []
         )
     }
 
@@ -5010,7 +5215,7 @@ final class BrainStore: ObservableObject {
                 preserveBullets: false
             ),
             pageCards: enrichedCards,
-            flashcardGroups: presentation.flashcardGroups
+            flashcardGroups: []
         )
     }
 
@@ -5028,7 +5233,7 @@ final class BrainStore: ObservableObject {
         return HomePagePresentation(
             vaultSummary: presentation.vaultSummary,
             pageCards: presentation.pageCards + missingCards,
-            flashcardGroups: presentation.flashcardGroups
+            flashcardGroups: []
         )
     }
 
@@ -5247,20 +5452,71 @@ final class BrainStore: ObservableObject {
         }
     }
 
-    private func loadPageFlashcardBundle(noteID: Note.ID) throws -> PageFlashcardBundle? {
+    private func loadPageFlashcardCache(noteID: Note.ID) throws -> PageFlashcardCacheFile? {
         guard let brain = activeBrain else { return nil }
         let url = pageFlashcardURL(noteID: noteID, in: brain)
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return try decoder.decode(PageFlashcardBundle.self, from: Data(contentsOf: url))
+        if FileManager.default.fileExists(atPath: url.path) {
+            let data = try Data(contentsOf: url)
+            if let cache = try? decoder.decode(PageFlashcardCacheFile.self, from: data) {
+                return isGeneratedPageFlashcardBundle(cache.bundle) ? cache : nil
+            }
+
+            let legacyBundle = try decoder.decode(PageFlashcardBundle.self, from: data)
+            return isGeneratedPageFlashcardBundle(legacyBundle) ? initialPageFlashcardCache(for: legacyBundle) : nil
+        }
+
+        let legacyURL = legacyPageFlashcardURL(noteID: noteID, in: brain)
+        guard FileManager.default.fileExists(atPath: legacyURL.path) else { return nil }
+        let legacyBundle = try decoder.decode(PageFlashcardBundle.self, from: Data(contentsOf: legacyURL))
+        guard isGeneratedPageFlashcardBundle(legacyBundle) else { return nil }
+        let migrated = initialPageFlashcardCache(for: legacyBundle)
+        try persistPageFlashcardCache(migrated)
+        return migrated
     }
 
-    private func persistPageFlashcardBundle(_ bundle: PageFlashcardBundle) throws {
+    private func persistPageFlashcardCache(_ cache: PageFlashcardCacheFile) throws {
         guard let brain = activeBrain else { return }
         let folder = pageFlashcardsFolderURL(for: brain)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try ensureVaultGitignoreHidesPageFlashcards(in: brain)
-        let url = pageFlashcardURL(noteID: bundle.noteID, in: brain)
-        try encoder.encode(bundle).write(to: url, options: .atomic)
+        let url = pageFlashcardURL(noteID: cache.bundle.noteID, in: brain)
+        try encoder.encode(cache).write(to: url, options: .atomic)
+    }
+
+    private func initialPageFlashcardCache(for bundle: PageFlashcardBundle) -> PageFlashcardCacheFile {
+        PageFlashcardCacheFile(
+            version: PageFlashcardCacheFile.currentVersion,
+            bundle: bundle,
+            previousSimilarityScore: nil,
+            latestSimilarityScore: 1,
+            similarityThreshold: Self.pageFlashcardSimilarityRegenerateThreshold,
+            lastCheckedAt: Date()
+        )
+    }
+
+    private func refreshedPageFlashcardCache(
+        _ cache: PageFlashcardCacheFile,
+        latestSimilarityScore: Double?
+    ) -> PageFlashcardCacheFile {
+        PageFlashcardCacheFile(
+            version: PageFlashcardCacheFile.currentVersion,
+            bundle: cache.bundle,
+            previousSimilarityScore: cache.latestSimilarityScore,
+            latestSimilarityScore: latestSimilarityScore,
+            similarityThreshold: Self.pageFlashcardSimilarityRegenerateThreshold,
+            lastCheckedAt: Date()
+        )
+    }
+
+    private func existingGeneratedPageFlashcardBundle(for noteID: Note.ID) -> PageFlashcardBundle? {
+        guard let bundle = pageFlashcardStates[noteID]?.bundle,
+              isGeneratedPageFlashcardBundle(bundle)
+        else { return nil }
+        return bundle
+    }
+
+    private func isGeneratedPageFlashcardBundle(_ bundle: PageFlashcardBundle) -> Bool {
+        bundle.modelTitle != "Local instant flashcards"
     }
 
     private func ensureVaultGitignoreHidesPageFlashcards(in brain: BrainSummary) throws {
@@ -5277,6 +5533,11 @@ final class BrainStore: ObservableObject {
     }
 
     private func pageFlashcardURL(noteID: Note.ID, in brain: BrainSummary) -> URL {
+        pageFlashcardsFolderURL(for: brain)
+            .appendingPathComponent("\(stableFingerprint(for: noteID)).flshcrd")
+    }
+
+    private func legacyPageFlashcardURL(noteID: Note.ID, in brain: BrainSummary) -> URL {
         pageFlashcardsFolderURL(for: brain)
             .appendingPathComponent("\(stableFingerprint(for: noteID)).json")
     }
@@ -5320,10 +5581,6 @@ final class BrainStore: ObservableObject {
             ## Page Summaries
 
             No pages yet.
-
-            ## Highlight Flashcards
-
-            No highlighted text has been added yet.
             """
         }
 
@@ -5368,12 +5625,6 @@ final class BrainStore: ObservableObject {
             return "\(markdown)\n\n## Page Summaries\n\n\(missingMarkdown)"
         }
 
-        if let flashcardRange = markdown.range(of: "\n## Highlight Flashcards") {
-            var repaired = markdown
-            repaired.insert(contentsOf: "\n\n\(missingMarkdown)\n", at: flashcardRange.lowerBound)
-            return repaired
-        }
-
         return "\(markdown)\n\n\(missingMarkdown)"
     }
 
@@ -5407,7 +5658,7 @@ final class BrainStore: ObservableObject {
         }
 
         let text = sanitized.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        let requiredSections = ["## Summary", "## Page Summaries", "## Highlight Flashcards"]
+        let requiredSections = ["## Summary", "## Page Summaries"]
         let legacySections = [
             ["## Summary", "## Page Summaries", "## Highlight Flashcards"],
             ["## Vault Summary", "## Page Summaries", "## Highlight Flashcards"],
@@ -6750,20 +7001,28 @@ final class BrainStore: ObservableObject {
     private func loadAssistantConfiguration() {
         let defaults = UserDefaults.standard
         if let rawModel = defaults.string(forKey: selectedAssistantModelKey),
-           let model = AssistantModel(rawValue: rawModel),
-           model == .mistral {
+           let model = AssistantModel(rawValue: rawModel) {
             selectedAssistantModel = model
         } else {
             selectedAssistantModel = .mistral
         }
-        if let rawSummaryModel = defaults.string(forKey: selectedHighlightSummaryModelKey),
-           let summaryModel = HighlightSummaryModel(rawValue: rawSummaryModel) {
-            selectedHighlightSummaryModel = summaryModel
-        } else {
-            selectedHighlightSummaryModel = .mistral
-        }
+        let legacyGenerationModel = defaults.string(forKey: selectedHighlightSummaryModelKey)
+            .flatMap(HighlightSummaryModel.init(rawValue:))
+            .flatMap { $0 == .ollama ? nil : $0 }
+        selectedHomeGenerationModel = defaults.string(forKey: selectedHomeGenerationModelKey)
+            .flatMap(HighlightSummaryModel.init(rawValue:))
+            .flatMap { $0 == .ollama ? nil : $0 }
+            ?? legacyGenerationModel
+            ?? .mistral
+        selectedFlashcardGenerationModel = defaults.string(forKey: selectedFlashcardGenerationModelKey)
+            .flatMap(HighlightSummaryModel.init(rawValue:))
+            .flatMap { $0 == .ollama ? nil : $0 }
+            ?? legacyGenerationModel
+            ?? .mistral
         mistralAPIKey = defaults.string(forKey: mistralAPIKeyKey) ?? ""
         mistralModel = defaults.string(forKey: mistralModelKey) ?? Self.defaultMistralModel
+        deepSeekAPIKey = defaults.string(forKey: deepSeekAPIKeyKey) ?? ""
+        deepSeekModel = defaults.string(forKey: deepSeekModelKey) ?? Self.defaultDeepSeekModel
         mistralBudgetSpentUSD = defaults.double(forKey: mistralBudgetSpentUSDKey)
         mistralOCRPagesUsed = defaults.integer(forKey: mistralOCRPagesUsedKey)
         mistralTokensConsumed = defaults.integer(forKey: mistralTokensConsumedKey)
@@ -6789,9 +7048,13 @@ final class BrainStore: ObservableObject {
     private func saveAssistantConfiguration() throws {
         let defaults = UserDefaults.standard
         defaults.set(selectedAssistantModel.rawValue, forKey: selectedAssistantModelKey)
-        defaults.set(selectedHighlightSummaryModel.rawValue, forKey: selectedHighlightSummaryModelKey)
+        defaults.set(selectedHomeGenerationModel.rawValue, forKey: selectedHomeGenerationModelKey)
+        defaults.set(selectedFlashcardGenerationModel.rawValue, forKey: selectedFlashcardGenerationModelKey)
+        defaults.set(selectedFlashcardGenerationModel.rawValue, forKey: selectedHighlightSummaryModelKey)
         defaults.set(mistralAPIKey, forKey: mistralAPIKeyKey)
         defaults.set(mistralModel, forKey: mistralModelKey)
+        defaults.set(deepSeekAPIKey, forKey: deepSeekAPIKeyKey)
+        defaults.set(deepSeekModel, forKey: deepSeekModelKey)
         defaults.set(mistralBudgetSpentUSD, forKey: mistralBudgetSpentUSDKey)
         defaults.set(mistralOCRPagesUsed, forKey: mistralOCRPagesUsedKey)
         defaults.set(mistralTokensConsumed, forKey: mistralTokensConsumedKey)
@@ -6807,6 +7070,7 @@ final class BrainStore: ObservableObject {
         var brain = try readBrain(from: activeBrain.brainURL)
         brain.ai.provider = selectedAssistantModel.rawValue
         brain.ai.mistralModel = mistralModel
+        brain.ai.deepSeekModel = deepSeekModel
         brain.ai.ollamaModel = ollamaModel
         brain.ai.ollamaURL = cleanOllamaURL(ollamaURL)
         brain.vault.updatedAt = Date()
@@ -8425,6 +8689,8 @@ struct RecentVault: Identifiable, Codable, Equatable {
 struct AssistantConfiguration: Equatable {
     let mistralAPIKey: String
     let mistralModel: String
+    let deepSeekAPIKey: String
+    let deepSeekModel: String
 }
 
 struct OllamaConfiguration: Equatable {
@@ -8566,6 +8832,17 @@ struct PageFlashcardBundle: Codable, Equatable {
     let cards: [PageFlashcard]
 }
 
+struct PageFlashcardCacheFile: Codable, Equatable {
+    static let currentVersion = 1
+
+    let version: Int
+    let bundle: PageFlashcardBundle
+    let previousSimilarityScore: Double?
+    let latestSimilarityScore: Double?
+    let similarityThreshold: Double
+    let lastCheckedAt: Date
+}
+
 struct PageFlashcard: Identifiable, Codable, Equatable {
     let id: String
     let question: String
@@ -8635,6 +8912,7 @@ private struct HighlightSummaryMetadata: Codable {
 
 enum HighlightSummaryModel: String, CaseIterable, Identifiable {
     case mistral
+    case deepseek
     case ollama
 
     var id: String { rawValue }
@@ -8643,15 +8921,19 @@ enum HighlightSummaryModel: String, CaseIterable, Identifiable {
         switch self {
         case .mistral:
             return "Mistral"
+        case .deepseek:
+            return "DeepSeek (beta)"
         case .ollama:
             return "Ollama"
         }
     }
 
-    func displayModelName(mistralModel: String, ollamaModel: String) -> String {
+    func displayModelName(mistralModel: String, deepSeekModel: String, ollamaModel: String) -> String {
         switch self {
         case .mistral:
             return "Mistral \(mistralModel)"
+        case .deepseek:
+            return "DeepSeek \(deepSeekModel)"
         case .ollama:
             return "Ollama \(ollamaModel)"
         }
@@ -8660,11 +8942,17 @@ enum HighlightSummaryModel: String, CaseIterable, Identifiable {
 
 enum AssistantModel: String, CaseIterable, Identifiable {
     case mistral
+    case deepseek
 
     var id: String { rawValue }
 
     var title: String {
-        "Mistral"
+        switch self {
+        case .mistral:
+            return "Mistral"
+        case .deepseek:
+            return "DeepSeek (beta)"
+        }
     }
 
     var supportsWebSearch: Bool {
@@ -8835,6 +9123,7 @@ struct SourceRegistryPointer: Codable {
 struct BrainAIPreferences: Codable {
     var provider: String
     var mistralModel: String? = nil
+    var deepSeekModel: String? = nil
     var openaiModel: String? = nil
     var ollamaModel: String? = nil
     var ollamaURL: String? = nil

@@ -39,17 +39,12 @@ struct ContentView: View {
         }
         .sheet(isPresented: $store.isShowingModelConfiguration) {
             ModelConfigurationView(store: store)
-                .frame(width: 500)
+                .frame(width: 620)
                 .presentationBackground(.regularMaterial)
         }
         .sheet(isPresented: $store.isShowingMarkdownHelp) {
             MarkdownHelpView()
                 .frame(width: 620, height: 680)
-                .presentationBackground(.regularMaterial)
-        }
-        .sheet(isPresented: $store.isShowingUsedModelsConfiguration) {
-            UsedModelsConfigurationView(store: store)
-                .frame(width: 500)
                 .presentationBackground(.regularMaterial)
         }
         .sheet(isPresented: $store.isShowingUsernameConfiguration) {
@@ -551,6 +546,7 @@ private struct WorkspaceView: View {
                             canDelete: !store.isViewingGeneratedPage && (store.selectedNoteID != nil || store.currentNoteID != nil),
                             canShowFlashcards: editorFlashcardNoteID != nil,
                             isFlashcardOpen: isEditorFlashcardOpen,
+                            typingStatus: typingStatus,
                             newPage: {
                                 isEditingMarkdown = false
                                 isEditorFlashcardOpen = false
@@ -558,6 +554,7 @@ private struct WorkspaceView: View {
                             },
                             flashcards: {
                                 guard let noteID = editorFlashcardNoteID else { return }
+                                isEditingMarkdown = false
                                 withAnimation(.easeOut(duration: 0.16)) {
                                     isEditorFlashcardOpen.toggle()
                                 }
@@ -569,7 +566,11 @@ private struct WorkspaceView: View {
                                 isEditingMarkdown = false
                                 isEditorFlashcardOpen = false
                                 store.deleteSelectedNote()
-                            }
+                            },
+                            bold: { NSApp.sendAction(NSSelectorFromString("toggleBoldface:"), to: nil, from: nil) },
+                            italic: { NSApp.sendAction(NSSelectorFromString("toggleItalics:"), to: nil, from: nil) },
+                            underline: { NSApp.sendAction(NSSelectorFromString("underline:"), to: nil, from: nil) },
+                            highlight: { NSApp.sendAction(NSSelectorFromString("highlightSelection:"), to: nil, from: nil) }
                         )
 
                         Spacer(minLength: 0)
@@ -599,6 +600,17 @@ private struct WorkspaceView: View {
                                 openLinkedNote: { store.openLinkedNote(named: $0) },
                                 imageURL: store.markdownImageURL,
                                 imageData: store.markdownImageData
+                            )
+                        } else if isEditorFlashcardOpen, let noteID = editorFlashcardNoteID {
+                            EditorPageFlashcardView(
+                                state: store.pageFlashcardStates[noteID] ?? .idle,
+                                regenerate: { store.requestPageFlashcards(noteID: noteID, force: true) },
+                                goTo: { query in
+                                    store.openPageFlashcardSource(noteID: noteID, query: query)
+                                    withAnimation(.easeOut(duration: 0.16)) {
+                                        isEditorFlashcardOpen = false
+                                    }
+                                }
                             )
                         } else {
                             MarkdownEditingSurface(
@@ -631,6 +643,8 @@ private struct WorkspaceView: View {
                             HomeFooter(latestSummary: store.latestHomeSummary)
                         } else if let summary = store.currentHighlightSummary {
                             HighlightSummaryFooter(summary: summary)
+                        } else if isEditorFlashcardOpen {
+                            Text("Idea Flashcards")
                         } else {
                             Text(store.documentStats)
                                 .contentTransition(.numericText())
@@ -645,7 +659,7 @@ private struct WorkspaceView: View {
                             .transition(.opacity.combined(with: .move(edge: .leading)))
                         }
                         Spacer()
-                        if !store.isViewingGeneratedPage {
+                        if !store.isViewingGeneratedPage && !isEditorFlashcardOpen {
                             MarkdownTypingStatusIcons(status: typingStatus)
                         }
                         if !store.isShowingHomePage {
@@ -665,7 +679,7 @@ private struct WorkspaceView: View {
                 .background(Color(nsColor: .textBackgroundColor))
 
                 HStack(alignment: .bottom, spacing: 10) {
-                    if !isReadingMode && !store.isViewingGeneratedPage {
+                    if !isReadingMode && !store.isViewingGeneratedPage && !isEditorFlashcardOpen {
                         Color.clear
                             .frame(width: readingToggleSize, height: readingToggleSize)
                             .accessibilityHidden(true)
@@ -677,35 +691,19 @@ private struct WorkspaceView: View {
                             }
                     }
 
-                    if !store.isViewingGeneratedPage {
+                    if !store.isViewingGeneratedPage && !isEditorFlashcardOpen {
                         ReadingModeToggle(isOn: $isReadingMode, size: readingToggleSize)
                     }
                 }
                 .padding(.bottom, 54)
                 .frame(maxWidth: .infinity, alignment: .center)
 
-                if isEditorFlashcardOpen, let noteID = editorFlashcardNoteID {
-                    HomePageCardFlashcardPanel(
-                        state: store.pageFlashcardStates[noteID] ?? .idle,
-                        regenerate: { store.requestPageFlashcards(noteID: noteID, force: true) },
-                        goTo: { query in store.openPageFlashcardSource(noteID: noteID, query: query) },
-                        close: {
-                            withAnimation(.easeOut(duration: 0.16)) {
-                                isEditorFlashcardOpen = false
-                            }
-                        }
-                    )
-                    .frame(width: 360)
-                    .padding(.leading, 64)
-                    .padding(.top, 48)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-                    .zIndex(3)
-                }
             }
         .onChange(of: editorFlashcardNoteID) { _, newID in
             if newID == nil {
                 isEditorFlashcardOpen = false
+            } else if let newID, isEditorFlashcardOpen {
+                store.requestPageFlashcards(noteID: newID)
             }
         }
     }
@@ -1117,12 +1115,17 @@ private struct DocumentChromeControls: View {
     let canDelete: Bool
     let canShowFlashcards: Bool
     let isFlashcardOpen: Bool
+    let typingStatus: MarkdownTypingStatus
     let newPage: () -> Void
     let flashcards: () -> Void
     let delete: () -> Void
+    let bold: () -> Void
+    let italic: () -> Void
+    let underline: () -> Void
+    let highlight: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             GlassChromeIconButton(systemImage: "square.and.pencil", help: "New Page", action: newPage)
                 .keyboardShortcut("n", modifiers: .command)
 
@@ -1137,7 +1140,40 @@ private struct DocumentChromeControls: View {
             Rectangle()
                 .fill(Color.primary.opacity(0.13))
                 .frame(width: 1, height: 24)
-                .padding(.horizontal, 2)
+                .padding(.horizontal, 6)
+
+            GlassChromeIconButton(
+                systemImage: "bold",
+                help: "Bold",
+                isActive: typingStatus.isBold,
+                action: bold
+            )
+
+            GlassChromeIconButton(
+                systemImage: "italic",
+                help: "Italic",
+                isActive: typingStatus.isItalic,
+                action: italic
+            )
+
+            GlassChromeIconButton(
+                systemImage: "underline",
+                help: "Underline",
+                isActive: typingStatus.isUnderline,
+                action: underline
+            )
+
+            GlassChromeIconButton(
+                systemImage: "paintbrush.pointed",
+                help: "Highlight",
+                isActive: typingStatus.isHighlight,
+                action: highlight
+            )
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.13))
+                .frame(width: 1, height: 24)
+                .padding(.horizontal, 6)
 
             GlassChromeIconButton(
                 systemImage: "trash.fill",
@@ -1319,19 +1355,17 @@ private struct GlassChromeIconButton: View {
                 .font(.system(size: 14, weight: .semibold))
                 .symbolRenderingMode(isDestructive && isHovered ? .palette : .hierarchical)
                 .foregroundStyle(primaryStyle, secondaryStyle)
-                .frame(width: 36, height: 36)
-                .background(.ultraThinMaterial)
-                .clipShape(Circle())
-                .overlay {
-                    Circle()
+                .frame(width: 30, height: 30)
+                .background {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(highlightFill)
                 }
                 .overlay {
-                    Circle()
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .stroke(borderColor, lineWidth: 1)
                 }
-                .shadow(color: shadowColor, radius: isHovered ? 9 : 4, y: isHovered ? 4 : 1)
-                .contentShape(Circle())
+                .shadow(color: shadowColor, radius: isHovered ? 5 : 0, y: isHovered ? 2 : 0)
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
         .help(help)
@@ -1366,11 +1400,11 @@ private struct GlassChromeIconButton: View {
             return .red.opacity(0.15)
         }
 
-        if isActive {
-            return Color.accentColor.opacity(isHovered ? 0.16 : 0.10)
+        if isActive, isHovered {
+            return Color.accentColor.opacity(0.14)
         }
 
-        return .white.opacity(isHovered ? 0.13 : 0.025)
+        return .white.opacity(isHovered ? 0.13 : 0)
     }
 
     private var borderColor: Color {
@@ -1378,11 +1412,11 @@ private struct GlassChromeIconButton: View {
             return .red.opacity(0.30)
         }
 
-        if isActive {
-            return Color.accentColor.opacity(isHovered ? 0.36 : 0.24)
+        if isActive, isHovered {
+            return Color.accentColor.opacity(0.30)
         }
 
-        return .white.opacity(isHovered ? 0.22 : 0.11)
+        return .white.opacity(isHovered ? 0.22 : 0)
     }
 
     private var shadowColor: Color {
@@ -1390,11 +1424,11 @@ private struct GlassChromeIconButton: View {
             return .red.opacity(0.12)
         }
 
-        if isActive {
-            return Color.accentColor.opacity(isHovered ? 0.18 : 0.10)
+        if isActive, isHovered {
+            return Color.accentColor.opacity(0.15)
         }
 
-        return .black.opacity(isHovered ? 0.18 : 0.08)
+        return .black.opacity(isHovered ? 0.18 : 0)
     }
 }
 
@@ -3226,7 +3260,6 @@ private struct HomePageView: View {
     let generationDate: Date?
     let openNote: (Note.ID) -> Void
     @State private var isGraphExpanded = false
-    @State private var expandedFlashcardGroups: Set<String> = []
 
     private let pageCardColumns = [
         GridItem(.flexible(minimum: 220), spacing: 14),
@@ -3249,7 +3282,6 @@ private struct HomePageView: View {
                         vaultSummarySection
                         vaultGraphSection
                         pageCardsSection
-                        flashcardSection
                     }
                 }
                 .padding(.vertical, 8)
@@ -3343,36 +3375,6 @@ private struct HomePageView: View {
             }
         }
     }
-
-    @ViewBuilder
-    private var flashcardSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Highlight Flashcards")
-                .font(.system(size: 22, weight: .bold))
-
-            if presentation.flashcardGroups.isEmpty {
-                Text("Highlight text on your pages to generate flashcards.")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
-            } else {
-                VStack(spacing: 10) {
-                    ForEach(presentation.flashcardGroups) { group in
-                        HomeFlashcardGroupAccordion(
-                            group: group,
-                            isExpanded: expandedFlashcardGroups.contains(group.id),
-                            toggle: {
-                                if expandedFlashcardGroups.contains(group.id) {
-                                    expandedFlashcardGroups.remove(group.id)
-                                } else {
-                                    expandedFlashcardGroups.insert(group.id)
-                                }
-                            }
-                        )
-                    }
-                }
-            }
-        }
-    }
 }
 
 private struct HomePageSummaryCard: View {
@@ -3381,7 +3383,6 @@ private struct HomePageSummaryCard: View {
     let openNote: (Note.ID) -> Void
     @State private var isExpanded = false
     @State private var isHovered = false
-    @State private var isFlashcardOpen = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -3414,23 +3415,6 @@ private struct HomePageSummaryCard: View {
                         }
                         .buttonStyle(.plain)
                         .help("Open page")
-
-                        Button {
-                            withAnimation(.easeOut(duration: 0.16)) {
-                                isFlashcardOpen.toggle()
-                            }
-                            if isFlashcardOpen {
-                                store.requestPageFlashcards(noteID: noteID)
-                            }
-                        } label: {
-                            Image(systemName: "lightbulb")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(isFlashcardOpen ? Color.accentColor : .secondary)
-                                .frame(width: 24, height: 24)
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("Show idea flashcards")
                     }
 
                     Button {
@@ -3454,21 +3438,7 @@ private struct HomePageSummaryCard: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(isExpanded ? nil : 5)
                     .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            if isFlashcardOpen, let noteID = card.noteID {
-                HomePageCardFlashcardPanel(
-                    state: store.pageFlashcardStates[noteID] ?? .idle,
-                    regenerate: { store.requestPageFlashcards(noteID: noteID, force: true) },
-                    goTo: { query in store.openPageFlashcardSource(noteID: noteID, query: query) },
-                    close: {
-                        withAnimation(.easeOut(duration: 0.16)) {
-                            isFlashcardOpen = false
-                        }
-                    }
-                )
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(14)
@@ -3560,6 +3530,208 @@ private struct HomePageCardFlashcardPanel: View {
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+        }
+    }
+}
+
+private struct EditorPageFlashcardView: View {
+    let state: PageFlashcardState
+    let regenerate: () -> Void
+    let goTo: (String?) -> Void
+
+    private var displayBundle: PageFlashcardBundle? {
+        guard let bundle = state.bundle,
+              bundle.modelTitle != "Local instant flashcards"
+        else { return nil }
+        return bundle
+    }
+
+    private var cards: [PageFlashcard] {
+        displayBundle?.cards ?? []
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+
+                if state.isLoading {
+                    loadingRow
+                }
+
+                if cards.isEmpty && !state.isLoading && state.errorMessage == nil {
+                    emptyState
+                }
+
+                if !cards.isEmpty {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(cards) { card in
+                            EditorPageFlashcardCard(card: card, goTo: { goTo(card.anchor) })
+                        }
+                    }
+                }
+
+                if let errorMessage = state.errorMessage {
+                    errorRow(errorMessage)
+                }
+            }
+            .padding(.horizontal, 30)
+            .padding(.top, 26)
+            .padding(.bottom, 42)
+            .frame(maxWidth: 860, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.72))
+    }
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
+                Label("Idea Flashcards", systemImage: "lightbulb")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(.primary.opacity(0.90))
+
+                Text(subtitle)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 18)
+
+            Button(action: regenerate) {
+                Label(state.isLoading ? "Checking" : "Regenerate", systemImage: "arrow.clockwise")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .padding(.horizontal, 12)
+                    .frame(height: 30)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(state.isLoading)
+            .help("Regenerate if the page changed enough")
+        }
+    }
+
+    private var subtitle: String {
+        if let bundle = displayBundle {
+            return "\(bundle.cards.count) cards for \(bundle.noteTitle)"
+        }
+
+        if state.isLoading {
+            return "Generating flashcards for this page."
+        }
+
+        return "Generated flashcards for this page will appear here."
+    }
+
+    private var loadingRow: some View {
+        HStack(spacing: 9) {
+            ProgressView()
+                .controlSize(.small)
+            Text(cards.isEmpty ? "Loading flashcards from this page..." : "Checking whether flashcards need an update...")
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.045))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("No flashcards yet")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.primary.opacity(0.82))
+            Text("Use Regenerate to create cards for this page.")
+                .font(.system(size: 12.5))
+                .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.04))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func errorRow(_ errorMessage: String) -> some View {
+        Label(errorMessage, systemImage: "exclamationmark.triangle")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.red.opacity(0.86))
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.red.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+private struct EditorPageFlashcardCard: View {
+    let card: PageFlashcard
+    let goTo: () -> Void
+    @State private var showsAnswer = false
+    @State private var isHovered = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Button {
+                withAnimation(.easeOut(duration: 0.14)) {
+                    showsAnswer.toggle()
+                }
+            } label: {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        Text("Question")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.secondary)
+
+                        Spacer(minLength: 0)
+
+                        Label(showsAnswer ? "Hide answer" : "Show answer", systemImage: showsAnswer ? "eye.slash" : "eye")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary.opacity(0.88))
+                    }
+
+                    HomeInlineMarkdownText(card.question)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.primary.opacity(0.92))
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if showsAnswer {
+                        Divider().opacity(0.36)
+                        Text("Answer")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.secondary)
+                        HomeInlineMarkdownText(card.answer)
+                            .font(.system(size: 13.5))
+                            .foregroundStyle(.primary.opacity(0.86))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else {
+                        Text("Tap to reveal answer")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary.opacity(0.78))
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.primary.opacity(isHovered ? 0.062 : 0.042))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.primary.opacity(isHovered ? 0.13 : 0.075), lineWidth: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovered = $0 }
+
+            Button(action: goTo) {
+                Label("Go to source", systemImage: "arrow.up.right")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
     }
 }
@@ -6688,10 +6860,21 @@ private struct AssistantFloatingPill: View {
     }
 
     private var modelMenu: some View {
-        Text(store.selectedAssistantModel.title)
-            .font(.system(size: 12.2, weight: .semibold))
-            .lineLimit(1)
-            .frame(width: modelMenuWidth, alignment: .center)
+        ProviderLogoSwitch(
+            selection: selectedAssistantModelBinding,
+            options: AssistantModel.allCases,
+            title: { $0.title },
+            imageName: { $0.providerLogoAssetName }
+        )
+        .scaleEffect(0.88)
+        .frame(width: modelMenuWidth, height: 30)
+    }
+
+    private var selectedAssistantModelBinding: Binding<AssistantModel> {
+        Binding(
+            get: { store.selectedAssistantModel },
+            set: { store.selectAssistantModel($0) }
+        )
     }
 
     private var attachmentControl: some View {
@@ -7115,7 +7298,7 @@ private struct AssistantFloatingPill: View {
     }
 
     private var modelMenuWidth: CGFloat {
-        70
+        68
     }
 
     private var hasPromptInput: Bool {
@@ -8484,10 +8667,23 @@ private struct ModelConfigurationView: View {
     @State private var mistralAPIKey: String
     @State private var mistralVerificationState: APIKeyVerificationState
     @State private var verifiedMistralAPIKey: String
-    @State private var verificationTask: Task<Void, Never>?
-    @State private var keychainSaveState: KeychainSaveState = .idle
-    @State private var keychainLoadNotFound = false
-    @State private var isLoadingFromKeychain = false
+    @State private var deepSeekAPIKey: String
+    @State private var deepSeekVerificationState: APIKeyVerificationState
+    @State private var verifiedDeepSeekAPIKey: String
+    @State private var contentModel: AssistantModel
+    @State private var homeGenerationModel: HighlightSummaryModel
+    @State private var flashcardGenerationModel: HighlightSummaryModel
+    @State private var mistralVerificationTask: Task<Void, Never>?
+    @State private var deepSeekVerificationTask: Task<Void, Never>?
+    @State private var mistralKeychainState: KeychainSaveState = .idle
+    @State private var deepSeekKeychainState: KeychainSaveState = .idle
+    @State private var mistralKeychainLoadNotFound = false
+    @State private var deepSeekKeychainLoadNotFound = false
+    @State private var isLoadingMistralFromKeychain = false
+    @State private var isLoadingDeepSeekFromKeychain = false
+
+    private let generationModels: [HighlightSummaryModel] = [.mistral, .deepseek]
+    private let documentReadingServiceTitle = "Mistral OCR"
 
     init(store: BrainStore) {
         self.store = store
@@ -8495,6 +8691,12 @@ private struct ModelConfigurationView: View {
         _mistralAPIKey = State(initialValue: configuration.mistralAPIKey)
         _mistralVerificationState = State(initialValue: configuration.mistralAPIKey.isEmpty ? .idle : .verified)
         _verifiedMistralAPIKey = State(initialValue: configuration.mistralAPIKey)
+        _deepSeekAPIKey = State(initialValue: configuration.deepSeekAPIKey)
+        _deepSeekVerificationState = State(initialValue: configuration.deepSeekAPIKey.isEmpty ? .idle : .verified)
+        _verifiedDeepSeekAPIKey = State(initialValue: configuration.deepSeekAPIKey)
+        _contentModel = State(initialValue: store.selectedAssistantModel)
+        _homeGenerationModel = State(initialValue: store.selectedHomeGenerationModel == .ollama ? .mistral : store.selectedHomeGenerationModel)
+        _flashcardGenerationModel = State(initialValue: store.selectedFlashcardGenerationModel == .ollama ? .mistral : store.selectedFlashcardGenerationModel)
     }
 
     var body: some View {
@@ -8506,10 +8708,10 @@ private struct ModelConfigurationView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Configure Model")
+                    Text("Configure Models")
                         .font(.system(size: 24, weight: .bold))
 
-                    Text("Connect Zirn to Mistral.")
+                    Text("Connect model providers and choose what Zirn uses for content, Home, and flashcards.")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -8517,80 +8719,120 @@ private struct ModelConfigurationView: View {
             }
 
             VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(spacing: 0) {
+                    ModelRoutingRow(title: "Content Generation") {
+                        ProviderLogoSwitch(
+                            selection: $contentModel,
+                            options: AssistantModel.allCases,
+                            title: { $0.title },
+                            imageName: { $0.providerLogoAssetName }
+                        )
+                    }
+
+                    Divider()
+                        .padding(.leading, 14)
+
+                    ModelRoutingRow(title: "Home Page Generation") {
+                        ProviderLogoSwitch(
+                            selection: $homeGenerationModel,
+                            options: generationModels,
+                            title: { $0.title },
+                            imageName: { $0.providerLogoAssetName }
+                        )
+                    }
+
+                    Divider()
+                        .padding(.leading, 14)
+
+                    ModelRoutingRow(title: "Flashcard Generation") {
+                        ProviderLogoSwitch(
+                            selection: $flashcardGenerationModel,
+                            options: generationModels,
+                            title: { $0.title },
+                            imageName: { $0.providerLogoAssetName }
+                        )
+                    }
+
+                    Divider()
+                        .padding(.leading, 14)
+
+                    ModelRoutingRow(title: "Document Reading Service") {
+                        StaticModelServiceLabel(title: documentReadingServiceTitle)
+                    }
+                }
+                .background {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.primary.opacity(0.045))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                }
+
+                Text("DeepSeek's current API does not expose OCR/document-reading support, so PDF, Word, PowerPoint, and image reading stays on Mistral OCR.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                VStack(alignment: .leading, spacing: 8) {
                     Text("Mistral API Key")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
 
-                    MistralAPIKeyField(
+                    APIKeyField(
+                        placeholder: "MISTRAL_API_KEY",
                         text: $mistralAPIKey,
                         state: mistralVerificationState,
                         width: mistralAPIKeyFieldWidth
                     )
 
-                    HStack(spacing: 10) {
-                        Button {
-                            loadFromKeychain()
-                        } label: {
-                            Label("Load from Keychain", systemImage: "key.viewfinder")
-                                .font(.system(size: 12, weight: .semibold))
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.regular)
-                        .disabled(isLoadingFromKeychain)
-                        .help("Import the Zirn Mistral API key from Apple Passwords")
+                    keychainControls(
+                        providerName: "Mistral",
+                        isLoading: isLoadingMistralFromKeychain,
+                        isVerified: isMistralKeyVerified,
+                        state: mistralKeychainState,
+                        loadNotFound: mistralKeychainLoadNotFound,
+                        load: loadMistralFromKeychain,
+                        save: saveMistralToKeychain
+                    )
 
-                        Button {
-                            saveToKeychain()
-                        } label: {
-                            Label("Add to Keychain", systemImage: "key.fill")
-                                .font(.system(size: 12, weight: .semibold))
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.regular)
-                        .disabled(!isMistralKeyVerified || keychainSaveState == .saving)
-                        .help("Save this API key to Apple Passwords as \(MistralKeychainStore.appName)")
-                    }
-
-                    if keychainLoadNotFound {
-                        Text("API key not found")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.red.opacity(0.88))
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
                     Text("Default model: \(BrainStore.defaultMistralModel)")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
 
-                    if case .saved(let location) = keychainSaveState {
-                        switch location {
-                        case .applePasswords:
-                            Label("Saved to Apple Passwords. Search for api.mistral.ai or \(MistralKeychainStore.appName).", systemImage: "checkmark.circle.fill")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.green)
-                                .fixedSize(horizontal: false, vertical: true)
-                        case .localPasswords:
-                            Label("Saved to Apple Passwords on this Mac. Search for api.mistral.ai.", systemImage: "checkmark.circle.fill")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.green)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-
-                    if case .failed(let message) = keychainSaveState {
-                        Text(message)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.red.opacity(0.88))
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-
                     if case .failed(let message) = mistralVerificationState {
-                        Text(message)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.red.opacity(0.88))
-                            .fixedSize(horizontal: false, vertical: true)
+                        errorText(message)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("DeepSeek API Key")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+
+                    APIKeyField(
+                        placeholder: "DEEPSEEK_API_KEY",
+                        text: $deepSeekAPIKey,
+                        state: deepSeekVerificationState,
+                        width: deepSeekAPIKeyFieldWidth
+                    )
+
+                    keychainControls(
+                        providerName: "DeepSeek",
+                        isLoading: isLoadingDeepSeekFromKeychain,
+                        isVerified: isDeepSeekKeyVerified,
+                        state: deepSeekKeychainState,
+                        loadNotFound: deepSeekKeychainLoadNotFound,
+                        load: loadDeepSeekFromKeychain,
+                        save: saveDeepSeekToKeychain
+                    )
+
+                    Text("Default model: \(BrainStore.defaultDeepSeekModel)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+
+                    if case .failed(let message) = deepSeekVerificationState {
+                        errorText(message)
                     }
                 }
             }
@@ -8614,18 +8856,24 @@ private struct ModelConfigurationView: View {
                 }
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
-                .disabled(!isMistralKeyVerified)
+                .disabled(!canSaveSelectedModels)
             }
             .padding(.top, 4)
         }
         .padding(28)
         .onChange(of: mistralAPIKey) { _, newValue in
-            keychainSaveState = .idle
-            keychainLoadNotFound = false
+            mistralKeychainState = .idle
+            mistralKeychainLoadNotFound = false
             scheduleMistralVerification(for: newValue)
         }
+        .onChange(of: deepSeekAPIKey) { _, newValue in
+            deepSeekKeychainState = .idle
+            deepSeekKeychainLoadNotFound = false
+            scheduleDeepSeekVerification(for: newValue)
+        }
         .onDisappear {
-            verificationTask?.cancel()
+            mistralVerificationTask?.cancel()
+            deepSeekVerificationTask?.cancel()
         }
     }
 
@@ -8639,41 +8887,156 @@ private struct ModelConfigurationView: View {
             && mistralVerificationState == .verified
     }
 
+    private var cleanDeepSeekAPIKey: String {
+        deepSeekAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isDeepSeekKeyVerified: Bool {
+        !cleanDeepSeekAPIKey.isEmpty
+            && cleanDeepSeekAPIKey == verifiedDeepSeekAPIKey
+            && deepSeekVerificationState == .verified
+    }
+
+    private var canSaveSelectedModels: Bool {
+        (requiresMistral ? isMistralKeyVerified : true)
+            && (requiresDeepSeek ? isDeepSeekKeyVerified : true)
+    }
+
+    private var requiresMistral: Bool {
+        contentModel == .mistral || homeGenerationModel == .mistral || flashcardGenerationModel == .mistral
+    }
+
+    private var requiresDeepSeek: Bool {
+        contentModel == .deepseek || homeGenerationModel == .deepseek || flashcardGenerationModel == .deepseek
+    }
+
     private var mistralAPIKeyFieldWidth: CGFloat {
         let text = cleanMistralAPIKey.isEmpty ? "MISTRAL_API_KEY" : cleanMistralAPIKey
         return min(520, max(320, measuredTextWidth(text, font: .systemFont(ofSize: 14)) + 56))
     }
 
-    private func loadFromKeychain() {
-        keychainLoadNotFound = false
-        keychainSaveState = .idle
-        isLoadingFromKeychain = true
+    private var deepSeekAPIKeyFieldWidth: CGFloat {
+        let text = cleanDeepSeekAPIKey.isEmpty ? "DEEPSEEK_API_KEY" : cleanDeepSeekAPIKey
+        return min(520, max(320, measuredTextWidth(text, font: .systemFont(ofSize: 14)) + 56))
+    }
+
+    private func keychainControls(
+        providerName: String,
+        isLoading: Bool,
+        isVerified: Bool,
+        state: KeychainSaveState,
+        loadNotFound: Bool,
+        load: @escaping () -> Void,
+        save: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Button(action: load) {
+                    Label("Load from Keychain", systemImage: "key.viewfinder")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                .disabled(isLoading)
+                .help("Import the \(providerName) API key from Apple Passwords")
+
+                Button(action: save) {
+                    Label("Add to Keychain", systemImage: "key.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                .disabled(!isVerified || state == .saving)
+                .help("Save this \(providerName) API key to Apple Passwords")
+            }
+
+            if loadNotFound {
+                errorText("\(providerName) API key not found")
+            }
+
+            switch state {
+            case .idle, .saving:
+                EmptyView()
+            case .saved(let location):
+                Label(
+                    location == .applePasswords
+                        ? "Saved to Apple Passwords."
+                        : "Saved to Apple Passwords on this Mac.",
+                    systemImage: "checkmark.circle.fill"
+                )
+                .font(.system(size: 12))
+                .foregroundStyle(.green)
+            case .failed(let message):
+                errorText(message)
+            }
+        }
+    }
+
+    private func errorText(_ message: String) -> some View {
+        Text(message)
+            .font(.system(size: 12))
+            .foregroundStyle(.red.opacity(0.88))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func loadMistralFromKeychain() {
+        mistralKeychainLoadNotFound = false
+        mistralKeychainState = .idle
+        isLoadingMistralFromKeychain = true
 
         Task {
-            defer { isLoadingFromKeychain = false }
+            defer { isLoadingMistralFromKeychain = false }
 
             do {
                 guard let importedKey = try await MistralKeychainStore.loadMistralAPIKey()?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                       !importedKey.isEmpty
                 else {
-                    keychainLoadNotFound = true
+                    mistralKeychainLoadNotFound = true
                     return
                 }
 
                 mistralAPIKey = importedKey
                 scheduleMistralVerification(for: importedKey)
             } catch MistralKeychainStore.KeychainError.authenticationCancelled {
-                keychainSaveState = .failed("Authentication was cancelled.")
+                mistralKeychainState = .failed("Authentication was cancelled.")
             } catch {
-                keychainLoadNotFound = true
-                keychainSaveState = .failed(error.localizedDescription)
+                mistralKeychainLoadNotFound = true
+                mistralKeychainState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    private func loadDeepSeekFromKeychain() {
+        deepSeekKeychainLoadNotFound = false
+        deepSeekKeychainState = .idle
+        isLoadingDeepSeekFromKeychain = true
+
+        Task {
+            defer { isLoadingDeepSeekFromKeychain = false }
+
+            do {
+                guard let importedKey = try await MistralKeychainStore.loadDeepSeekAPIKey()?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                      !importedKey.isEmpty
+                else {
+                    deepSeekKeychainLoadNotFound = true
+                    return
+                }
+
+                deepSeekAPIKey = importedKey
+                scheduleDeepSeekVerification(for: importedKey)
+            } catch MistralKeychainStore.KeychainError.authenticationCancelled {
+                deepSeekKeychainState = .failed("Authentication was cancelled.")
+            } catch {
+                deepSeekKeychainLoadNotFound = true
+                deepSeekKeychainState = .failed(error.localizedDescription)
             }
         }
     }
 
     private func scheduleMistralVerification(for apiKey: String) {
-        verificationTask?.cancel()
+        mistralVerificationTask?.cancel()
 
         let cleanAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanAPIKey.isEmpty else {
@@ -8687,7 +9050,7 @@ private struct ModelConfigurationView: View {
         }
 
         mistralVerificationState = .verifying
-        verificationTask = Task {
+        mistralVerificationTask = Task {
             try? await Task.sleep(for: .milliseconds(450))
             guard !Task.isCancelled else { return }
 
@@ -8703,24 +9066,72 @@ private struct ModelConfigurationView: View {
         }
     }
 
-    private func saveToKeychain() {
-        keychainSaveState = .saving
+    private func scheduleDeepSeekVerification(for apiKey: String) {
+        deepSeekVerificationTask?.cancel()
+
+        let cleanAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanAPIKey.isEmpty else {
+            deepSeekVerificationState = .idle
+            return
+        }
+
+        if cleanAPIKey == verifiedDeepSeekAPIKey {
+            deepSeekVerificationState = .verified
+            return
+        }
+
+        deepSeekVerificationState = .verifying
+        deepSeekVerificationTask = Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled else { return }
+
+            do {
+                try await store.verifyAndSaveDeepSeekAPIKey(cleanAPIKey)
+                guard !Task.isCancelled else { return }
+                verifiedDeepSeekAPIKey = cleanAPIKey
+                deepSeekVerificationState = .verified
+            } catch {
+                guard !Task.isCancelled else { return }
+                deepSeekVerificationState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    private func saveMistralToKeychain() {
+        mistralKeychainState = .saving
 
         Task {
             do {
                 let location = try await store.saveMistralAPIKeyToKeychain(cleanMistralAPIKey)
-                keychainSaveState = .saved(location)
+                mistralKeychainState = .saved(location)
             } catch {
-                keychainSaveState = .failed(error.localizedDescription)
+                mistralKeychainState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    private func saveDeepSeekToKeychain() {
+        deepSeekKeychainState = .saving
+
+        Task {
+            do {
+                let location = try await store.saveDeepSeekAPIKeyToKeychain(cleanDeepSeekAPIKey)
+                deepSeekKeychainState = .saved(location)
+            } catch {
+                deepSeekKeychainState = .failed(error.localizedDescription)
             }
         }
     }
 
     private func saveSelectedConfiguration() {
-        store.selectAssistantModel(.mistral)
         store.saveModelConfiguration(
             mistralAPIKey: mistralAPIKey,
-            mistralModel: BrainStore.defaultMistralModel
+            mistralModel: BrainStore.defaultMistralModel,
+            deepSeekAPIKey: deepSeekAPIKey,
+            deepSeekModel: BrainStore.defaultDeepSeekModel,
+            contentModel: contentModel,
+            homeGenerationModel: homeGenerationModel,
+            flashcardGenerationModel: flashcardGenerationModel
         )
     }
 }
@@ -8732,14 +9143,15 @@ private enum KeychainSaveState: Equatable {
     case failed(String)
 }
 
-private struct MistralAPIKeyField: View {
+private struct APIKeyField: View {
+    let placeholder: String
     @Binding var text: String
     let state: APIKeyVerificationState
     let width: CGFloat
 
     var body: some View {
         ZStack(alignment: .trailing) {
-            SecureField("MISTRAL_API_KEY", text: $text)
+            SecureField(placeholder, text: $text)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 14))
                 .frame(width: width)
@@ -8789,94 +9201,198 @@ private struct ConfigurationField<Field: View>: View {
     }
 }
 
-private struct UsedModelsConfigurationView: View {
-    @ObservedObject var store: BrainStore
-    @Environment(\.dismiss) private var dismiss
-    @State private var promptModel: AssistantModel
-    @State private var summaryModel: HighlightSummaryModel
-    @State private var ollamaBaseURL: String
-    @State private var ollamaModel: String
-
-    init(store: BrainStore) {
-        self.store = store
-        let ollama = store.ollamaConfigurationSnapshot
-        _promptModel = State(initialValue: store.selectedAssistantModel)
-        _summaryModel = State(initialValue: store.selectedHighlightSummaryModel)
-        _ollamaBaseURL = State(initialValue: ollama.baseURL)
-        _ollamaModel = State(initialValue: ollama.model)
-    }
+private struct ModelRoutingRow<Control: View>: View {
+    let title: String
+    @ViewBuilder let control: () -> Control
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack(spacing: 14) {
-                Image(systemName: "cpu")
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundStyle(.primary.opacity(0.74))
+        HStack(spacing: 14) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.primary.opacity(0.82))
+                .lineLimit(1)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Models Used Where")
-                        .font(.system(size: 24, weight: .bold))
-                    Text("Choose the model used for editing prompts and highlight summaries.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+            Spacer(minLength: 12)
 
-            VStack(alignment: .leading, spacing: 14) {
-                ConfigurationField(title: "Prompt Editing Model") {
-                    Text("Mistral")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                }
-
-                ConfigurationField(title: "Highlight Compile Model") {
-                    Picker("Highlight Compile Model", selection: $summaryModel) {
-                        ForEach(HighlightSummaryModel.allCases) { model in
-                            Text(model.title).tag(model)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                }
-
-                ConfigurationField(title: "Ollama URL") {
-                    TextField(BrainStore.defaultOllamaURL, text: $ollamaBaseURL)
-                }
-
-                ConfigurationField(title: "Ollama Model") {
-                    TextField(BrainStore.defaultOllamaModel, text: $ollamaModel)
-                }
-            }
-
-            HStack(spacing: 12) {
-                Button {
-                    store.isShowingUsedModelsConfiguration = false
-                    dismiss()
-                } label: {
-                    Text("Cancel")
-                        .frame(maxWidth: .infinity)
-                }
-                .controlSize(.large)
-
-                Button {
-                    store.saveUsedModelConfiguration(
-                        promptModel: promptModel,
-                        summaryModel: summaryModel,
-                        ollamaBaseURL: ollamaBaseURL,
-                        ollamaModel: ollamaModel
-                    )
-                    dismiss()
-                } label: {
-                    Text("Save")
-                        .frame(maxWidth: .infinity)
-                }
-                .controlSize(.large)
-                .buttonStyle(.borderedProminent)
-            }
-            .padding(.top, 4)
+            control()
         }
-        .padding(28)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+}
+
+private struct ProviderLogoSwitch<Option: Hashable>: View {
+    @Binding var selection: Option
+    let options: [Option]
+    let title: (Option) -> String
+    let imageName: (Option) -> String
+    @State private var hoveredOption: Option?
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(options, id: \.self) { option in
+                Button {
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        selection = option
+                    }
+                } label: {
+                    Image(imageName(option))
+                        .renderingMode(.template)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 18, height: 18)
+                        .foregroundStyle(iconColor(for: option))
+                        .frame(width: 34, height: 28)
+                        .background {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(fillColor(for: option))
+                        }
+                        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .help(title(option))
+                .onHover { isHovering in
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        hoveredOption = isHovering ? option : nil
+                    }
+                }
+            }
+        }
+        .padding(2)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.07))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.primary.opacity(0.11), lineWidth: 1)
+        }
+        .fixedSize(horizontal: true, vertical: true)
+    }
+
+    private func iconColor(for option: Option) -> Color {
+        option == selection ? .primary : .secondary
+    }
+
+    private func fillColor(for option: Option) -> Color {
+        if option == selection {
+            return Color.primary.opacity(0.16)
+        }
+
+        if hoveredOption == option {
+            return Color.primary.opacity(0.08)
+        }
+
+        return .clear
+    }
+}
+
+private extension AssistantModel {
+    var providerLogoAssetName: String {
+        switch self {
+        case .mistral:
+            return "ProviderMistralLogo"
+        case .deepseek:
+            return "ProviderDeepSeekLogo"
+        }
+    }
+}
+
+private extension HighlightSummaryModel {
+    var providerLogoAssetName: String {
+        switch self {
+        case .mistral:
+            return "ProviderMistralLogo"
+        case .deepseek:
+            return "ProviderDeepSeekLogo"
+        case .ollama:
+            return "ProviderMistralLogo"
+        }
+    }
+}
+
+private struct StaticModelServiceLabel: View {
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image("ProviderMistralLogo")
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 16, height: 16)
+                .foregroundStyle(.primary)
+                .frame(width: 28, height: 26)
+                .background {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.primary.opacity(0.12))
+                }
+
+            Image(systemName: "lock.fill")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.secondary)
+        }
+        .padding(2)
+        .background {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.primary.opacity(0.06))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+        }
+        .fixedSize(horizontal: true, vertical: true)
+        .help("\(title) handles document OCR.")
+    }
+}
+
+private struct CompactModelMenu<Option: Hashable>: View {
+    @Binding var selection: Option
+    let options: [Option]
+    let title: (Option) -> String
+    @State private var isHovering = false
+
+    var body: some View {
+        Menu {
+            ForEach(options, id: \.self) { option in
+                Button {
+                    selection = option
+                } label: {
+                    if option == selection {
+                        Label(title(option), systemImage: "checkmark")
+                    } else {
+                        Text(title(option))
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Text(title(selection))
+                    .lineLimit(1)
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isHovering ? Color.primary.opacity(0.08) : Color.clear)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .fixedSize(horizontal: true, vertical: true)
+        }
+        .buttonStyle(.plain)
+        .menuStyle(.borderlessButton)
+        .fixedSize(horizontal: true, vertical: true)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.14)) {
+                isHovering = hovering
+            }
+        }
     }
 }
 
@@ -8887,7 +9403,7 @@ private struct HighlightSummaryCompilerView: View {
 
     init(store: BrainStore) {
         self.store = store
-        _selectedModel = State(initialValue: store.selectedHighlightSummaryModel)
+        _selectedModel = State(initialValue: store.selectedFlashcardGenerationModel)
     }
 
     var body: some View {
@@ -8909,12 +9425,12 @@ private struct HighlightSummaryCompilerView: View {
 
             ConfigurationField(title: "Model") {
                 Picker("Model", selection: $selectedModel) {
-                    ForEach(HighlightSummaryModel.allCases) { model in
+                    ForEach([HighlightSummaryModel.mistral, .deepseek]) { model in
                         Text(model.title).tag(model)
                     }
                 }
                 .labelsHidden()
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
             }
 
             HStack(spacing: 12) {
@@ -8928,6 +9444,7 @@ private struct HighlightSummaryCompilerView: View {
                 .controlSize(.large)
 
                 Button {
+                    store.selectedFlashcardGenerationModel = selectedModel
                     store.compileCurrentHighlightSummary()
                     dismiss()
                 } label: {

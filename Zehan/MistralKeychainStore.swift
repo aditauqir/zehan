@@ -48,7 +48,7 @@ enum MistralKeychainStore {
         case missingAccessGroup
         case authenticationUnavailable(String)
         case authenticationCancelled
-        case saveFailed(OSStatus)
+        case saveFailed(String, OSStatus)
 
         var errorDescription: String? {
             switch self {
@@ -58,11 +58,11 @@ enum MistralKeychainStore {
                 return message
             case .authenticationCancelled:
                 return "Authentication was cancelled."
-            case .saveFailed(let status):
+            case .saveFailed(let providerName, let status):
                 if let message = SecCopyErrorMessageString(status, nil) as String? {
-                    return "Couldn't save the Mistral API key to Apple Passwords (\(message))."
+                    return "Couldn't save the \(providerName) API key to Apple Passwords (\(message))."
                 }
-                return "Couldn't save the Mistral API key to Apple Passwords (error \(status))."
+                return "Couldn't save the \(providerName) API key to Apple Passwords (error \(status))."
             }
         }
     }
@@ -73,14 +73,57 @@ enum MistralKeychainStore {
     }
 
     static let appName = "Zirn"
-    private static let mistralServer = "api.mistral.ai"
     private static let legacyGenericService = appName
     private static let legacyGenericAccount = "Mistral API Key"
 
+    enum Provider {
+        case mistral
+        case deepSeek
+
+        var displayName: String {
+            switch self {
+            case .mistral:
+                return "Mistral"
+            case .deepSeek:
+                return "DeepSeek"
+            }
+        }
+
+        var server: String {
+            switch self {
+            case .mistral:
+                return "api.mistral.ai"
+            case .deepSeek:
+                return "api.deepseek.com"
+            }
+        }
+
+        var account: String {
+            switch self {
+            case .mistral:
+                return appName
+            case .deepSeek:
+                return "\(appName) DeepSeek"
+            }
+        }
+
+        var description: String {
+            "\(displayName) API Key"
+        }
+    }
+
     static func saveMistralAPIKey(_ apiKey: String) async throws -> SaveLocation {
+        try await saveAPIKey(apiKey, provider: .mistral)
+    }
+
+    static func saveDeepSeekAPIKey(_ apiKey: String) async throws -> SaveLocation {
+        try await saveAPIKey(apiKey, provider: .deepSeek)
+    }
+
+    private static func saveAPIKey(_ apiKey: String, provider: Provider) async throws -> SaveLocation {
         let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            deleteMistralAPIKey()
+            deleteAPIKey(provider: provider)
             return .localPasswords
         }
 
@@ -89,10 +132,10 @@ enum MistralKeychainStore {
         }
 
         try await authenticateUser(
-            reason: "Authenticate to save your Mistral API key to Apple Passwords."
+            reason: "Authenticate to save your \(provider.displayName) API key to Apple Passwords."
         )
 
-        deleteMistralAPIKey()
+        deleteAPIKey(provider: provider)
 
         let passwordData = Data(trimmed.utf8)
         let strategies: [SaveLocation] = [.applePasswords, .localPasswords]
@@ -102,6 +145,7 @@ enum MistralKeychainStore {
             let synchronizable = location == .applePasswords
             let status = addInternetPassword(
                 passwordData,
+                provider: provider,
                 accessGroup: accessGroup,
                 synchronizable: synchronizable
             )
@@ -113,6 +157,7 @@ enum MistralKeychainStore {
             if status == errSecDuplicateItem {
                 let updateStatus = updateExistingInternetPassword(
                     passwordData,
+                    provider: provider,
                     accessGroup: accessGroup,
                     synchronizable: synchronizable
                 )
@@ -126,12 +171,20 @@ enum MistralKeychainStore {
             lastStatus = status
         }
 
-        throw KeychainError.saveFailed(lastStatus)
+        throw KeychainError.saveFailed(provider.displayName, lastStatus)
     }
 
     static func loadMistralAPIKey() async throws -> String? {
+        try await loadAPIKey(provider: .mistral)
+    }
+
+    static func loadDeepSeekAPIKey() async throws -> String? {
+        try await loadAPIKey(provider: .deepSeek)
+    }
+
+    private static func loadAPIKey(provider: Provider) async throws -> String? {
         let context = LAContext()
-        context.localizedReason = "Authenticate to load your Mistral API key from Apple Passwords."
+        context.localizedReason = "Authenticate to load your \(provider.displayName) API key from Apple Passwords."
 
         var policyError: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) else {
@@ -140,19 +193,36 @@ enum MistralKeychainStore {
             )
         }
 
-        return loadStoredMistralAPIKey(authenticationContext: context)
+        return loadStoredAPIKey(provider: provider, authenticationContext: context)
     }
 
     static func hasSavedMistralAPIKey() -> Bool {
-        hasInternetPasswordEntry(synchronizable: kSecAttrSynchronizableAny)
-            || hasInternetPasswordEntry(synchronizable: kCFBooleanFalse as Any)
-            || loadLegacyGenericPassword() != nil
+        hasSavedAPIKey(provider: .mistral)
+    }
+
+    static func hasSavedDeepSeekAPIKey() -> Bool {
+        hasSavedAPIKey(provider: .deepSeek)
+    }
+
+    private static func hasSavedAPIKey(provider: Provider) -> Bool {
+        hasInternetPasswordEntry(provider: provider, synchronizable: kSecAttrSynchronizableAny)
+            || hasInternetPasswordEntry(provider: provider, synchronizable: kCFBooleanFalse as Any)
+            || (provider == .mistral && loadLegacyGenericPassword() != nil)
     }
 
     static func deleteMistralAPIKey() {
-        deleteInternetPassword(synchronizable: kSecAttrSynchronizableAny)
-        deleteInternetPassword(synchronizable: kCFBooleanFalse as Any)
+        deleteAPIKey(provider: .mistral)
+    }
 
+    static func deleteDeepSeekAPIKey() {
+        deleteAPIKey(provider: .deepSeek)
+    }
+
+    private static func deleteAPIKey(provider: Provider) {
+        deleteInternetPassword(provider: provider, synchronizable: kSecAttrSynchronizableAny)
+        deleteInternetPassword(provider: provider, synchronizable: kCFBooleanFalse as Any)
+
+        guard provider == .mistral else { return }
         let genericQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: legacyGenericService,
@@ -201,7 +271,7 @@ enum MistralKeychainStore {
             .userPresence,
             &error
         ) else {
-            throw KeychainError.saveFailed(errSecParam)
+            throw KeychainError.saveFailed("Model", errSecParam)
         }
 
         return accessControl
@@ -209,6 +279,7 @@ enum MistralKeychainStore {
 
     private static func internetPasswordAttributes(
         passwordData: Data,
+        provider: Provider,
         accessGroup: String,
         synchronizable: Bool
     ) throws -> [String: Any] {
@@ -217,13 +288,13 @@ enum MistralKeychainStore {
             kSecClass as String: kSecClassInternetPassword,
             kSecAttrAccessGroup as String: accessGroup,
             kSecAttrAccessControl as String: accessControl,
-            kSecAttrServer as String: mistralServer,
-            kSecAttrAccount as String: appName,
+            kSecAttrServer as String: provider.server,
+            kSecAttrAccount as String: provider.account,
             kSecAttrProtocol as String: kSecAttrProtocolHTTPS,
             kSecAttrPort as String: 443,
             kSecAttrPath as String: "/",
             kSecAttrLabel as String: appName,
-            kSecAttrDescription as String: "Mistral API Key",
+            kSecAttrDescription as String: provider.description,
             kSecValueData as String: passwordData,
             kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
             kSecAttrSynchronizable as String: synchronizable ? kCFBooleanTrue as Any : kCFBooleanFalse as Any
@@ -232,11 +303,13 @@ enum MistralKeychainStore {
 
     private static func addInternetPassword(
         _ passwordData: Data,
+        provider: Provider,
         accessGroup: String,
         synchronizable: Bool
     ) -> OSStatus {
         guard let attributes = try? internetPasswordAttributes(
             passwordData: passwordData,
+            provider: provider,
             accessGroup: accessGroup,
             synchronizable: synchronizable
         ) else {
@@ -247,6 +320,7 @@ enum MistralKeychainStore {
 
     private static func updateExistingInternetPassword(
         _ passwordData: Data,
+        provider: Provider,
         accessGroup: String,
         synchronizable: Bool
     ) -> OSStatus {
@@ -255,16 +329,16 @@ enum MistralKeychainStore {
         }
 
         let attributes: [String: Any] = [
-            kSecAttrAccessGroup as String: accessGroup,
             kSecAttrAccessControl as String: accessControl,
             kSecValueData as String: passwordData,
             kSecAttrLabel as String: appName,
-            kSecAttrDescription as String: "Mistral API Key",
+            kSecAttrDescription as String: provider.description,
             kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any
         ]
 
         var lastStatus = errSecItemNotFound
         for query in internetPasswordQueryVariants(
+            provider: provider,
             synchronizable: synchronizable ? kCFBooleanTrue as Any : kCFBooleanFalse as Any
         ) {
             let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
@@ -281,13 +355,14 @@ enum MistralKeychainStore {
     }
 
     private static func internetPasswordQuery(
+        provider: Provider,
         synchronizable: Any,
         accessGroup: String? = resolvedAccessGroup()
     ) -> [String: Any] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassInternetPassword,
-            kSecAttrServer as String: mistralServer,
-            kSecAttrAccount as String: appName,
+            kSecAttrServer as String: provider.server,
+            kSecAttrAccount as String: provider.account,
             kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
             kSecAttrSynchronizable as String: synchronizable
         ]
@@ -300,25 +375,26 @@ enum MistralKeychainStore {
     }
 
     private static func internetPasswordQueryVariants(
+        provider: Provider,
         synchronizable: Any
     ) -> [[String: Any]] {
         if let accessGroup = resolvedAccessGroup() {
             return [
-                internetPasswordQuery(synchronizable: synchronizable, accessGroup: accessGroup),
-                internetPasswordQuery(synchronizable: synchronizable, accessGroup: nil)
+                internetPasswordQuery(provider: provider, synchronizable: synchronizable, accessGroup: accessGroup),
+                internetPasswordQuery(provider: provider, synchronizable: synchronizable, accessGroup: nil)
             ]
         }
-        return [internetPasswordQuery(synchronizable: synchronizable, accessGroup: nil)]
+        return [internetPasswordQuery(provider: provider, synchronizable: synchronizable, accessGroup: nil)]
     }
 
-    private static func deleteInternetPassword(synchronizable: Any) {
-        for query in internetPasswordQueryVariants(synchronizable: synchronizable) {
+    private static func deleteInternetPassword(provider: Provider, synchronizable: Any) {
+        for query in internetPasswordQueryVariants(provider: provider, synchronizable: synchronizable) {
             SecItemDelete(query as CFDictionary)
         }
     }
 
-    private static func hasInternetPasswordEntry(synchronizable: Any) -> Bool {
-        for query in internetPasswordQueryVariants(synchronizable: synchronizable) {
+    private static func hasInternetPasswordEntry(provider: Provider, synchronizable: Any) -> Bool {
+        for query in internetPasswordQueryVariants(provider: provider, synchronizable: synchronizable) {
             var item: CFTypeRef?
             var lookup = query
             lookup[kSecReturnAttributes as String] = kCFBooleanTrue as Any
@@ -330,11 +406,14 @@ enum MistralKeychainStore {
         return false
     }
 
-    private static func loadStoredMistralAPIKey(authenticationContext: LAContext) -> String? {
-        let accountCandidates = [appName, appName.lowercased(), legacyGenericAccount]
+    private static func loadStoredAPIKey(provider: Provider, authenticationContext: LAContext) -> String? {
+        var accountCandidates = [provider.account]
+        if provider == .mistral {
+            accountCandidates.append(contentsOf: [appName, appName.lowercased(), legacyGenericAccount])
+        }
         for account in accountCandidates {
             if let key = loadInternetPassword(
-                server: mistralServer,
+                server: provider.server,
                 account: account,
                 synchronizable: kSecAttrSynchronizableAny,
                 authenticationContext: authenticationContext
@@ -343,7 +422,7 @@ enum MistralKeychainStore {
             }
 
             if let key = loadInternetPassword(
-                server: mistralServer,
+                server: provider.server,
                 account: account,
                 synchronizable: kCFBooleanFalse as Any,
                 authenticationContext: authenticationContext
@@ -353,13 +432,13 @@ enum MistralKeychainStore {
         }
 
         if let key = loadBestMatchingInternetPassword(
-            forServer: mistralServer,
+            provider: provider,
             authenticationContext: authenticationContext
         ) {
             return key
         }
 
-        return loadLegacyGenericPassword()
+        return provider == .mistral ? loadLegacyGenericPassword() : nil
     }
 
     private static func loadInternetPassword(
@@ -409,7 +488,7 @@ enum MistralKeychainStore {
     }
 
     private static func loadBestMatchingInternetPassword(
-        forServer server: String,
+        provider: Provider,
         authenticationContext: LAContext?
     ) -> String? {
         let queryBases: [[String: Any]] = {
@@ -417,7 +496,7 @@ enum MistralKeychainStore {
             if let accessGroup = resolvedAccessGroup() {
                 queries.append([
                     kSecClass as String: kSecClassInternetPassword,
-                    kSecAttrServer as String: server,
+                    kSecAttrServer as String: provider.server,
                     kSecAttrAccessGroup as String: accessGroup,
                     kSecReturnData as String: kCFBooleanTrue as Any,
                     kSecReturnAttributes as String: kCFBooleanTrue as Any,
@@ -427,7 +506,7 @@ enum MistralKeychainStore {
                 ])
                 queries.append([
                     kSecClass as String: kSecClassInternetPassword,
-                    kSecAttrServer as String: server,
+                    kSecAttrServer as String: provider.server,
                     kSecAttrAccessGroup as String: accessGroup,
                     kSecReturnData as String: kCFBooleanTrue as Any,
                     kSecReturnAttributes as String: kCFBooleanTrue as Any,
@@ -438,7 +517,7 @@ enum MistralKeychainStore {
             }
             queries.append([
                 kSecClass as String: kSecClassInternetPassword,
-                kSecAttrServer as String: server,
+                kSecAttrServer as String: provider.server,
                 kSecReturnData as String: kCFBooleanTrue as Any,
                 kSecReturnAttributes as String: kCFBooleanTrue as Any,
                 kSecMatchLimit as String: kSecMatchLimitAll,
@@ -447,7 +526,7 @@ enum MistralKeychainStore {
             ])
             queries.append([
                 kSecClass as String: kSecClassInternetPassword,
-                kSecAttrServer as String: server,
+                kSecAttrServer as String: provider.server,
                 kSecReturnData as String: kCFBooleanTrue as Any,
                 kSecReturnAttributes as String: kCFBooleanTrue as Any,
                 kSecMatchLimit as String: kSecMatchLimitAll,
@@ -459,7 +538,7 @@ enum MistralKeychainStore {
 
         for query in queryBases {
             if let items = copyMatchingItems(from: query, authenticationContext: authenticationContext),
-               let match = bestMatchingPassword(from: items) {
+               let match = bestMatchingPassword(from: items, provider: provider) {
                 return match
             }
         }
@@ -478,7 +557,8 @@ enum MistralKeychainStore {
         return copyPasswordData(from: query, authenticationContext: nil)
     }
 
-    private static func bestMatchingPassword(from items: [[String: Any]]) -> String? {
+    private static func bestMatchingPassword(from items: [[String: Any]], provider: Provider) -> String? {
+        let providerName = provider.displayName.lowercased()
         let ranked = items.compactMap { item -> (Int, String)? in
             guard let data = item[kSecValueData as String] as? Data,
                   let password = String(data: data, encoding: .utf8),
@@ -494,9 +574,9 @@ enum MistralKeychainStore {
             var score = 0
             if account.contains("zirn") { score += 4 }
             if label.contains("zirn") { score += 3 }
-            if description.contains("mistral") { score += 2 }
-            if account.contains("mistral") { score += 2 }
-            if label.contains("mistral") { score += 1 }
+            if description.contains(providerName) { score += 2 }
+            if account.contains(providerName) { score += 2 }
+            if label.contains(providerName) { score += 1 }
 
             return (score, password)
         }
