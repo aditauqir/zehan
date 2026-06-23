@@ -1,5 +1,17 @@
 # Patch Notes
 
+## v1.4.1 (Raxat)
+
+- Redesigned the Zirn Chat start screen with PT Serif branding, the full-color app icon, and a centered composer that animates into place when a conversation begins.
+- Added recent conversations below the chat input on the start screen, showing the three latest chats with a Show more popover for the rest.
+- Reworked the active chat composer so it floats above the thread, sits closer to the footer, and grows dynamically from one line up to five lines before scrolling inside the field.
+- Fixed chat input caret alignment, Return vs Shift-Return behavior, and copy/paste routing so Cmd-C works on selected response text without stealing focus from the input field.
+- Added multi-conversation Zirn Chat history with conversation switching, new-chat creation, deletion, and persisted session storage per vault.
+- Added a menu bar usage gauge that tracks combined Mistral, Mistral OCR, and DeepSeek spend against a soft $10 budget, with per-provider breakdowns.
+- Improved launch responsiveness by deferring automatic vault reopen until after the first frame instead of blocking startup on the main thread.
+- Fixed Home regeneration so highlight-only Markdown edits no longer trigger unnecessary Home recompilation.
+- Changed the app version to `1.4.1` and kept the codename `Raxat`.
+
 ## v1.4 (Raxat)
 
 - Added DeepSeek as a beta model provider with API key verification, model persistence, and Apple Keychain saving/loading alongside Mistral.

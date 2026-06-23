@@ -193,7 +193,126 @@ struct ZirnApp: App {
                 .keyboardShortcut("/", modifiers: [.command, .shift])
             }
         }
+
+        MenuBarExtra {
+            UsageStatusBarView(store: store)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "gauge.with.dots.needle.50percent")
+                Text(store.totalUsagePercentLabel)
+                    .monospacedDigit()
+            }
+        }
+        .menuBarExtraStyle(.window)
     }
+}
+
+private struct UsageStatusBarView: View {
+    @ObservedObject var store: BrainStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: "gauge.with.dots.needle.50percent")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.78))
+                    .frame(width: 30, height: 30)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Usage")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.primary)
+
+                    Text(store.totalUsageLabel)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+
+                Spacer(minLength: 18)
+
+                Text(store.totalUsagePercentLabel)
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(.primary)
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+            }
+
+            ProgressView(value: store.totalUsageFraction)
+                .progressViewStyle(.linear)
+                .controlSize(.small)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 9) {
+                UsageBreakdownRow(
+                    title: "Mistral usage",
+                    value: store.mistralUsageBreakdownLabel,
+                    icon: .asset("ProviderMistralLogo")
+                )
+
+                UsageBreakdownRow(
+                    title: "Mistral OCR",
+                    value: store.mistralOCRUsageBreakdownLabel,
+                    icon: .symbol("doc.viewfinder")
+                )
+
+                UsageBreakdownRow(
+                    title: "DeepSeek usage",
+                    value: store.deepSeekUsageBreakdownLabel,
+                    icon: .asset("ProviderDeepSeekLogo")
+                )
+            }
+        }
+        .padding(14)
+        .frame(width: 280)
+    }
+}
+
+private struct UsageBreakdownRow: View {
+    let title: String
+    let value: String
+    let icon: UsageBreakdownIcon
+
+    var body: some View {
+        HStack(spacing: 9) {
+            iconView
+                .frame(width: 18, height: 18)
+
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.primary.opacity(0.86))
+
+            Spacer(minLength: 8)
+
+            Text(value)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(1)
+        }
+    }
+
+    @ViewBuilder
+    private var iconView: some View {
+        switch icon {
+        case .asset(let name):
+            Image(name)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(.secondary)
+        case .symbol(let name):
+            Image(systemName: name)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private enum UsageBreakdownIcon {
+    case asset(String)
+    case symbol(String)
 }
 
 private enum ZirnReleaseInfo {
@@ -201,7 +320,7 @@ private enum ZirnReleaseInfo {
 
     static var displayVersion: String {
         let version = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
-            ?? "1.4"
+            ?? "1.4.1"
         return "v\(version) (\(codename))"
     }
 }

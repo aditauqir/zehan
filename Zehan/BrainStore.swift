@@ -100,8 +100,11 @@ final class BrainStore: ObservableObject {
     @Published var helpDeskMarkdownSuggestions: [HelpDeskMarkdownSuggestion] = []
     @Published private(set) var helpDeskSuggestionsDisabledConversationIDs: Set<HelpDeskConversation.ID> = []
     @Published private(set) var mistralBudgetSpentUSD = 0.0
+    @Published private(set) var mistralOCRBudgetSpentUSD = 0.0
     @Published private(set) var mistralOCRPagesUsed = 0
     @Published private(set) var mistralTokensConsumed = 0
+    @Published private(set) var deepSeekBudgetSpentUSD = 0.0
+    @Published private(set) var deepSeekTokensConsumed = 0
     @Published private(set) var mistralRateLimitTokens: Int?
     @Published private(set) var mistralRateLimitTokensRemaining: Int?
 
@@ -115,8 +118,11 @@ final class BrainStore: ObservableObject {
     private let deepSeekAPIKeyKey = "Assistant.DeepSeekAPIKey"
     private let deepSeekModelKey = "Assistant.DeepSeekModel"
     private let mistralBudgetSpentUSDKey = "Assistant.MistralBudgetSpentUSD"
+    private let mistralOCRBudgetSpentUSDKey = "Assistant.MistralOCRBudgetSpentUSD"
     private let mistralOCRPagesUsedKey = "Assistant.MistralOCRPagesUsed"
     private let mistralTokensConsumedKey = "Assistant.MistralTokensConsumed"
+    private let deepSeekBudgetSpentUSDKey = "Assistant.DeepSeekBudgetSpentUSD"
+    private let deepSeekTokensConsumedKey = "Assistant.DeepSeekTokensConsumed"
     private let selectedAssistantModelKey = "Assistant.SelectedModel"
     private let selectedHighlightSummaryModelKey = "Assistant.HighlightSummaryModel"
     private let selectedHomeGenerationModelKey = "Assistant.HomeGenerationModel"
@@ -136,6 +142,7 @@ final class BrainStore: ObservableObject {
     private var assistantGenerationTask: Task<Void, Never>?
     private var homeCompilationTask: Task<Void, Never>?
     private var lastHomeSourceDiceTokensForSimilarityCheck: [String]?
+    private var suppressNextAutosaveHomeCompilation = false
     private var homePreparedNoteCache: [String: HomePreparedNoteCacheEntry] = [:]
     private var cachedHomeSourceNotes: [HomePageSourceNote]?
     private var cachedHomePagePresentationMarkdown: String?
@@ -161,8 +168,13 @@ final class BrainStore: ObservableObject {
     static let defaultOllamaModel = "llama3.1"
     static let defaultOllamaURL = "http://localhost:11434"
 
-    private static let mistralInputPricePerMillionTokens = 0.50
-    private static let mistralOutputPricePerMillionTokens = 1.50
+    private static let usageSoftBudgetUSD = 10.0
+    private static let mistralInputPricePerMillionTokens = 2.00
+    private static let mistralOutputPricePerMillionTokens = 6.00
+    private static let mistralOCRPricePerThousandPages = 2.00
+    private static let deepSeekInputCacheMissPricePerMillionTokens = 0.14
+    private static let deepSeekInputCacheHitPricePerMillionTokens = 0.0028
+    private static let deepSeekOutputPricePerMillionTokens = 0.28
     private static let mistralMaxUploadFileBytes = 512 * 1024 * 1024
     private static let mistralMaxOCRPagesPerRequest = 1_000
     private static let supportedImageAttachmentExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "tif", "tiff", "webp", "avif"]
@@ -226,6 +238,31 @@ final class BrainStore: ObservableObject {
         return min(1, Double(used) / Double(limit))
     }
 
+    var totalUsageSpendUSD: Double {
+        mistralBudgetSpentUSD + mistralOCRBudgetSpentUSD + deepSeekBudgetSpentUSD
+    }
+
+    var totalUsageFraction: Double {
+        guard Self.usageSoftBudgetUSD > 0 else { return 0 }
+        return min(1, max(0, totalUsageSpendUSD / Self.usageSoftBudgetUSD))
+    }
+
+    var totalUsagePercent: Int {
+        Int((totalUsageFraction * 100).rounded())
+    }
+
+    var totalUsagePercentLabel: String {
+        "\(totalUsagePercent)%"
+    }
+
+    var totalUsageLabel: String {
+        "\(formatUSD(totalUsageSpendUSD)) / \(formatUSD(Self.usageSoftBudgetUSD))"
+    }
+
+    var totalUsageDetail: String {
+        "Mistral, Mistral OCR, and DeepSeek spend"
+    }
+
     var contextUsagePercent: Int {
         Int((contextUsageFraction * 100).rounded())
     }
@@ -257,6 +294,18 @@ final class BrainStore: ObservableObject {
 
     var ocrUploadCounterDetail: String {
         "\(mistralOCRPagesUsed.formatted()) OCR pages processed · up to \(Self.mistralMaxOCRPagesPerRequest.formatted()) pages per upload"
+    }
+
+    var mistralUsageBreakdownLabel: String {
+        "\(formatUSD(mistralBudgetSpentUSD)) · \(mistralTokensConsumed.formatted()) tokens"
+    }
+
+    var mistralOCRUsageBreakdownLabel: String {
+        "\(formatUSD(mistralOCRBudgetSpentUSD)) · \(mistralOCRPagesUsed.formatted()) pages"
+    }
+
+    var deepSeekUsageBreakdownLabel: String {
+        "\(formatUSD(deepSeekBudgetSpentUSD)) · \(deepSeekTokensConsumed.formatted()) tokens"
     }
 
     var assistantConnectionStatus: AssistantConnectionStatus {
@@ -565,6 +614,7 @@ final class BrainStore: ObservableObject {
     }
 
     func updateContentFromEditor(_ newContent: String) {
+        let previousContent = content
         if let documentTitle = markdownDocumentTitle(in: newContent) {
             let uniqueTitle = uniqueTitle(for: documentTitle, excluding: currentNoteID)
             content = uniqueTitle == documentTitle
@@ -577,10 +627,23 @@ final class BrainStore: ObservableObject {
         } else {
             content = newContent
         }
+        let isHighlightOnlyChange = Self.isHighlightMarkerOnlyChange(from: previousContent, to: content)
+        suppressNextAutosaveHomeCompilation = isHighlightOnlyChange
         learnFromUserCorrectionIfNeeded(revisedContent: newContent)
         updateCachedHomeSourceNoteForCurrentEditor()
         scheduleAutosave()
-        scheduleLiveHomePageCompilation()
+        if !isHighlightOnlyChange {
+            scheduleLiveHomePageCompilation()
+        }
+    }
+
+    private static func isHighlightMarkerOnlyChange(from oldContent: String, to newContent: String) -> Bool {
+        guard oldContent != newContent else { return false }
+        return markdownWithoutHighlightMarkers(oldContent) == markdownWithoutHighlightMarkers(newContent)
+    }
+
+    private static func markdownWithoutHighlightMarkers(_ markdown: String) -> String {
+        markdown.replacingOccurrences(of: #"==(.+?)=="#, with: "$1", options: [.regularExpression])
     }
 
     func showPageSearch() {
@@ -706,7 +769,11 @@ final class BrainStore: ObservableObject {
                     )
                 )
                 status = statusText
-                scheduleLiveHomePageCompilation(delay: Self.homeCompilationAfterAutosaveNanoseconds)
+                if suppressNextAutosaveHomeCompilation {
+                    suppressNextAutosaveHomeCompilation = false
+                } else {
+                    scheduleLiveHomePageCompilation(delay: Self.homeCompilationAfterAutosaveNanoseconds)
+                }
             } catch {
                 status = error.localizedDescription
             }
@@ -1528,10 +1595,6 @@ final class BrainStore: ObservableObject {
                 user: prompt,
                 maxTokens: Self.pageFlashcardMaxOutputTokens
             )
-            recordMistralUsage(
-                inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
-                outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
-            )
         case .deepseek:
             result = try await generateWithDeepSeek(
                 system: pageFlashcardInstructions(),
@@ -1544,6 +1607,12 @@ final class BrainStore: ObservableObject {
                 user: prompt
             )
         }
+        recordUsage(
+            for: model,
+            result: result,
+            fallbackInputTokens: estimatedTokenCount(for: prompt),
+            fallbackOutputTokens: estimatedTokenCount(for: result.content)
+        )
 
         let cards = try parsePageFlashcards(from: result.content, fallbackNote: note)
         return PageFlashcardBundle(
@@ -1711,7 +1780,13 @@ final class BrainStore: ObservableObject {
 
     func selectAssistantModel(_ model: AssistantModel) {
         selectedAssistantModel = model
-        UserDefaults.standard.set(model.rawValue, forKey: selectedAssistantModelKey)
+        do {
+            try saveAssistantConfiguration()
+            status = "\(model.title) selected for Zirn Chat"
+        } catch {
+            UserDefaults.standard.set(model.rawValue, forKey: selectedAssistantModelKey)
+            status = error.localizedDescription
+        }
     }
 
     func submitAssistantPrompt() {
@@ -3577,12 +3652,12 @@ final class BrainStore: ObservableObject {
                 user: assistantInput,
                 maxTokens: Self.maxAssistantOutputTokens
             )
-            if selectedAssistantModel == .mistral {
-                recordMistralUsage(
-                    inputTokens: result.inputTokens ?? estimatedTokenCount(for: assistantInput),
-                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
-                )
-            }
+            recordUsage(
+                for: selectedAssistantModel,
+                result: result,
+                fallbackInputTokens: estimatedTokenCount(for: assistantInput),
+                fallbackOutputTokens: estimatedTokenCount(for: result.content)
+            )
             let providerTitle = selectedAssistantModel.title
             let output = result.content
 
@@ -3654,6 +3729,12 @@ final class BrainStore: ObservableObject {
                     messages: messages,
                     maxTokens: Self.assistantConversationOutputTokens
                 )
+                recordUsage(
+                    for: AssistantModel.deepseek,
+                    result: result,
+                    fallbackInputTokens: context.estimatedTokens,
+                    fallbackOutputTokens: estimatedTokenCount(for: result.content)
+                )
                 let cleanAnswer = cleanedAssistantMarkdown(result.content)
                 lastAssistantGenerationDiagnostics = AssistantGenerationDiagnostics(
                     contextBuildSeconds: context.buildDuration,
@@ -3705,12 +3786,12 @@ final class BrainStore: ObservableObject {
                 user: prompt,
                 maxTokens: Self.assistantConversationInsertionOutputTokens
             )
-            if selectedAssistantModel == .mistral {
-                recordMistralUsage(
-                    inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
-                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
-                )
-            }
+            recordUsage(
+                for: selectedAssistantModel,
+                result: result,
+                fallbackInputTokens: estimatedTokenCount(for: prompt),
+                fallbackOutputTokens: estimatedTokenCount(for: result.content)
+            )
 
             let markdown = cleanedWritingAssistantMarkdown(result.content)
             guard !markdown.isEmpty else {
@@ -3786,12 +3867,12 @@ final class BrainStore: ObservableObject {
             let estimatedInput = messages.reduce(helpDeskInstructions().count) { total, message in
                 total + (message["content"]?.count ?? 0)
             }
-            if selectedAssistantModel == .mistral {
-                recordMistralUsage(
-                    inputTokens: result.inputTokens ?? estimatedTokenCount(forCharacterCount: estimatedInput),
-                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
-                )
-            }
+            recordUsage(
+                for: selectedAssistantModel,
+                result: result,
+                fallbackInputTokens: estimatedTokenCount(forCharacterCount: estimatedInput),
+                fallbackOutputTokens: estimatedTokenCount(for: result.content)
+            )
 
             let answer = cleanedAssistantMarkdown(result.content)
             guard !answer.isEmpty else {
@@ -3881,10 +3962,6 @@ final class BrainStore: ObservableObject {
                     user: prompt,
                     maxTokens: Self.maxAssistantOutputTokens
                 )
-                recordMistralUsage(
-                    inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
-                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
-                )
             case .deepseek:
                 result = try await generateWithDeepSeek(
                     system: highlightSummaryInstructions(),
@@ -3897,6 +3974,12 @@ final class BrainStore: ObservableObject {
                     user: prompt
                 )
             }
+            recordUsage(
+                for: model,
+                result: result,
+                fallbackInputTokens: estimatedTokenCount(for: prompt),
+                fallbackOutputTokens: estimatedTokenCount(for: result.content)
+            )
 
             let duration = Date().timeIntervalSince(startedAt)
             let markdown = normalizedHighlightSummaryMarkdown(
@@ -3972,10 +4055,6 @@ final class BrainStore: ObservableObject {
                     user: prompt,
                     maxTokens: Self.maxAssistantOutputTokens
                 )
-                recordMistralUsage(
-                    inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
-                    outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
-                )
             case .deepseek:
                 result = try await generateWithDeepSeek(
                     system: homePageSummaryInstructions(),
@@ -3988,6 +4067,12 @@ final class BrainStore: ObservableObject {
                     user: prompt
                 )
             }
+            recordUsage(
+                for: model,
+                result: result,
+                fallbackInputTokens: estimatedTokenCount(for: prompt),
+                fallbackOutputTokens: estimatedTokenCount(for: result.content)
+            )
 
             if let generationID, activeHomeGenerationID != generationID {
                 return
@@ -4618,6 +4703,7 @@ final class BrainStore: ObservableObject {
 
         ## Page Summaries
         For each page, add a ### heading with the exact page title, then 2-4 short bullet points, max 100 words total for that page. No tables, numbered lists, code, divider lines, separator lines, or lines made only from repeated punctuation.
+        Treat any "Top-priority highlighted excerpts" section as the strongest source for that page's summary before using the remaining page content.
 
         Page contents or condensed page notes:
         \(pageBody)
@@ -4745,7 +4831,11 @@ final class BrainStore: ObservableObject {
                     )
                 }
             } else {
-                preparedMarkdown = cleanContent
+                preparedMarkdown = homePageSourceMarkdownWithHighlightPriority(
+                    note: note,
+                    highlights: highlights,
+                    content: cleanContent
+                )
             }
 
             prepared.append(
@@ -4780,10 +4870,6 @@ final class BrainStore: ObservableObject {
                 user: prompt,
                 maxTokens: 1_500
             )
-            recordMistralUsage(
-                inputTokens: result.inputTokens ?? estimatedTokenCount(for: prompt),
-                outputTokens: result.outputTokens ?? estimatedTokenCount(for: result.content)
-            )
         case .deepseek:
             result = try await generateWithDeepSeek(
                 system: homePageCondenseInstructions(),
@@ -4796,6 +4882,12 @@ final class BrainStore: ObservableObject {
                 user: prompt
             )
         }
+        recordUsage(
+            for: model,
+            result: result,
+            fallbackInputTokens: estimatedTokenCount(for: prompt),
+            fallbackOutputTokens: estimatedTokenCount(for: result.content)
+        )
 
         let clean = cleanedAssistantMarkdown(result.content)
         return clean.isEmpty ? promptExcerpt(note.content) : clean
@@ -4816,7 +4908,25 @@ final class BrainStore: ObservableObject {
         \(note.content)
 
         Task:
-        Condense this page into compact Markdown notes for a whole-vault Home summary. Preserve all important details and do not invent anything.
+        Condense this page into compact Markdown notes for a whole-vault Home summary. Treat the assembled highlighted data as the top priority before the rest of the page. Preserve all important details and do not invent anything.
+        """
+    }
+
+    private func homePageSourceMarkdownWithHighlightPriority(
+        note: HomePageSourceNote,
+        highlights: [String],
+        content: String
+    ) -> String {
+        guard let highlightBody = pageHighlightChunk(title: note.title, highlights: highlights) else {
+            return content
+        }
+
+        return """
+        Top-priority highlighted excerpts:
+        \(highlightBody)
+
+        Remaining page content:
+        \(content)
         """
     }
 
@@ -4902,11 +5012,18 @@ final class BrainStore: ObservableObject {
         wordLimit: Int = 100
     ) -> String {
         let plain = plainText(fromMarkdown: note.content)
+        let prioritizedHighlights = highlightedTextFragments(in: note.content)
+            .map { plainText(fromMarkdown: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: ". ")
         let withoutTitle = plain
             .replacingOccurrences(of: note.title, with: "", options: [.caseInsensitive])
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let source = withoutTitle.isEmpty ? plain : withoutTitle
+        let bodySource = withoutTitle.isEmpty ? plain : withoutTitle
+        let source = prioritizedHighlights.isEmpty
+            ? bodySource
+            : "\(prioritizedHighlights). \(bodySource)"
         guard !source.isEmpty else {
             return "No body text yet."
         }
@@ -6921,7 +7038,8 @@ final class BrainStore: ObservableObject {
             inputTokens: usage?["prompt_tokens"] as? Int
                 ?? usage?["input_tokens"] as? Int,
             outputTokens: usage?["completion_tokens"] as? Int
-                ?? usage?["output_tokens"] as? Int
+                ?? usage?["output_tokens"] as? Int,
+            cachedInputTokens: usage?["prompt_cache_hit_tokens"] as? Int
         )
     }
 
@@ -6946,6 +7064,50 @@ final class BrainStore: ObservableObject {
         return ""
     }
 
+    private func recordUsage(
+        for model: AssistantModel,
+        result: ChatCompletionResult,
+        fallbackInputTokens: Int,
+        fallbackOutputTokens: Int
+    ) {
+        switch model {
+        case .mistral:
+            recordMistralUsage(
+                inputTokens: result.inputTokens ?? fallbackInputTokens,
+                outputTokens: result.outputTokens ?? fallbackOutputTokens
+            )
+        case .deepseek:
+            recordDeepSeekUsage(
+                inputTokens: result.inputTokens ?? fallbackInputTokens,
+                outputTokens: result.outputTokens ?? fallbackOutputTokens,
+                cachedInputTokens: result.cachedInputTokens
+            )
+        }
+    }
+
+    private func recordUsage(
+        for model: HighlightSummaryModel,
+        result: ChatCompletionResult,
+        fallbackInputTokens: Int,
+        fallbackOutputTokens: Int
+    ) {
+        switch model {
+        case .mistral:
+            recordMistralUsage(
+                inputTokens: result.inputTokens ?? fallbackInputTokens,
+                outputTokens: result.outputTokens ?? fallbackOutputTokens
+            )
+        case .deepseek:
+            recordDeepSeekUsage(
+                inputTokens: result.inputTokens ?? fallbackInputTokens,
+                outputTokens: result.outputTokens ?? fallbackOutputTokens,
+                cachedInputTokens: result.cachedInputTokens
+            )
+        case .ollama:
+            break
+        }
+    }
+
     private func recordMistralUsage(inputTokens: Int, outputTokens: Int) {
         let cost = Self.mistralCostUSD(inputTokens: inputTokens, outputTokens: outputTokens)
         mistralBudgetSpentUSD += cost
@@ -6954,9 +7116,24 @@ final class BrainStore: ObservableObject {
         UserDefaults.standard.set(mistralTokensConsumed, forKey: mistralTokensConsumedKey)
     }
 
+    private func recordDeepSeekUsage(inputTokens: Int, outputTokens: Int, cachedInputTokens: Int?) {
+        let cost = Self.deepSeekCostUSD(
+            inputTokens: inputTokens,
+            outputTokens: outputTokens,
+            cachedInputTokens: cachedInputTokens
+        )
+        deepSeekBudgetSpentUSD += cost
+        deepSeekTokensConsumed += max(0, inputTokens) + max(0, outputTokens)
+        UserDefaults.standard.set(deepSeekBudgetSpentUSD, forKey: deepSeekBudgetSpentUSDKey)
+        UserDefaults.standard.set(deepSeekTokensConsumed, forKey: deepSeekTokensConsumedKey)
+    }
+
     private func recordMistralOCRUpload(pageCount: Int) {
-        mistralOCRPagesUsed += max(0, pageCount)
+        let cleanPageCount = max(0, pageCount)
+        mistralOCRPagesUsed += cleanPageCount
+        mistralOCRBudgetSpentUSD += Self.mistralOCRCostUSD(pageCount: cleanPageCount)
         UserDefaults.standard.set(mistralOCRPagesUsed, forKey: mistralOCRPagesUsedKey)
+        UserDefaults.standard.set(mistralOCRBudgetSpentUSD, forKey: mistralOCRBudgetSpentUSDKey)
     }
 
     private func recordMistralOCRUsage(from data: Data, fallbackPageCount: Int? = nil) {
@@ -6984,6 +7161,21 @@ final class BrainStore: ObservableObject {
         let inputCost = (Double(inputTokens) / 1_000_000) * mistralInputPricePerMillionTokens
         let outputCost = (Double(outputTokens) / 1_000_000) * mistralOutputPricePerMillionTokens
         return inputCost + outputCost
+    }
+
+    private static func mistralOCRCostUSD(pageCount: Int) -> Double {
+        (Double(max(0, pageCount)) / 1_000) * mistralOCRPricePerThousandPages
+    }
+
+    private static func deepSeekCostUSD(inputTokens: Int, outputTokens: Int, cachedInputTokens: Int?) -> Double {
+        let cleanInputTokens = max(0, inputTokens)
+        let cleanOutputTokens = max(0, outputTokens)
+        let cleanCachedInputTokens = min(max(0, cachedInputTokens ?? 0), cleanInputTokens)
+        let cacheMissInputTokens = cleanInputTokens - cleanCachedInputTokens
+        let cacheHitInputCost = (Double(cleanCachedInputTokens) / 1_000_000) * deepSeekInputCacheHitPricePerMillionTokens
+        let cacheMissInputCost = (Double(cacheMissInputTokens) / 1_000_000) * deepSeekInputCacheMissPricePerMillionTokens
+        let outputCost = (Double(cleanOutputTokens) / 1_000_000) * deepSeekOutputPricePerMillionTokens
+        return cacheHitInputCost + cacheMissInputCost + outputCost
     }
 
     private func formatUSD(_ value: Double) -> String {
@@ -7024,8 +7216,11 @@ final class BrainStore: ObservableObject {
         deepSeekAPIKey = defaults.string(forKey: deepSeekAPIKeyKey) ?? ""
         deepSeekModel = defaults.string(forKey: deepSeekModelKey) ?? Self.defaultDeepSeekModel
         mistralBudgetSpentUSD = defaults.double(forKey: mistralBudgetSpentUSDKey)
+        mistralOCRBudgetSpentUSD = defaults.double(forKey: mistralOCRBudgetSpentUSDKey)
         mistralOCRPagesUsed = defaults.integer(forKey: mistralOCRPagesUsedKey)
         mistralTokensConsumed = defaults.integer(forKey: mistralTokensConsumedKey)
+        deepSeekBudgetSpentUSD = defaults.double(forKey: deepSeekBudgetSpentUSDKey)
+        deepSeekTokensConsumed = defaults.integer(forKey: deepSeekTokensConsumedKey)
         defaults.removeObject(forKey: openAIAPIKeyKey)
         defaults.removeObject(forKey: openAIModelKey)
         defaults.removeObject(forKey: "Assistant.GroqAPIKey")
@@ -7056,8 +7251,11 @@ final class BrainStore: ObservableObject {
         defaults.set(deepSeekAPIKey, forKey: deepSeekAPIKeyKey)
         defaults.set(deepSeekModel, forKey: deepSeekModelKey)
         defaults.set(mistralBudgetSpentUSD, forKey: mistralBudgetSpentUSDKey)
+        defaults.set(mistralOCRBudgetSpentUSD, forKey: mistralOCRBudgetSpentUSDKey)
         defaults.set(mistralOCRPagesUsed, forKey: mistralOCRPagesUsedKey)
         defaults.set(mistralTokensConsumed, forKey: mistralTokensConsumedKey)
+        defaults.set(deepSeekBudgetSpentUSD, forKey: deepSeekBudgetSpentUSDKey)
+        defaults.set(deepSeekTokensConsumed, forKey: deepSeekTokensConsumedKey)
         defaults.set(ollamaModel, forKey: ollamaModelKey)
         defaults.set(cleanOllamaURL(ollamaURL), forKey: ollamaURLKey)
         defaults.removeObject(forKey: openAIAPIKeyKey)
@@ -8769,6 +8967,14 @@ private struct ChatCompletionResult {
     let content: String
     let inputTokens: Int?
     let outputTokens: Int?
+    let cachedInputTokens: Int?
+
+    init(content: String, inputTokens: Int?, outputTokens: Int?, cachedInputTokens: Int? = nil) {
+        self.content = content
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.cachedInputTokens = cachedInputTokens
+    }
 }
 
 struct AssistantGenerationDiagnostics: Equatable {

@@ -324,6 +324,7 @@ private struct WorkspaceView: View {
     @State private var draggedSidebarItemID: SidebarItem.ID?
     @State private var typingStatus = MarkdownTypingStatus()
     @State private var isEditorFlashcardOpen = false
+    @State private var readingHighlightRequestID = 0
     @FocusState private var isSidebarSearchFocused: Bool
 
     private var cleanSidebarSearchQuery: String {
@@ -457,10 +458,6 @@ private struct WorkspaceView: View {
                         isEditingMarkdown = false
                     }
 
-                    ContextUsageBar(store: store)
-
-                    OCRUploadCounterView(store: store)
-
                     NoteGraphView(
                         notes: store.notes,
                         links: store.graphLinks,
@@ -546,6 +543,7 @@ private struct WorkspaceView: View {
                             canDelete: !store.isViewingGeneratedPage && (store.selectedNoteID != nil || store.currentNoteID != nil),
                             canShowFlashcards: editorFlashcardNoteID != nil,
                             isFlashcardOpen: isEditorFlashcardOpen,
+                            canUseFormattingTools: !isReadingMode,
                             typingStatus: typingStatus,
                             newPage: {
                                 isEditingMarkdown = false
@@ -570,7 +568,13 @@ private struct WorkspaceView: View {
                             bold: { NSApp.sendAction(NSSelectorFromString("toggleBoldface:"), to: nil, from: nil) },
                             italic: { NSApp.sendAction(NSSelectorFromString("toggleItalics:"), to: nil, from: nil) },
                             underline: { NSApp.sendAction(NSSelectorFromString("underline:"), to: nil, from: nil) },
-                            highlight: { NSApp.sendAction(NSSelectorFromString("highlightSelection:"), to: nil, from: nil) }
+                            highlight: {
+                                if isReadingMode {
+                                    readingHighlightRequestID += 1
+                                } else {
+                                    NSApp.sendAction(NSSelectorFromString("highlightSelection:"), to: nil, from: nil)
+                                }
+                            }
                         )
 
                         Spacer(minLength: 0)
@@ -628,13 +632,14 @@ private struct WorkspaceView: View {
                                 imageData: store.markdownImageData,
                                 insertImageFile: store.insertMarkdownImage,
                                 insertImageData: store.insertMarkdownImage,
+                                highlightRequestID: readingHighlightRequestID,
                                 typingStatus: $typingStatus
                             )
                         }
                     }
                     .padding(.horizontal, 38)
                     .padding(.top, 18)
-                    .padding(.bottom, 18)
+                    .padding(.bottom, store.isShowingHelpDesk ? 4 : 18)
 
                     HStack {
                         if store.isShowingHelpDesk {
@@ -679,7 +684,7 @@ private struct WorkspaceView: View {
                 .background(Color(nsColor: .textBackgroundColor))
 
                 HStack(alignment: .bottom, spacing: 10) {
-                    if !isReadingMode && !store.isViewingGeneratedPage && !isEditorFlashcardOpen {
+                    if !isReadingMode && !store.isViewingGeneratedPage && !isEditorFlashcardOpen && !store.isShowingHelpDesk {
                         Color.clear
                             .frame(width: readingToggleSize, height: readingToggleSize)
                             .accessibilityHidden(true)
@@ -1115,6 +1120,7 @@ private struct DocumentChromeControls: View {
     let canDelete: Bool
     let canShowFlashcards: Bool
     let isFlashcardOpen: Bool
+    let canUseFormattingTools: Bool
     let typingStatus: MarkdownTypingStatus
     let newPage: () -> Void
     let flashcards: () -> Void
@@ -1144,29 +1150,33 @@ private struct DocumentChromeControls: View {
 
             GlassChromeIconButton(
                 systemImage: "bold",
-                help: "Bold",
+                help: canUseFormattingTools ? "Bold" : "Bold is unavailable in Reading Mode",
                 isActive: typingStatus.isBold,
                 action: bold
             )
+            .disabled(!canUseFormattingTools)
 
             GlassChromeIconButton(
                 systemImage: "italic",
-                help: "Italic",
+                help: canUseFormattingTools ? "Italic" : "Italic is unavailable in Reading Mode",
                 isActive: typingStatus.isItalic,
                 action: italic
             )
+            .disabled(!canUseFormattingTools)
 
             GlassChromeIconButton(
                 systemImage: "underline",
-                help: "Underline",
+                help: canUseFormattingTools ? "Underline" : "Underline is unavailable in Reading Mode",
                 isActive: typingStatus.isUnderline,
                 action: underline
             )
+            .disabled(!canUseFormattingTools)
 
             GlassChromeIconButton(
                 systemImage: "paintbrush.pointed",
-                help: "Highlight",
-                isActive: typingStatus.isHighlight,
+                help: canUseFormattingTools ? "Highlight" : "Highlight selected text in Reading Mode",
+                isActive: !canUseFormattingTools || typingStatus.isHighlight,
+                activeIconColor: .white,
                 action: highlight
             )
 
@@ -1344,6 +1354,7 @@ private struct GlassChromeIconButton: View {
     let help: String
     var isActive = false
     var isDestructive = false
+    var activeIconColor: Color?
     let action: () -> Void
 
     @Environment(\.isEnabled) private var isEnabled
@@ -1381,7 +1392,7 @@ private struct GlassChromeIconButton: View {
         }
 
         if isActive {
-            return Color.accentColor.opacity(isHovered ? 0.98 : 0.88)
+            return (activeIconColor ?? Color.accentColor).opacity(isHovered ? 0.98 : 0.88)
         }
 
         return .primary.opacity(isHovered ? 0.92 : 0.58)
@@ -1392,7 +1403,7 @@ private struct GlassChromeIconButton: View {
             return .red.opacity(0.42)
         }
 
-        return isActive ? Color.accentColor.opacity(0.34) : .primary.opacity(0.28)
+        return isActive ? (activeIconColor ?? Color.accentColor).opacity(0.34) : .primary.opacity(0.28)
     }
 
     private var highlightFill: Color {
@@ -1756,50 +1767,6 @@ private extension Array where Element == CGPoint {
 private extension Collection {
     subscript(safe index: Index) -> Element? {
         indices.contains(index) ? self[index] : nil
-    }
-}
-
-private struct ContextUsageBar: View {
-    @ObservedObject var store: BrainStore
-
-    var body: some View {
-        HStack {
-            Label("Usage", systemImage: "gauge.with.dots.needle.50percent")
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(.secondary)
-
-            Spacer()
-
-            Text(store.mistralRateLimitTokens == nil ? store.contextUsageLabel : "\(store.contextUsagePercent)%")
-                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-                .foregroundStyle(.secondary)
-                .contentTransition(.numericText())
-                .help("\(store.contextUsageLabel) · \(store.contextUsageDetail)")
-        }
-        .padding(.horizontal, 2)
-        .padding(.top, 2)
-        .frame(height: 20)
-    }
-}
-
-private struct OCRUploadCounterView: View {
-    @ObservedObject var store: BrainStore
-
-    var body: some View {
-        HStack {
-            Label("Uploads", systemImage: "doc.viewfinder")
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(.secondary)
-
-            Spacer()
-
-            Text(store.ocrUploadCounterLabel)
-                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-                .foregroundStyle(.secondary)
-                .contentTransition(.numericText())
-        }
-        .padding(.horizontal, 2)
-        .frame(height: 20)
     }
 }
 
@@ -2451,14 +2418,295 @@ private struct HighlightSummarySidebarRow: View {
     }
 }
 
+private enum HelpDeskComposerMetrics {
+    static let fontSize: CGFloat = 14
+    static let maxVisibleLines = 5
+    static let verticalInset: CGFloat = 6
+    static let textVerticalInset: CGFloat = 6
+    static let minInputHeight: CGFloat = 32
+
+    static var lineHeight: CGFloat {
+        ceil(fontSize * 1.38)
+    }
+
+    static var maxInputHeight: CGFloat {
+        lineHeight * CGFloat(maxVisibleLines) + verticalInset
+    }
+}
+
+private struct HelpDeskPromptInputView: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var selectionRange: NSRange
+    @Binding var contentHeight: CGFloat
+    let onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, selectionRange: $selectionRange, contentHeight: $contentHeight, onSubmit: onSubmit)
+    }
+
+    func makeNSView(context: Context) -> HelpDeskPromptScrollView {
+        let scrollView = HelpDeskPromptScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.scrollerStyle = .overlay
+        scrollView.onContentHeightChange = { newHeight in
+            context.coordinator.updateContentHeight(newHeight)
+        }
+
+        let textView = HelpDeskPromptNSTextView()
+        textView.onSubmit = { context.coordinator.submit() }
+        textView.delegate = context.coordinator
+        textView.string = text
+        textView.drawsBackground = false
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.textContainerInset = NSSize(width: 0, height: HelpDeskComposerMetrics.textVerticalInset)
+        textView.font = NSFont.systemFont(ofSize: HelpDeskComposerMetrics.fontSize)
+        textView.textColor = .labelColor
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.containerSize = NSSize(
+            width: scrollView.contentSize.width,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        textView.setSelectedRange(clamped(selectionRange, in: text))
+        scrollView.syncDocumentViewFrame()
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: HelpDeskPromptScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? HelpDeskPromptNSTextView else { return }
+        context.coordinator.text = $text
+        context.coordinator.selectionRange = $selectionRange
+        context.coordinator.contentHeight = $contentHeight
+        context.coordinator.onSubmit = onSubmit
+        context.coordinator.textView = textView
+        scrollView.onContentHeightChange = { newHeight in
+            context.coordinator.updateContentHeight(newHeight)
+        }
+        textView.onSubmit = { context.coordinator.submit() }
+
+        if textView.string != text {
+            textView.string = text
+            textView.setSelectedRange(clamped(selectionRange, in: text))
+        }
+        scrollView.syncDocumentViewFrame()
+    }
+
+    private func clamped(_ range: NSRange, in text: String) -> NSRange {
+        let length = (text as NSString).length
+        let location = min(max(0, range.location), length)
+        return NSRange(location: location, length: min(range.length, max(0, length - location)))
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var text: Binding<String>
+        var selectionRange: Binding<NSRange>
+        var contentHeight: Binding<CGFloat>
+        var onSubmit: () -> Void
+        weak var textView: NSTextView?
+
+        init(
+            text: Binding<String>,
+            selectionRange: Binding<NSRange>,
+            contentHeight: Binding<CGFloat>,
+            onSubmit: @escaping () -> Void
+        ) {
+            self.text = text
+            self.selectionRange = selectionRange
+            self.contentHeight = contentHeight
+            self.onSubmit = onSubmit
+        }
+
+        func submit() {
+            onSubmit()
+        }
+
+        func updateContentHeight(_ newHeight: CGFloat) {
+            guard abs(contentHeight.wrappedValue - newHeight) > 0.5 else { return }
+            contentHeight.wrappedValue = newHeight
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            text.wrappedValue = textView.string
+            publishSelection(from: textView)
+            (textView.enclosingScrollView as? HelpDeskPromptScrollView)?.syncDocumentViewFrame()
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            publishSelection(from: textView)
+        }
+
+        private func publishSelection(from textView: NSTextView) {
+            selectionRange.wrappedValue = textView.selectedRange()
+        }
+    }
+}
+
+private final class HelpDeskPromptScrollView: NSScrollView {
+    var onContentHeightChange: ((CGFloat) -> Void)?
+
+    func syncDocumentViewFrame() {
+        guard let textView = documentView as? NSTextView,
+              let textContainer = textView.textContainer,
+              let layoutManager = textView.layoutManager
+        else { return }
+
+        let contentWidth = max(contentSize.width, 1)
+        textView.textContainer?.containerSize = NSSize(width: contentWidth, height: CGFloat.greatestFiniteMagnitude)
+        layoutManager.ensureLayout(for: textContainer)
+
+        let usedHeight = layoutManager.usedRect(for: textContainer).height
+        let inset = textView.textContainerInset
+        let contentNeeded = ceil(usedHeight + inset.height * 2)
+        let preferredVisibleHeight = min(
+            HelpDeskComposerMetrics.maxInputHeight,
+            max(HelpDeskComposerMetrics.minInputHeight, contentNeeded)
+        )
+        onContentHeightChange?(preferredVisibleHeight)
+
+        let visibleHeight = preferredVisibleHeight
+        let documentHeight = max(visibleHeight, contentNeeded)
+
+        textView.frame = NSRect(x: 0, y: 0, width: contentWidth, height: documentHeight)
+
+        if documentHeight > visibleHeight + 1 {
+            textView.scrollRangeToVisible(textView.selectedRange())
+        } else {
+            contentView.scroll(to: NSPoint(x: 0, y: max(0, documentHeight - visibleHeight)))
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        syncDocumentViewFrame()
+    }
+
+    override func resize(withOldSuperviewSize oldSize: NSSize) {
+        super.resize(withOldSuperviewSize: oldSize)
+        syncDocumentViewFrame()
+    }
+}
+
+private final class HelpDeskPromptNSTextView: NSTextView {
+    var onSubmit: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let isReturnKey = event.charactersIgnoringModifiers == "\r" || event.keyCode == 36 || event.keyCode == 76
+        if isReturnKey,
+           (modifiers.contains(.command) || !modifiers.contains(.shift)) {
+            onSubmit?()
+            return
+        }
+
+        super.keyDown(with: event)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags.contains(.command),
+              let characters = event.charactersIgnoringModifiers?.lowercased(),
+              characters == "c",
+              selectedRange().length == 0
+        else {
+            return super.performKeyEquivalent(with: event)
+        }
+
+        if NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) {
+            return true
+        }
+
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+private struct HelpDeskComposerFocusResigner: NSViewRepresentable {
+    func makeNSView(context: Context) -> HelpDeskComposerFocusEventView {
+        HelpDeskComposerFocusEventView()
+    }
+
+    func updateNSView(_ nsView: HelpDeskComposerFocusEventView, context: Context) {}
+}
+
+private final class HelpDeskComposerFocusEventView: NSView {
+    private var monitor: Any?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        removeMonitor()
+        guard window != nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
+            self?.handleMouseDown(event)
+            return event
+        }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    deinit {
+        removeMonitor()
+    }
+
+    private func removeMonitor() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+        }
+        monitor = nil
+    }
+
+    private func handleMouseDown(_ event: NSEvent) {
+        guard let window = event.window,
+              let contentView = window.contentView
+        else { return }
+
+        let location = contentView.convert(event.locationInWindow, from: nil)
+        guard let hitView = contentView.hitTest(location) else { return }
+
+        if hitView is HelpDeskPromptNSTextView
+            || hitView.enclosingScrollView?.documentView is HelpDeskPromptNSTextView {
+            return
+        }
+
+        if window.firstResponder is HelpDeskPromptNSTextView {
+            window.makeFirstResponder(nil)
+        }
+    }
+}
+
 private struct HelpDeskView: View {
     @ObservedObject var store: BrainStore
     @State private var conversationSearchQuery = ""
     @State private var isConversationPopoverPresented = false
+    @State private var isRecentChatsPopoverPresented = false
     @State private var isConversationMenuHovered = false
     @State private var isNewHovered = false
     @State private var isUploadHovered = false
     @State private var isSendHovered = false
+    @State private var isShowMoreHovered = false
+    @State private var helpDeskInputSelectionRange = NSRange(location: 0, length: 0)
+    @State private var helpDeskComposerContentHeight = HelpDeskComposerMetrics.minInputHeight
 
     private var selectedConversation: HelpDeskConversation? {
         guard let id = store.selectedHelpDeskConversationID else { return nil }
@@ -2469,77 +2717,37 @@ private struct HelpDeskView: View {
         store.helpDeskConversations.filter { !$0.messages.isEmpty }
     }
 
+    private var recentHistoryConversations: [HelpDeskConversation] {
+        historyConversations.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    private var previewRecentConversations: [HelpDeskConversation] {
+        Array(recentHistoryConversations.prefix(3))
+    }
+
+    private var overflowRecentConversations: [HelpDeskConversation] {
+        Array(recentHistoryConversations.dropFirst(3))
+    }
+
+    private var helpDeskMessageScrollBottomInset: CGFloat {
+        let attachmentHeight = store.helpDeskAttachment != nil ? 36.0 : 0.0
+        return helpDeskComposerContentHeight + attachmentHeight + 42
+    }
+
+    private var hasActiveConversation: Bool {
+        selectedConversation?.messages.isEmpty == false
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            header
-
-            Divider()
-                .opacity(0.35)
-
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        if let selectedConversation, !selectedConversation.messages.isEmpty {
-                            ForEach(selectedConversation.messages) { message in
-                                HelpDeskMessageBubble(
-                                    message: message,
-                                    openLinkedNote: { store.openLinkedNote(named: $0) },
-                                    imageURL: store.markdownImageURL,
-                                    imageData: store.markdownImageData,
-                                    isActionDisabled: store.isGeneratingHelpDeskResponse,
-                                    markdownSuggestion: store.areHelpDeskSuggestionsEnabled(
-                                        for: selectedConversation.id
-                                    )
-                                    ? store.helpDeskMarkdownSuggestions.first { $0.messageID == message.id }
-                                    : nil,
-                                    onRegenerate: {
-                                        store.regenerateHelpDeskResponse(assistantMessageID: message.id)
-                                    },
-                                    onAddToMarkdown: {
-                                        store.addHelpDeskMessageToMarkdown(messageID: message.id)
-                                    },
-                                    onApplyMarkdownSuggestion: {
-                                        store.applyHelpDeskMarkdownSuggestion(messageID: message.id)
-                                    },
-                                    onDismissMarkdownSuggestion: {
-                                        store.dismissHelpDeskMarkdownSuggestion(messageID: message.id)
-                                    },
-                                    onDisableSuggestionsForSession: {
-                                        store.disableHelpDeskSuggestionsForCurrentSession()
-                                    },
-                                    onDeleteExchange: {
-                                        store.deleteHelpDeskExchange(assistantMessageID: message.id)
-                                    }
-                                )
-                                .id(message.id)
-                            }
-                        } else {
-                            HelpDeskEmptyState()
-                                .frame(maxWidth: .infinity)
-                                .padding(.top, 34)
-                        }
-
-                        if store.isGeneratingHelpDeskResponse {
-                            HelpDeskThinkingBubble()
-                                .id("thinking")
-                        }
-                    }
-                    .padding(.horizontal, 34)
-                    .padding(.top, 18)
-                    .padding(.bottom, 20)
-                }
-                .onChange(of: selectedConversation?.messages.count ?? 0) { _, _ in
-                    scrollToBottom(proxy)
-                }
-                .onChange(of: store.isGeneratingHelpDeskResponse) { _, _ in
-                    scrollToBottom(proxy)
-                }
+        Group {
+            if hasActiveConversation {
+                activeConversationView
+            } else {
+                newConversationView
             }
-
-            composer
-                .padding(.horizontal, 34)
-                .padding(.bottom, 20)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.spring(response: 0.38, dampingFraction: 0.86), value: hasActiveConversation)
         .background(Color(nsColor: .textBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .sheet(isPresented: $store.isShowingHelpDeskConversationBrowser) {
@@ -2555,10 +2763,185 @@ private struct HelpDeskView: View {
         }
     }
 
+    private var activeConversationView: some View {
+        ZStack(alignment: .bottom) {
+            VStack(spacing: 0) {
+                header
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+
+                Divider()
+                    .opacity(0.35)
+                    .transition(.opacity)
+
+                messageScrollView
+                    .transition(.opacity)
+            }
+            .background(HelpDeskComposerFocusResigner())
+
+            composerBlock
+                .padding(.horizontal, 34)
+                .padding(.bottom, 4)
+        }
+    }
+
+    private var newConversationView: some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 0)
+
+            HelpDeskStartBrandView()
+                .padding(.bottom, 24)
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+
+            composerBlock
+                .padding(.horizontal, 34)
+                .padding(.bottom, 20)
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var composerBlock: some View {
+        VStack(spacing: 0) {
+            composer
+                .frame(maxWidth: hasActiveConversation ? .infinity : 760)
+
+            if !hasActiveConversation, !recentHistoryConversations.isEmpty {
+                recentConversationsSection
+                    .padding(.top, 28)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var recentConversationsSection: some View {
+        VStack(spacing: 2) {
+            ForEach(previewRecentConversations) { conversation in
+                HelpDeskRecentConversationRow(
+                    title: conversation.title,
+                    select: { store.selectHelpDeskConversation(id: conversation.id) }
+                )
+            }
+
+            if !overflowRecentConversations.isEmpty {
+                Button {
+                    isRecentChatsPopoverPresented.toggle()
+                } label: {
+                    HStack(spacing: 5) {
+                        Text("Show more")
+                            .font(.system(size: 12.5, weight: .medium))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10.5, weight: .semibold))
+                    }
+                    .foregroundStyle(.secondary.opacity(isShowMoreHovered ? 0.92 : 0.58))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 28)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering in
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        isShowMoreHovered = hovering
+                    }
+                }
+                .popover(isPresented: $isRecentChatsPopoverPresented, arrowEdge: .top) {
+                    recentConversationsOverflowPopover
+                }
+            }
+        }
+        .frame(maxWidth: 420)
+    }
+
+    private var recentConversationsOverflowPopover: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(overflowRecentConversations) { conversation in
+                HelpDeskRecentConversationRow(
+                    title: conversation.title,
+                    select: {
+                        store.selectHelpDeskConversation(id: conversation.id)
+                        isRecentChatsPopoverPresented = false
+                    }
+                )
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(width: 300)
+        .background(.regularMaterial)
+    }
+
+    private var messageScrollView: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    if let selectedConversation, !selectedConversation.messages.isEmpty {
+                        ForEach(selectedConversation.messages) { message in
+                            HelpDeskMessageBubble(
+                                message: message,
+                                openLinkedNote: { store.openLinkedNote(named: $0) },
+                                imageURL: store.markdownImageURL,
+                                imageData: store.markdownImageData,
+                                isActionDisabled: store.isGeneratingHelpDeskResponse,
+                                currentPageTitle: store.title,
+                                currentStatus: store.status,
+                                markdownSuggestion: store.areHelpDeskSuggestionsEnabled(
+                                    for: selectedConversation.id
+                                )
+                                ? store.helpDeskMarkdownSuggestions.first { $0.messageID == message.id }
+                                : nil,
+                                onRegenerate: {
+                                    store.regenerateHelpDeskResponse(assistantMessageID: message.id)
+                                },
+                                onAddToMarkdown: {
+                                    store.addHelpDeskMessageToMarkdown(messageID: message.id)
+                                },
+                                setLiveStatus: { status in
+                                    store.status = status
+                                },
+                                restoreLiveStatusIfCurrent: { previousStatus, hoverStatus in
+                                    if store.status == hoverStatus {
+                                        store.status = previousStatus
+                                    }
+                                },
+                                onApplyMarkdownSuggestion: {
+                                    store.applyHelpDeskMarkdownSuggestion(messageID: message.id)
+                                },
+                                onDismissMarkdownSuggestion: {
+                                    store.dismissHelpDeskMarkdownSuggestion(messageID: message.id)
+                                },
+                                onDisableSuggestionsForSession: {
+                                    store.disableHelpDeskSuggestionsForCurrentSession()
+                                },
+                                onDeleteExchange: {
+                                    store.deleteHelpDeskExchange(assistantMessageID: message.id)
+                                }
+                            )
+                            .id(message.id)
+                        }
+                    }
+
+                    if store.isGeneratingHelpDeskResponse {
+                        HelpDeskThinkingBubble()
+                            .id("thinking")
+                    }
+                }
+                .padding(.horizontal, 34)
+                .padding(.top, 18)
+                .padding(.bottom, helpDeskMessageScrollBottomInset)
+            }
+            .onChange(of: selectedConversation?.messages.count ?? 0) { _, _ in
+                scrollToBottom(proxy)
+            }
+            .onChange(of: store.isGeneratingHelpDeskResponse) { _, _ in
+                scrollToBottom(proxy)
+            }
+        }
+    }
+
     private var header: some View {
         HStack(spacing: 12) {
             Text("Zirn Chat")
-                .font(.system(size: 30, weight: .bold))
+                .font(.custom(AppFont.ptSerifRegular, size: AppFont.chatHeaderTitleSize))
 
             conversationMenu
 
@@ -2600,6 +2983,27 @@ private struct HelpDeskView: View {
         }
         .padding(.horizontal, 34)
         .padding(.vertical, 22)
+    }
+
+    private var chatModelSwitch: some View {
+        ProviderLogoSwitch(
+            selection: selectedChatModelBinding,
+            options: AssistantModel.allCases,
+            title: { $0.title },
+            imageName: { $0.providerLogoAssetName }
+        )
+        .scaleEffect(0.88)
+        .frame(width: 68, height: 30)
+        .disabled(store.isGeneratingHelpDeskResponse)
+        .opacity(store.isGeneratingHelpDeskResponse ? 0.48 : 1)
+        .help("Choose the model Zirn Chat uses")
+    }
+
+    private var selectedChatModelBinding: Binding<AssistantModel> {
+        Binding(
+            get: { store.selectedAssistantModel },
+            set: { store.selectAssistantModel($0) }
+        )
     }
 
     private var conversationMenu: some View {
@@ -2693,26 +3097,49 @@ private struct HelpDeskView: View {
                 }
             }
 
-            HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .bottom, spacing: 10) {
+                chatModelSwitch
+
+                Rectangle()
+                    .fill(Color.primary.opacity(0.10))
+                    .frame(width: 1, height: 22)
+
+                ZStack(alignment: .topLeading) {
+                    HelpDeskPromptInputView(
+                        text: $store.helpDeskInput,
+                        selectionRange: $helpDeskInputSelectionRange,
+                        contentHeight: $helpDeskComposerContentHeight,
+                        onSubmit: { store.submitHelpDeskPrompt() }
+                    )
+                    .frame(maxWidth: .infinity)
+                    .frame(height: helpDeskComposerContentHeight)
+                    .animation(.easeOut(duration: 0.12), value: helpDeskComposerContentHeight)
+
+                    if store.helpDeskInput.isEmpty {
+                        Text("Ask the vault")
+                            .font(.system(size: HelpDeskComposerMetrics.fontSize))
+                            .foregroundStyle(.secondary.opacity(0.68))
+                            .padding(.top, HelpDeskComposerMetrics.textVerticalInset)
+                            .allowsHitTesting(false)
+                    }
+                }
+
                 Button {
                     store.chooseHelpDeskAttachmentFromUser()
                 } label: {
                     Image(systemName: "paperclip")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.primary.opacity(isUploadHovered ? 0.92 : 0.72))
-                        .frame(width: 32, height: 32)
+                        .foregroundStyle(.primary.opacity(isUploadHovered ? 0.95 : 0.66))
+                        .frame(width: 30, height: 30)
                         .background {
-                            Circle()
-                                .fill(.ultraThinMaterial)
-                                .overlay {
-                                    Circle()
-                                        .fill(.white.opacity(isUploadHovered ? 0.15 : 0.04))
-                                }
-                                .overlay {
-                                    Circle()
-                                        .stroke(Color.primary.opacity(isUploadHovered ? 0.18 : 0.08), lineWidth: 0.8)
-                                }
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.primary.opacity(isUploadHovered ? 0.09 : 0))
                         }
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.primary.opacity(isUploadHovered ? 0.12 : 0), lineWidth: 0.8)
+                        }
+                        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .help("Upload context")
@@ -2721,15 +3148,6 @@ private struct HelpDeskView: View {
                         isUploadHovered = hovering
                     }
                 }
-
-                TextField("Ask the vault", text: $store.helpDeskInput, axis: .vertical)
-                    .font(.system(size: 14))
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...5)
-                    .frame(minHeight: 32, alignment: .center)
-                    .onSubmit {
-                        store.submitHelpDeskPrompt()
-                    }
 
                 Button {
                     store.submitHelpDeskPrompt()
@@ -2771,6 +3189,11 @@ private struct HelpDeskView: View {
                         .stroke(Color.primary.opacity(0.12), lineWidth: 1)
                 }
             }
+            .shadow(
+                color: .black.opacity(hasActiveConversation ? 0.22 : 0.08),
+                radius: hasActiveConversation ? 18 : 6,
+                y: hasActiveConversation ? 10 : 3
+            )
         }
     }
 
@@ -2867,9 +3290,13 @@ private struct HelpDeskMessageBubble: View {
     let imageURL: (String) -> URL?
     let imageData: (String) -> Data?
     let isActionDisabled: Bool
+    let currentPageTitle: String
+    let currentStatus: String
     let markdownSuggestion: HelpDeskMarkdownSuggestion?
     let onRegenerate: () -> Void
     let onAddToMarkdown: () -> Void
+    let setLiveStatus: (String) -> Void
+    let restoreLiveStatusIfCurrent: (String, String) -> Void
     let onApplyMarkdownSuggestion: () -> Void
     let onDismissMarkdownSuggestion: () -> Void
     let onDisableSuggestionsForSession: () -> Void
@@ -2879,6 +3306,7 @@ private struct HelpDeskMessageBubble: View {
     @State private var isDeleteHovered = false
     @State private var isCopyHovered = false
     @State private var didCopyMessage = false
+    @State private var addToMarkdownPreviousStatus: String?
 
     private var isFollowUpStatusMessage: Bool {
         let text = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2888,6 +3316,11 @@ private struct HelpDeskMessageBubble: View {
             || text.hasPrefix("I could not create")
             || text.hasPrefix("Okay —")
             || text.hasPrefix("I could not find an existing page")
+    }
+
+    private var addToPageHoverStatus: String {
+        let trimmedTitle = currentPageTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedTitle.isEmpty ? "Add to this page" : "Add to \(trimmedTitle)"
     }
 
     var body: some View {
@@ -2975,7 +3408,10 @@ private struct HelpDeskMessageBubble: View {
                 .buttonStyle(.plain)
                 .disabled(isActionDisabled)
                 .help("Add to markdown document")
-                .onHover { isAddToMarkdownHovered = $0 }
+                .onHover { hovering in
+                    isAddToMarkdownHovered = hovering
+                    updateAddToMarkdownHoverStatus(isHovering: hovering)
+                }
 
                 Button {
                     copyTextToPasteboard(message.content)
@@ -3014,6 +3450,19 @@ private struct HelpDeskMessageBubble: View {
             }
         }
         .padding(.top, 2)
+    }
+
+    private func updateAddToMarkdownHoverStatus(isHovering: Bool) {
+        let hoverStatus = addToPageHoverStatus
+        if isHovering {
+            addToMarkdownPreviousStatus = currentStatus
+            setLiveStatus(hoverStatus)
+        } else {
+            if let previousStatus = addToMarkdownPreviousStatus {
+                restoreLiveStatusIfCurrent(previousStatus, hoverStatus)
+            }
+            addToMarkdownPreviousStatus = nil
+        }
     }
 }
 
@@ -3125,21 +3574,47 @@ private struct HelpDeskMarkdownSuggestionBox: View {
     }
 }
 
-private struct HelpDeskEmptyState: View {
+private struct HelpDeskStartBrandView: View {
     var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "brain.head.profile")
-                .font(.system(size: 38, weight: .semibold))
-                .foregroundStyle(.secondary)
-            Text("Ask anything across this vault.")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.primary)
-            Text("Zirn Chat uses your pages and this conversation's history for follow-up questions.")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+        HStack(spacing: 14) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: 46, height: 46)
+                .clipShape(RoundedRectangle(cornerRadius: 10.5, style: .continuous))
+                .shadow(color: .black.opacity(0.08), radius: 4, y: 2)
+
+            Text("Zirn Chat")
+                .font(.custom(AppFont.ptSerifRegular, size: AppFont.chatBrandTitleSize))
+                .foregroundStyle(.primary.opacity(0.92))
         }
-        .padding(28)
+    }
+}
+
+private struct HelpDeskRecentConversationRow: View {
+    let title: String
+    let select: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: select) {
+            Text(title)
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(.primary.opacity(isHovered ? 0.92 : 0.56))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .frame(height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .onHover { hovering in
+            isHovered = hovering
+        }
     }
 }
 
@@ -4105,6 +4580,7 @@ private struct MarkdownEditingSurface: View {
     let imageData: (String) -> Data?
     let insertImageFile: (URL) -> Void
     let insertImageData: (Data, String?) -> Void
+    let highlightRequestID: Int
     @Binding var typingStatus: MarkdownTypingStatus
     @State private var suggestionAnchor: CGPoint?
     @State private var relevanceAnchor: CGPoint?
@@ -4114,7 +4590,13 @@ private struct MarkdownEditingSurface: View {
     @State private var suppressedWikiSuggestionContent = ""
     @State private var suppressedWikiSuggestionCaret = -1
     @State private var editorSelectionRange = NSRange(location: 0, length: 0)
+    @State private var markdownViewportOrigin: CGPoint = .zero
+    @State private var editorVisibleSourceLocation = 0
+    @State private var previewScrollBlockID: Int?
+    @State private var pendingPreviewScrollBlockID: Int?
+    @State private var modeSurfaceOpacity = 1.0
     private static let relevanceSuggestionPauseNanoseconds: UInt64 = 700_000_000
+    private static let modeSwitchAnimation = Animation.easeInOut(duration: 0.16)
 
     private var linkSuggestions: [String] {
         guard let context = activeWikiLinkContext else { return [] }
@@ -4149,13 +4631,25 @@ private struct MarkdownEditingSurface: View {
                 renderedPreview
             }
         }
+        .opacity(modeSurfaceOpacity)
+        .animation(Self.modeSwitchAnimation, value: modeSurfaceOpacity)
         .onExitCommand {
-            isEditing = false
+            setEditing(false)
         }
         .onChange(of: isReadOnly) { _, readOnly in
             if readOnly {
-                isEditing = false
+                syncPreviewScrollToEditorViewport()
+                setEditing(false)
             }
+        }
+        .onChange(of: isEditing) { _, editing in
+            if !editing {
+                syncPreviewScrollToEditorViewport()
+            }
+        }
+        .onChange(of: highlightRequestID) { _, _ in
+            guard isReadOnly else { return }
+            highlightRenderedSelection()
         }
     }
 
@@ -4175,11 +4669,18 @@ private struct MarkdownEditingSurface: View {
                     relevanceHighlightRange: relevanceSuggestion?.phraseRange,
                     relevanceAnchor: $relevanceAnchor,
                     insertImageData: insertImageData,
+                    isEditable: true,
+                    allowsReadOnlyHighlighting: false,
+                    viewportOrigin: $markdownViewportOrigin,
+                    visibleSourceLocation: $editorVisibleSourceLocation,
                     finishEditing: {
-                        isEditing = false
+                        setEditing(false)
                     }
                 )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .onDisappear {
+                        syncPreviewScrollToEditorViewport()
+                    }
 
                 if activeWikiLinkContext == nil,
                    let relevanceSuggestion,
@@ -4292,19 +4793,49 @@ private struct MarkdownEditingSurface: View {
     }
 
     private var renderedPreview: some View {
+        Group {
+            if isReadOnly {
+                renderedPreviewScroll
+            } else {
+                renderedPreviewScroll
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if searchHighlight != nil {
+                            clearSearchHighlight()
+                        } else {
+                            syncEditorSelectionToPreviewViewport()
+                            setEditing(true)
+                        }
+                    }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.72))
+    }
+
+    private var renderedPreviewScroll: some View {
         ScrollViewReader { reader in
             ScrollView {
-                MarkdownPreview(
-                    content: content,
-                    searchHighlight: searchHighlight,
-                    openLinkedNote: openLinkedNote,
-                    imageURL: imageURL,
-                    imageData: imageData
-                )
+                Group {
+                    if isReadOnly {
+                        renderedMarkdownPreview
+                            .textSelection(.enabled)
+                    } else {
+                        renderedMarkdownPreview
+                            .textSelection(.disabled)
+                    }
+                }
                     .padding(.horizontal, 26)
                     .padding(.top, 2)
                     .padding(.bottom, 24 + previewBottomInset)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .scrollPosition(id: $previewScrollBlockID)
+            .onAppear {
+                scrollToPendingPreviewBlock(with: reader)
+            }
+            .onChange(of: pendingPreviewScrollBlockID) { _, _ in
+                scrollToPendingPreviewBlock(with: reader)
             }
             .onChange(of: searchHighlight) { _, highlight in
                 guard let highlight else { return }
@@ -4313,15 +4844,178 @@ private struct MarkdownEditingSurface: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.72))
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if searchHighlight != nil {
-                clearSearchHighlight()
-            } else if !isReadOnly {
-                isEditing = true
+    }
+
+    private var renderedMarkdownPreview: some View {
+        MarkdownPreview(
+            content: content,
+            searchHighlight: searchHighlight,
+            openLinkedNote: openLinkedNote,
+            imageURL: imageURL,
+            imageData: imageData
+        )
+    }
+
+    private func setEditing(_ editing: Bool) {
+        guard isEditing != editing else { return }
+
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            modeSurfaceOpacity = 0.74
+            isEditing = editing
+        }
+
+        DispatchQueue.main.async {
+            withAnimation(Self.modeSwitchAnimation) {
+                modeSurfaceOpacity = 1
             }
+        }
+    }
+
+    private func syncEditorSelectionToPreviewViewport() {
+        guard let previewScrollBlockID,
+              let block = MarkdownBlock.parse(content).first(where: { $0.id == previewScrollBlockID })
+        else { return }
+
+        editorSelectionRange = NSRange(location: block.sourceLocation, length: 0)
+        editorVisibleSourceLocation = block.sourceLocation
+        markdownViewportOrigin = .zero
+    }
+
+    private func syncPreviewScrollToEditorViewport() {
+        guard let blockID = markdownBlockID(containing: editorVisibleSourceLocation) else { return }
+        previewScrollBlockID = blockID
+        pendingPreviewScrollBlockID = blockID
+    }
+
+    private func scrollToPendingPreviewBlock(with reader: ScrollViewProxy) {
+        guard let blockID = pendingPreviewScrollBlockID else { return }
+        DispatchQueue.main.async {
+            reader.scrollTo(blockID, anchor: .top)
+            pendingPreviewScrollBlockID = nil
+        }
+    }
+
+    private func markdownBlockID(containing sourceLocation: Int) -> Int? {
+        let blocks = MarkdownBlock.parse(content)
+        guard !blocks.isEmpty else { return nil }
+        let clampedLocation = min(max(0, sourceLocation), (content as NSString).length)
+        return blocks.last(where: { $0.sourceLocation <= clampedLocation })?.id ?? blocks.first?.id
+    }
+
+    private func highlightRenderedSelection() {
+        let pasteboard = NSPasteboard.general
+        let previousItems = Self.copiedPasteboardItems(from: pasteboard)
+
+        NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
+
+        DispatchQueue.main.async {
+            defer {
+                Self.restorePasteboardItems(previousItems, to: pasteboard)
+            }
+
+            guard let selectedText = pasteboard.string(forType: .string)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                !selectedText.isEmpty
+            else { return }
+
+            applyRenderedHighlight(for: selectedText)
+        }
+    }
+
+    private func applyRenderedHighlight(for selectedText: String) {
+        guard let range = markdownRangeMatchingRenderedSelection(selectedText),
+              let swiftRange = Range(range, in: content)
+        else { return }
+
+        let rawText = content as NSString
+        let selectedSource = rawText.substring(with: range)
+        let replacement: String
+        let newSelection: NSRange
+
+        if selectedSource.hasPrefix("=="), selectedSource.hasSuffix("=="), selectedSource.count >= 4 {
+            replacement = String(selectedSource.dropFirst(2).dropLast(2))
+            newSelection = NSRange(location: range.location, length: (replacement as NSString).length)
+        } else {
+            replacement = "==\(selectedSource)=="
+            newSelection = NSRange(location: range.location + 2, length: (selectedSource as NSString).length)
+        }
+
+        content.replaceSubrange(swiftRange, with: replacement)
+        editorSelectionRange = newSelection
+        typingStatus.isHighlight = true
+    }
+
+    private func markdownRangeMatchingRenderedSelection(_ selectedText: String) -> NSRange? {
+        let source = content as NSString
+        let trimmed = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let exactRange = source.range(of: trimmed)
+        if exactRange.location != NSNotFound {
+            return Self.trimmedRange(in: source, range: exactRange)
+        }
+
+        let tokens = trimmed
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+        guard !tokens.isEmpty else { return nil }
+
+        let pattern = tokens
+            .map { NSRegularExpression.escapedPattern(for: $0) }
+            .joined(separator: #"\s+"#)
+
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+
+        let fullRange = NSRange(location: 0, length: source.length)
+        return regex.firstMatch(in: content, range: fullRange)
+            .flatMap { Self.trimmedRange(in: source, range: $0.range) }
+    }
+
+    private static func trimmedRange(in source: NSString, range: NSRange) -> NSRange? {
+        guard range.location >= 0,
+              range.upperBound <= source.length
+        else { return nil }
+
+        var location = range.location
+        var upperBound = range.upperBound
+        let whitespace = CharacterSet.whitespacesAndNewlines
+
+        while location < upperBound,
+              let scalar = UnicodeScalar(source.character(at: location)),
+              whitespace.contains(scalar) {
+            location += 1
+        }
+
+        while upperBound > location,
+              let scalar = UnicodeScalar(source.character(at: upperBound - 1)),
+              whitespace.contains(scalar) {
+            upperBound -= 1
+        }
+
+        guard upperBound > location else { return nil }
+        return NSRange(location: location, length: upperBound - location)
+    }
+
+    private static func copiedPasteboardItems(from pasteboard: NSPasteboard) -> [NSPasteboardItem] {
+        pasteboard.pasteboardItems?.map { item in
+            let copy = NSPasteboardItem()
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    copy.setData(data, forType: type)
+                }
+            }
+            return copy
+        } ?? []
+    }
+
+    private static func restorePasteboardItems(_ items: [NSPasteboardItem], to pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+        if !items.isEmpty {
+            pasteboard.writeObjects(items)
         }
     }
 
@@ -4624,6 +5318,10 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
     let relevanceHighlightRange: NSRange?
     @Binding var relevanceAnchor: CGPoint?
     let insertImageData: (Data, String?) -> Void
+    let isEditable: Bool
+    let allowsReadOnlyHighlighting: Bool
+    @Binding var viewportOrigin: CGPoint
+    @Binding var visibleSourceLocation: Int
     let finishEditing: () -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -4635,6 +5333,10 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             relevanceAnchor: $relevanceAnchor,
             relevanceHighlightRange: relevanceHighlightRange,
             insertImageData: insertImageData,
+            isEditable: isEditable,
+            allowsReadOnlyHighlighting: allowsReadOnlyHighlighting,
+            viewportOrigin: $viewportOrigin,
+            visibleSourceLocation: $visibleSourceLocation,
             finishEditing: finishEditing
         )
     }
@@ -4653,7 +5355,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         textView.delegate = context.coordinator
         textView.string = text
         textView.drawsBackground = false
-        textView.isEditable = true
+        textView.isEditable = isEditable
         textView.isSelectable = true
         textView.allowsUndo = true
         textView.configureUndoLimit()
@@ -4672,9 +5374,11 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         textView.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
 
         scrollView.documentView = textView
+        context.coordinator.configureScrollTracking(in: scrollView)
         context.coordinator.textView = textView
         textView.setSelectedRange(Self.clamped(selectionRange, in: text))
         context.coordinator.applyMarkdownStyling()
+        context.coordinator.restoreViewport(in: scrollView)
         context.coordinator.focusEditorOnce()
 
         return scrollView
@@ -4690,12 +5394,18 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         context.coordinator.suggestionRange = suggestionRange
         context.coordinator.relevanceAnchor = $relevanceAnchor
         context.coordinator.finishEditing = finishEditing
+        context.coordinator.isEditable = isEditable
+        context.coordinator.allowsReadOnlyHighlighting = allowsReadOnlyHighlighting
+        context.coordinator.viewportOrigin = $viewportOrigin
+        context.coordinator.visibleSourceLocation = $visibleSourceLocation
         let didChangeRelevanceHighlight = context.coordinator.relevanceHighlightRange != relevanceHighlightRange
         context.coordinator.relevanceHighlightRange = relevanceHighlightRange
         scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: bottomContentInset, right: 0)
 
         guard let textView = scrollView.documentView as? NSTextView else { return }
         context.coordinator.textView = textView
+        context.coordinator.configureScrollTracking(in: scrollView)
+        textView.isEditable = isEditable
 
         let didReplaceText = textView.string != text
         if didReplaceText {
@@ -4705,7 +5415,11 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         let clampedSelection = Self.clamped(selectionRange, in: text)
         if didReplaceText || textView.selectedRange() != clampedSelection {
             textView.setSelectedRange(clampedSelection)
-            textView.scrollRangeToVisible(clampedSelection)
+            if context.coordinator.hasStoredViewport {
+                context.coordinator.restoreViewport(in: scrollView)
+            } else if clampedSelection.location > 0 || clampedSelection.length > 0 {
+                textView.scrollRangeToVisible(clampedSelection)
+            }
         }
 
         if didReplaceText || didChangeRelevanceHighlight {
@@ -4713,6 +5427,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         }
         context.coordinator.updateSuggestionAnchor()
         context.coordinator.updateRelevanceAnchor()
+        context.coordinator.publishVisibleSourceLocation(in: scrollView)
     }
 
     private static func clamped(_ range: NSRange, in text: String) -> NSRange {
@@ -4731,6 +5446,10 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         var suggestionAnchor: Binding<CGPoint?>
         var relevanceAnchor: Binding<CGPoint?>
         var insertImageData: (Data, String?) -> Void
+        var isEditable: Bool
+        var allowsReadOnlyHighlighting: Bool
+        var viewportOrigin: Binding<CGPoint>
+        var visibleSourceLocation: Binding<Int>
         var linkTabCompletionTitle: String?
         var suggestionRange: NSRange?
         var relevanceHighlightRange: NSRange?
@@ -4740,6 +5459,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         private var pendingStylingWorkItem: DispatchWorkItem?
         private var didAutoFocusEditor = false
         private var activeInlineCommands: Set<MarkdownInlineCommand> = []
+        private var scrollObservation: NSObjectProtocol?
 
         init(
             text: Binding<String>,
@@ -4749,6 +5469,10 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             relevanceAnchor: Binding<CGPoint?>,
             relevanceHighlightRange: NSRange?,
             insertImageData: @escaping (Data, String?) -> Void,
+            isEditable: Bool,
+            allowsReadOnlyHighlighting: Bool,
+            viewportOrigin: Binding<CGPoint>,
+            visibleSourceLocation: Binding<Int>,
             finishEditing: @escaping () -> Void
         ) {
             self.text = text
@@ -4758,7 +5482,78 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             self.relevanceAnchor = relevanceAnchor
             self.relevanceHighlightRange = relevanceHighlightRange
             self.insertImageData = insertImageData
+            self.isEditable = isEditable
+            self.allowsReadOnlyHighlighting = allowsReadOnlyHighlighting
+            self.viewportOrigin = viewportOrigin
+            self.visibleSourceLocation = visibleSourceLocation
             self.finishEditing = finishEditing
+        }
+
+        deinit {
+            if let scrollObservation {
+                NotificationCenter.default.removeObserver(scrollObservation)
+            }
+        }
+
+        var hasStoredViewport: Bool {
+            abs(viewportOrigin.wrappedValue.x) > 0.5 || abs(viewportOrigin.wrappedValue.y) > 0.5
+        }
+
+        func configureScrollTracking(in scrollView: NSScrollView) {
+            scrollView.contentView.postsBoundsChangedNotifications = true
+            guard scrollObservation == nil else { return }
+            scrollObservation = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: scrollView.contentView,
+                queue: .main
+            ) { [weak self] notification in
+                guard let clipView = notification.object as? NSClipView else { return }
+                self?.viewportOrigin.wrappedValue = clipView.bounds.origin
+                if let scrollView = clipView.enclosingScrollView {
+                    self?.publishVisibleSourceLocation(in: scrollView)
+                }
+            }
+        }
+
+        func restoreViewport(in scrollView: NSScrollView) {
+            guard hasStoredViewport else { return }
+            let documentBounds = scrollView.documentView?.bounds ?? .zero
+            let visibleSize = scrollView.contentView.bounds.size
+            let maxY = max(0, documentBounds.height - visibleSize.height)
+            let maxX = max(0, documentBounds.width - visibleSize.width)
+            let origin = CGPoint(
+                x: min(max(0, viewportOrigin.wrappedValue.x), maxX),
+                y: min(max(0, viewportOrigin.wrappedValue.y), maxY)
+            )
+
+            DispatchQueue.main.async {
+                scrollView.contentView.scroll(to: origin)
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+                self.publishVisibleSourceLocation(in: scrollView)
+            }
+        }
+
+        func publishVisibleSourceLocation(in scrollView: NSScrollView) {
+            guard let textView,
+                  let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer
+            else { return }
+
+            layoutManager.ensureLayout(for: textContainer)
+            let visibleOrigin = scrollView.contentView.bounds.origin
+            let inset = textView.textContainerInset
+            let point = CGPoint(
+                x: inset.width + 1,
+                y: visibleOrigin.y + inset.height + 1
+            )
+            let glyphIndex = layoutManager.glyphIndex(for: point, in: textContainer)
+            let characterIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
+            let length = (textView.string as NSString).length
+            let clampedIndex = min(max(0, characterIndex), length)
+
+            if visibleSourceLocation.wrappedValue != clampedIndex {
+                visibleSourceLocation.wrappedValue = clampedIndex
+            }
         }
 
         func focusEditorOnce() {
@@ -4832,6 +5627,17 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         }
 
         func toggleInlineCommand(_ command: MarkdownInlineCommand, in textView: NSTextView) {
+            guard isEditable || (allowsReadOnlyHighlighting && command == .highlight) else { return }
+            let wasEditable = textView.isEditable
+            if !wasEditable {
+                textView.isEditable = true
+            }
+            defer {
+                if !wasEditable {
+                    textView.isEditable = false
+                }
+            }
+
             let selectedRange = textView.selectedRange()
             guard selectedRange.length > 0 else {
                 if activeInlineCommands.contains(command) {
@@ -5626,9 +6432,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             else { return }
 
             textStorage.addAttributes([
-                .foregroundColor: NSColor.clear,
-                .font: NSFont.systemFont(ofSize: 0.1, weight: .regular),
-                .kern: 0
+                .foregroundColor: NSColor.tertiaryLabelColor.withAlphaComponent(0.38)
             ], range: range)
         }
 
@@ -5802,6 +6606,8 @@ private final class MarkdownNSTextView: NSTextView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+
         let location = convert(event.locationInWindow, from: nil)
         let horizontalInset = textContainerInset.width
         if location.x < horizontalInset || location.x > bounds.width - horizontalInset {
@@ -8165,22 +8971,33 @@ private struct MarkdownBlock: Identifiable {
 
     let id: Int
     let kind: Kind
+    let sourceLocation: Int
 
     static func parse(_ markdown: String) -> [MarkdownBlock] {
         let lines = markdown.components(separatedBy: .newlines)
+        var lineStartOffsets: [Int] = []
+        var runningOffset = 0
+        for line in lines {
+            lineStartOffsets.append(runningOffset)
+            runningOffset += (line as NSString).length + 1
+        }
         var blocks: [MarkdownBlock] = []
         var paragraph: [String] = []
+        var paragraphStartLine: Int?
         var codeLines: [String] = []
+        var codeStartLine: Int?
         var isInCodeBlock = false
 
-        func append(_ kind: Kind) {
-            blocks.append(MarkdownBlock(id: blocks.count, kind: kind))
+        func append(_ kind: Kind, sourceLineIndex: Int) {
+            let sourceLocation = lineStartOffsets[safe: sourceLineIndex] ?? (markdown as NSString).length
+            blocks.append(MarkdownBlock(id: blocks.count, kind: kind, sourceLocation: sourceLocation))
         }
 
         func flushParagraph() {
             guard !paragraph.isEmpty else { return }
-            append(.paragraph(paragraph.joined(separator: "\n")))
+            append(.paragraph(paragraph.joined(separator: "\n")), sourceLineIndex: paragraphStartLine ?? 0)
             paragraph.removeAll()
+            paragraphStartLine = nil
         }
 
         var lineIndex = 0
@@ -8190,10 +9007,12 @@ private struct MarkdownBlock: Identifiable {
 
             if trimmed.hasPrefix("```") {
                 if isInCodeBlock {
-                    append(.code(codeLines.joined(separator: "\n")))
+                    append(.code(codeLines.joined(separator: "\n")), sourceLineIndex: codeStartLine ?? lineIndex)
                     codeLines.removeAll()
+                    codeStartLine = nil
                 } else {
                     flushParagraph()
+                    codeStartLine = lineIndex
                 }
                 isInCodeBlock.toggle()
                 lineIndex += 1
@@ -8214,38 +9033,41 @@ private struct MarkdownBlock: Identifiable {
 
             if let parsedTable = parseTable(startingAt: lineIndex, in: lines) {
                 flushParagraph()
-                append(.table(parsedTable.table))
+                append(.table(parsedTable.table), sourceLineIndex: lineIndex)
                 lineIndex += parsedTable.consumedLineCount
             } else if let heading = parseHeading(trimmed) {
                 flushParagraph()
-                append(.heading(level: heading.level, text: heading.text))
+                append(.heading(level: heading.level, text: heading.text), sourceLineIndex: lineIndex)
                 lineIndex += 1
             } else if let image = parseImage(trimmed) {
                 flushParagraph()
-                append(.image(alt: image.alt, path: image.path))
+                append(.image(alt: image.alt, path: image.path), sourceLineIndex: lineIndex)
                 lineIndex += 1
             } else if isDivider(trimmed) {
                 flushParagraph()
-                append(.divider)
+                append(.divider, sourceLineIndex: lineIndex)
                 lineIndex += 1
             } else if let task = parseTask(trimmed) {
                 flushParagraph()
-                append(.task(isDone: task.isDone, text: task.text))
+                append(.task(isDone: task.isDone, text: task.text), sourceLineIndex: lineIndex)
                 lineIndex += 1
             } else if let bullet = parseBullet(trimmed) {
                 flushParagraph()
-                append(.bullet(bullet))
+                append(.bullet(bullet), sourceLineIndex: lineIndex)
                 lineIndex += 1
             } else if let numbered = parseNumbered(trimmed) {
                 flushParagraph()
-                append(.numbered(numbered.number, numbered.text))
+                append(.numbered(numbered.number, numbered.text), sourceLineIndex: lineIndex)
                 lineIndex += 1
             } else if trimmed.hasPrefix(">") {
                 flushParagraph()
                 let text = trimmed.dropFirst().trimmingCharacters(in: .whitespaces)
-                append(.quote(text))
+                append(.quote(text), sourceLineIndex: lineIndex)
                 lineIndex += 1
             } else {
+                if paragraph.isEmpty {
+                    paragraphStartLine = lineIndex
+                }
                 paragraph.append(trimmed)
                 lineIndex += 1
             }
@@ -8253,7 +9075,7 @@ private struct MarkdownBlock: Identifiable {
 
         flushParagraph()
         if isInCodeBlock, !codeLines.isEmpty {
-            append(.code(codeLines.joined(separator: "\n")))
+            append(.code(codeLines.joined(separator: "\n")), sourceLineIndex: codeStartLine ?? max(0, lines.count - codeLines.count))
         }
 
         return blocks
@@ -8711,7 +9533,7 @@ private struct ModelConfigurationView: View {
                     Text("Configure Models")
                         .font(.system(size: 24, weight: .bold))
 
-                    Text("Connect model providers and choose what Zirn uses for content, Home, and flashcards.")
+                    Text("Connect model providers and choose what Zirn uses for Zirn Chat, content, Home, and flashcards.")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -8720,7 +9542,7 @@ private struct ModelConfigurationView: View {
 
             VStack(alignment: .leading, spacing: 14) {
                 VStack(spacing: 0) {
-                    ModelRoutingRow(title: "Content Generation") {
+                    ModelRoutingRow(title: "Zirn Chat + Content") {
                         ProviderLogoSwitch(
                             selection: $contentModel,
                             options: AssistantModel.allCases,
