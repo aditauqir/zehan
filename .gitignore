@@ -31,6 +31,11 @@ ai-prompts.local/
 *.prompt.local
 *.prompt.local.md
 
+# Local agent workspace files
+AGENT_STATE.md
+.cursor/plans/
+.cursor/skills/
+
 # Carthage
 Carthage/Build/
 
