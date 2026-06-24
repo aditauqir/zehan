@@ -4,18 +4,19 @@
         <title>Zirn</title>
         <item>
             <title>1.4.4</title>
-            <pubDate>Wed, 24 Jun 2026 12:01:38 -0400</pubDate>
+            <pubDate>Wed, 24 Jun 2026 12:32:51 -0400</pubDate>
             <link>https://github.com/aditauqir/zehan</link>
-            <sparkle:version>16</sparkle:version>
+            <sparkle:version>17</sparkle:version>
             <sparkle:shortVersionString>1.4.4</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <description><![CDATA[<h2>Zirn v1.4.4</h2>
 <ul>
   <li>Restored Apple Passwords / Keychain support in notarized release builds by embedding a Developer ID Application provisioning profile and signing with the Keychain access group entitlement.</li>
   <li>Release signing now fails early if the Developer ID profile for <code>noortech.Zirn</code> is missing, so broken Keychain builds cannot ship again.</li>
+  <li>Fixed API keys not appearing in the Passwords app by storing them with standard Keychain accessibility instead of Touch ID–gated access control, which hid entries from Passwords browsing.</li>
 </ul>
 ]]></description>
-            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.4/Zirn-1.4.4.zip" length="6236858" type="application/octet-stream" sparkle:edSignature="ut5/I5+mN6Q7UlwrlewTmFzdr9VBnMRBhB8VNfmdqVk63Ftbao9eFnI53BhgVNHwxCc0UcsPA2amEPLVpw+IBQ=="/>
+            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.4/Zirn-1.4.4.zip" length="6239040" type="application/octet-stream" sparkle:edSignature="0Rq0CVCSy7oKZymrmY+tO7bBcSpcGLke2uUF+xK9K743oJ2XSoqBdcdUvUr135OWtFjzLCP5pZZrd3PdH6toAQ=="/>
         </item>
         <item>
             <title>1.4.3</title>
@@ -31,24 +32,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.3/Zirn-1.4.3.zip" length="6236710" type="application/octet-stream" sparkle:edSignature="8A/54xT5riGoA2dRItbQqBNEpBUazh4rCgWTvogbPR0m7X3Dc8xuErYYh+xNtiivfFB6sOQDEZOcyfv/hfPABw=="/>
-        </item>
-        <item>
-            <title>1.4.2</title>
-            <pubDate>Wed, 24 Jun 2026 10:53:31 -0400</pubDate>
-            <link>https://github.com/aditauqir/zehan</link>
-            <sparkle:version>14</sparkle:version>
-            <sparkle:shortVersionString>1.4.2</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <description><![CDATA[<h2>Zirn v1.4.2</h2>
-<ul>
-  <li>Fixed Apple Passwords / Keychain storage by embedding the keychain access group in release-signed builds.</li>
-  <li>Fixed Home page generation failing to save <code>home-summary.md</code> when a vault is open by restoring security-scoped folder access before writing summaries.</li>
-  <li>Fixed DeepSeek Home page and summary generation by disabling V4 thinking mode for structured markdown output so the model returns complete Home documents instead of truncated reasoning.</li>
-  <li>Fixed brain vault AI preference sync failing after loading API keys from Keychain when a vault is open.</li>
-  <li>Added a release signing check that blocks shipping builds missing the Keychain entitlement.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.2/Zirn-1.4.2.zip" length="6228522" type="application/octet-stream" sparkle:edSignature="j1JTbh6hT4q/3UJ1WNvAt3NAaJak7PKrvwjd1lGurcj9w13DPEfzS9IoxDU0x8AWBYUZEL7C1UJ6gBo0ExbxDw=="/>
         </item>
         <item>
             <title>1.0.2</title>
