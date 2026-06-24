@@ -4,6 +4,7 @@
 
 - Restored Apple Passwords / Keychain support in notarized release builds by embedding a Developer ID Application provisioning profile and signing with the Keychain access group entitlement.
 - Release signing now fails early if the Developer ID profile for `noortech.Zirn` is missing, so broken Keychain builds cannot ship again.
+- Fixed API keys not appearing in the Passwords app by storing them with standard Keychain accessibility instead of Touch ID–gated access control, which hid entries from Passwords browsing.
 
 ## v1.4.3
 

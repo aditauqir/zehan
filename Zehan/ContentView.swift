@@ -9782,8 +9782,8 @@ private struct ModelConfigurationView: View {
             case .saved(let location):
                 Label(
                     location == .applePasswords
-                        ? "Saved to Apple Passwords."
-                        : "Saved to Apple Passwords on this Mac.",
+                        ? "Saved to Apple Passwords. Search for “Zirn” or the provider domain."
+                        : "Saved on this Mac. Search “Zirn” in Passwords, or enable iCloud Keychain to sync.",
                     systemImage: "checkmark.circle.fill"
                 )
                 .font(.system(size: 12))

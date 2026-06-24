@@ -151,7 +151,11 @@ enum MistralKeychainStore {
             )
 
             if status == errSecSuccess {
-                return location
+                if verifySavedEntry(provider: provider) {
+                    return location
+                }
+                lastStatus = errSecItemNotFound
+                continue
             }
 
             if status == errSecDuplicateItem {
@@ -161,7 +165,7 @@ enum MistralKeychainStore {
                     accessGroup: accessGroup,
                     synchronizable: synchronizable
                 )
-                if updateStatus == errSecSuccess {
+                if updateStatus == errSecSuccess, verifySavedEntry(provider: provider) {
                     return location
                 }
                 lastStatus = updateStatus
@@ -259,22 +263,10 @@ enum MistralKeychainStore {
         }
     }
 
-    private static func makeAccessControl(synchronizable: Bool) throws -> SecAccessControl {
-        var error: Unmanaged<CFError>?
-        let accessibility = synchronizable
+    private static func accessibility(for synchronizable: Bool) -> CFString {
+        synchronizable
             ? kSecAttrAccessibleWhenUnlocked
             : kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-
-        guard let accessControl = SecAccessControlCreateWithFlags(
-            kCFAllocatorDefault,
-            accessibility,
-            .userPresence,
-            &error
-        ) else {
-            throw KeychainError.saveFailed("Model", errSecParam)
-        }
-
-        return accessControl
     }
 
     private static func internetPasswordAttributes(
@@ -282,15 +274,15 @@ enum MistralKeychainStore {
         provider: Provider,
         accessGroup: String,
         synchronizable: Bool
-    ) throws -> [String: Any] {
-        let accessControl = try makeAccessControl(synchronizable: synchronizable)
-        return [
+    ) -> [String: Any] {
+        [
             kSecClass as String: kSecClassInternetPassword,
             kSecAttrAccessGroup as String: accessGroup,
-            kSecAttrAccessControl as String: accessControl,
+            kSecAttrAccessible as String: accessibility(for: synchronizable),
             kSecAttrServer as String: provider.server,
             kSecAttrAccount as String: provider.account,
             kSecAttrProtocol as String: kSecAttrProtocolHTTPS,
+            kSecAttrAuthenticationType as String: kSecAttrAuthenticationTypeDefault,
             kSecAttrPort as String: 443,
             kSecAttrPath as String: "/",
             kSecAttrLabel as String: appName,
@@ -307,15 +299,18 @@ enum MistralKeychainStore {
         accessGroup: String,
         synchronizable: Bool
     ) -> OSStatus {
-        guard let attributes = try? internetPasswordAttributes(
+        let attributes = internetPasswordAttributes(
             passwordData: passwordData,
             provider: provider,
             accessGroup: accessGroup,
             synchronizable: synchronizable
-        ) else {
-            return errSecParam
-        }
+        )
         return SecItemAdd(attributes as CFDictionary, nil)
+    }
+
+    private static func verifySavedEntry(provider: Provider) -> Bool {
+        hasInternetPasswordEntry(provider: provider, synchronizable: kSecAttrSynchronizableAny)
+            || hasInternetPasswordEntry(provider: provider, synchronizable: kCFBooleanFalse as Any)
     }
 
     private static func updateExistingInternetPassword(
@@ -324,12 +319,8 @@ enum MistralKeychainStore {
         accessGroup: String,
         synchronizable: Bool
     ) -> OSStatus {
-        guard let accessControl = try? makeAccessControl(synchronizable: synchronizable) else {
-            return errSecParam
-        }
-
         let attributes: [String: Any] = [
-            kSecAttrAccessControl as String: accessControl,
+            kSecAttrAccessible as String: accessibility(for: synchronizable),
             kSecValueData as String: passwordData,
             kSecAttrLabel as String: appName,
             kSecAttrDescription as String: provider.description,
