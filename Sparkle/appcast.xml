@@ -3,6 +3,21 @@
     <channel>
         <title>Zirn</title>
         <item>
+            <title>1.4.4</title>
+            <pubDate>Wed, 24 Jun 2026 12:01:38 -0400</pubDate>
+            <link>https://github.com/aditauqir/zehan</link>
+            <sparkle:version>16</sparkle:version>
+            <sparkle:shortVersionString>1.4.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>Zirn v1.4.4</h2>
+<ul>
+  <li>Restored Apple Passwords / Keychain support in notarized release builds by embedding a Developer ID Application provisioning profile and signing with the Keychain access group entitlement.</li>
+  <li>Release signing now fails early if the Developer ID profile for <code>noortech.Zirn</code> is missing, so broken Keychain builds cannot ship again.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.4/Zirn-1.4.4.zip" length="6236858" type="application/octet-stream" sparkle:edSignature="ut5/I5+mN6Q7UlwrlewTmFzdr9VBnMRBhB8VNfmdqVk63Ftbao9eFnI53BhgVNHwxCc0UcsPA2amEPLVpw+IBQ=="/>
+        </item>
+        <item>
             <title>1.4.3</title>
             <pubDate>Wed, 24 Jun 2026 11:24:15 -0400</pubDate>
             <link>https://github.com/aditauqir/zehan</link>
@@ -34,28 +49,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.2/Zirn-1.4.2.zip" length="6228522" type="application/octet-stream" sparkle:edSignature="j1JTbh6hT4q/3UJ1WNvAt3NAaJak7PKrvwjd1lGurcj9w13DPEfzS9IoxDU0x8AWBYUZEL7C1UJ6gBo0ExbxDw=="/>
-        </item>
-        <item>
-            <title>1.4.1</title>
-            <pubDate>Tue, 23 Jun 2026 17:35:20 -0400</pubDate>
-            <link>https://github.com/aditauqir/zehan</link>
-            <sparkle:version>13</sparkle:version>
-            <sparkle:shortVersionString>1.4.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <description><![CDATA[<h2>Zirn v1.4.1</h2>
-<ul>
-  <li>Redesigned the Zirn Chat start screen with PT Serif branding, the full-color app icon, and a centered composer that animates into place when a conversation begins.</li>
-  <li>Added recent conversations below the chat input on the start screen, showing the three latest chats with a Show more popover for the rest.</li>
-  <li>Reworked the active chat composer so it floats above the thread, sits closer to the footer, and grows dynamically from one line up to five lines before scrolling inside the field.</li>
-  <li>Fixed chat input caret alignment, Return vs Shift-Return behavior, and copy/paste routing so Cmd-C works on selected response text without stealing focus from the input field.</li>
-  <li>Added multi-conversation Zirn Chat history with conversation switching, new-chat creation, deletion, and persisted session storage per vault.</li>
-  <li>Added a menu bar usage gauge that tracks combined Mistral, Mistral OCR, and DeepSeek spend against a soft $10 budget, with per-provider breakdowns.</li>
-  <li>Improved launch responsiveness by deferring automatic vault reopen until after the first frame instead of blocking startup on the main thread.</li>
-  <li>Fixed Home regeneration so highlight-only Markdown edits no longer trigger unnecessary Home recompilation.</li>
-  <li>Changed the app version to <code>1.4.1</code> and kept the codename <code>Raxat</code>.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.1/Zirn-1.4.1.zip" length="6213471" type="application/octet-stream" sparkle:edSignature="vVFMmeJ5waiqxLSAOTNz7lhlHmcr7qi6hu8Pyl8POTG+DAgaCDuy8uTCqCgjxAh1oA85Hbo3lbgzAzhtShO4Dg=="/>
         </item>
         <item>
             <title>1.0.2</title>
