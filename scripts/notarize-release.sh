@@ -9,7 +9,8 @@ usage() {
 Usage: scripts/notarize-release.sh <path-to-app-or-dmg>
 
 Credentials, in priority order:
-  NOTARYTOOL_PROFILE=<keychain-profile>   (default: ZirnNotary)
+  NOTARYTOOL_PROFILE=<keychain-profile>   (local default: ZirnNotary)
+  APP_STORE_CONNECT_PRIVATE_KEY='-----BEGIN PRIVATE KEY-----...' APP_STORE_CONNECT_KEY_ID=... APP_STORE_CONNECT_ISSUER_ID=...
   APP_STORE_CONNECT_KEY_PATH=AuthKey_XXXX.p8 APP_STORE_CONNECT_KEY_ID=... APP_STORE_CONNECT_ISSUER_ID=...
   APPLE_ID=... APP_SPECIFIC_PASSWORD=... APPLE_TEAM_ID=...
 EOF
@@ -26,7 +27,19 @@ if [[ ! -e "$TARGET_PATH" ]]; then
 fi
 
 notary_args=()
-NOTARYTOOL_PROFILE="${NOTARYTOOL_PROFILE:-ZirnNotary}"
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  NOTARYTOOL_PROFILE="${NOTARYTOOL_PROFILE:-}"
+else
+  NOTARYTOOL_PROFILE="${NOTARYTOOL_PROFILE:-ZirnNotary}"
+fi
+PRIVATE_KEY_PATH=""
+if [[ -n "${APP_STORE_CONNECT_PRIVATE_KEY:-}" ]]; then
+  PRIVATE_KEY_PATH="$(mktemp "/tmp/zirn-notary-key.XXXXXX.p8")"
+  printf '%s\n' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$PRIVATE_KEY_PATH"
+  chmod 600 "$PRIVATE_KEY_PATH"
+  APP_STORE_CONNECT_KEY_PATH="$PRIVATE_KEY_PATH"
+fi
+
 if [[ -n "$NOTARYTOOL_PROFILE" ]]; then
   notary_args+=(--keychain-profile "$NOTARYTOOL_PROFILE")
 elif [[ -n "${APP_STORE_CONNECT_KEY_PATH:-}" && -n "${APP_STORE_CONNECT_KEY_ID:-}" && -n "${APP_STORE_CONNECT_ISSUER_ID:-}" ]]; then
@@ -52,6 +65,9 @@ TEMP_ZIP=""
 cleanup() {
   if [[ -n "$TEMP_ZIP" ]]; then
     rm -f "$TEMP_ZIP"
+  fi
+  if [[ -n "$PRIVATE_KEY_PATH" ]]; then
+    rm -f "$PRIVATE_KEY_PATH"
   fi
 }
 trap cleanup EXIT

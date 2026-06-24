@@ -10,6 +10,27 @@ Zirn uses [Sparkle](https://sparkle-project.org/) for over-the-air updates on ma
 
 ## Ship an OTA update (recommended)
 
+Use the manual **Sparkle Release** GitHub Actions workflow when the repository
+secrets below are configured. The workflow imports the Developer ID certificate
+and provisioning profile, builds Zirn, notarizes the app, creates and notarizes
+the DMG, signs the Sparkle update, uploads GitHub Release assets, and commits
+`Sparkle/appcast.xml`.
+
+Required GitHub secrets:
+
+| Secret | Purpose |
+|--------|---------|
+| `MACOS_CERTIFICATE` | Base64-encoded `.p12` Developer ID Application certificate |
+| `MACOS_CERTIFICATE_PASSWORD` | Password for the `.p12` certificate |
+| `KEYCHAIN_PASSWORD` | Temporary keychain password used by the runner |
+| `PROVISIONING_PROFILE_BASE64` | Base64 Developer ID Application profile for `noortech.Zirn` |
+| `APP_STORE_CONNECT_KEY_ID` | Notary API key ID |
+| `APP_STORE_CONNECT_ISSUER_ID` | Notary issuer ID |
+| `APP_STORE_CONNECT_PRIVATE_KEY` | Full contents of `AuthKey_XXXX.p8` |
+| `SPARKLE_EDDSA_PRIVATE_KEY` | Sparkle EdDSA private key |
+
+Local fallback:
+
 From your Mac, after bumping **Build** in Xcode:
 
 ```bash
@@ -97,9 +118,12 @@ curl -fsSL "https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/s
 - **Public key** → `Zirn-Info.plist` as `SUPublicEDKey`
 - **Private key** → `~/.sparkle_eddsa_private_key` (local) or GitHub secret `SPARKLE_EDDSA_PRIVATE_KEY` (optional manual CI)
 
-## GitHub Actions (optional)
+## GitHub Actions
 
-`.github/workflows/sparkle-release.yml` is **manual only** (`workflow_dispatch`). Use local `scripts/ship-update.sh` for reliable signed releases.
+`.github/workflows/ci.yml` runs a Debug build on `main`, `feature`, and `debug`.
+`.github/workflows/sparkle-release.yml` is manual only (`workflow_dispatch`) and
+is the primary signed release path once all secrets are configured. Keep
+`scripts/ship-update.sh` as a local fallback.
 
 ## Update prompt
 

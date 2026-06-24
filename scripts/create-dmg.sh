@@ -66,7 +66,10 @@ if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
     -format UDZO \
     "$DMG_PATH" >/dev/null
   rm -rf "$STAGING"
-  echo "Created: $DMG_PATH (unsigned — CI has no Developer ID certificate)"
+  if [[ -n "${SIGN_IDENTITY:-}" ]]; then
+    sign_installer_dmg "$DMG_PATH"
+  fi
+  echo "Created: $DMG_PATH"
   exit 0
 fi
 

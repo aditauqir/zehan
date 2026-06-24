@@ -5475,6 +5475,8 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
+        private static let maxStyledDocumentCharacterCount = 100_000
+
         var text: Binding<String>
         var selectionRange: Binding<NSRange>
         var typingStatus: Binding<MarkdownTypingStatus>
@@ -6062,6 +6064,12 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         func applyMarkdownStyling() {
             guard !isApplyingMarkdownStyling, let textView else { return }
             guard let textStorage = textView.textStorage else { return }
+            let rawText = textView.string as NSString
+
+            guard rawText.length <= Self.maxStyledDocumentCharacterCount else {
+                updateTypingAttributesForCurrentLine(in: textView)
+                return
+            }
 
             pendingStylingWorkItem?.cancel()
             pendingStylingWorkItem = nil
@@ -6078,7 +6086,6 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
                 isApplyingMarkdownStyling = false
             }
 
-            let rawText = textView.string as NSString
             let fullRange = NSRange(location: 0, length: rawText.length)
             let selectedRanges = textView.selectedRanges
             let baseAttributes = Self.baseAttributes()
@@ -8571,15 +8578,13 @@ private struct MarkdownPreview: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .environment(\.openURL, OpenURLAction { url in
-            guard url.scheme == "zirn-note" || url.scheme == "zehan-note",
-                  let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-                  let title = components.queryItems?.first(where: { $0.name == "title" })?.value,
-                  !title.isEmpty
-            else {
+            guard Self.isWikiLinkURL(url) else {
                 return .systemAction
             }
 
-            openLinkedNote(title)
+            if let title = Self.wikiLinkTitle(from: url) {
+                openLinkedNote(title)
+            }
             return .handled
         })
     }
@@ -8956,15 +8961,40 @@ private struct MarkdownPreview: View {
                 display = title
             }
 
-            var queryAllowed = CharacterSet.urlQueryAllowed
-            queryAllowed.remove(charactersIn: "&+=?")
-            let encodedTitle = title.addingPercentEncoding(withAllowedCharacters: queryAllowed) ?? title
-            output += "[**\(display)**](zirn-note://open?title=\(encodedTitle))"
+            let linkURL = Self.wikiLinkURL(forTitle: title)
+            output += "[**\(display)**](\(linkURL))"
             cursor = match.range.location + match.range.length
         }
 
         output += nsString.substring(from: cursor)
         return output
+    }
+
+    private static func isWikiLinkURL(_ url: URL) -> Bool {
+        url.scheme == "zirn-note" || url.scheme == "zehan-note"
+    }
+
+    private static func wikiLinkURL(forTitle title: String) -> String {
+        var components = URLComponents()
+        components.scheme = "zirn-note"
+        components.host = "open"
+        components.queryItems = [
+            URLQueryItem(name: "title", value: title)
+        ]
+        return components.url?.absoluteString ?? "zirn-note://open"
+    }
+
+    private static func wikiLinkTitle(from url: URL) -> String? {
+        guard isWikiLinkURL(url),
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let titleValue = components.queryItems?.first(where: { $0.name == "title" })?.value
+        else {
+            return nil
+        }
+
+        let title = (titleValue.removingPercentEncoding ?? titleValue)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? nil : title
     }
 
     private func headingSize(for level: Int) -> CGFloat {

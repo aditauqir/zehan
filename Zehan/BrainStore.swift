@@ -176,6 +176,7 @@ final class BrainStore: ObservableObject {
     private static let deepSeekInputCacheHitPricePerMillionTokens = 0.0028
     private static let deepSeekOutputPricePerMillionTokens = 0.28
     private static let mistralMaxUploadFileBytes = 512 * 1024 * 1024
+    private static let maxNoteFileBytes = 50 * 1024 * 1024
     private static let mistralMaxOCRPagesPerRequest = 1_000
     private static let supportedImageAttachmentExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "tif", "tiff", "webp", "avif"]
     private static let supportedDocumentAttachmentExtensions: Set<String> = ["pdf", "doc", "docx", "ppt", "pptx"]
@@ -680,7 +681,10 @@ final class BrainStore: ObservableObject {
             saveCurrentNote()
         }
 
-        guard let noteURL = noteURL(for: id) else { return }
+        guard let noteURL = noteURL(for: id) else {
+            status = "Could not find page file."
+            return
+        }
         withActiveBrainAccess {
             do {
                 let note = try readNote(from: noteURL)
@@ -2818,56 +2822,63 @@ final class BrainStore: ObservableObject {
         var seenIDs = Set<Note.ID>()
         var reservedTitles = Set<String>()
         var discoveredGroupTitlesByNoteID: [Note.ID: String] = [:]
-        let loadedNotes = try noteURLs.map { url in
-            var note = try readNote(from: url)
-            var noteURL = url
-            var fileName = relativeNoteFileName(for: noteURL, in: brain)
-            let originalFolderURL = noteURL.deletingLastPathComponent()
-            let metadataID = note.id.trimmingCharacters(in: .whitespacesAndNewlines)
-            let indexedID = noteIdentityDatabase?.noteID(forFileName: fileName)
-                ?? noteIdentityDatabase?.noteID(forFileName: noteURL.lastPathComponent)
-            let candidateID = indexedID ?? (metadataID.isEmpty ? nil : note.id)
-            let finalID: Note.ID
+        var noteLoadFailures: [(URL, Error)] = []
+        var loadedNotes: [Note] = []
 
-            if let candidateID, !seenIDs.contains(candidateID) {
-                finalID = candidateID
-            } else {
-                finalID = UUID().uuidString
-            }
+        for url in noteURLs {
+            do {
+                var note = try readNote(from: url)
+                var noteURL = url
+                var fileName = relativeNoteFileName(for: noteURL, in: brain)
+                let originalFolderURL = noteURL.deletingLastPathComponent()
+                let metadataID = note.id.trimmingCharacters(in: .whitespacesAndNewlines)
+                let indexedID = noteIdentityDatabase?.noteID(forFileName: fileName)
+                    ?? noteIdentityDatabase?.noteID(forFileName: noteURL.lastPathComponent)
+                let candidateID = indexedID ?? (metadataID.isEmpty ? nil : note.id)
+                let finalID: Note.ID
 
-            let uniqueTitle = uniqueTitle(for: note.title, reserving: &reservedTitles)
-            if finalID != note.id || uniqueTitle != note.title {
-                note = Note(
-                    id: finalID,
-                    title: uniqueTitle,
-                    content: contentBySettingDocumentTitle(uniqueTitle, in: note.content),
-                    createdAt: note.createdAt,
-                    updatedAt: Date()
-                )
-                let updatedURL = markdownNoteURL(for: note, inFolder: originalFolderURL, allowing: noteURL)
-                try FileManager.default.createDirectory(
-                    at: updatedURL.deletingLastPathComponent(),
-                    withIntermediateDirectories: true
-                )
-                try writeMarkdownNote(note, to: updatedURL)
-                if updatedURL != noteURL, FileManager.default.fileExists(atPath: noteURL.path) {
-                    try? FileManager.default.removeItem(at: noteURL)
+                if let candidateID, !seenIDs.contains(candidateID) {
+                    finalID = candidateID
+                } else {
+                    finalID = UUID().uuidString
                 }
-                noteURL = updatedURL
-                fileName = relativeNoteFileName(for: noteURL, in: brain)
-            }
 
-            try noteIdentityDatabase?.upsert(
-                noteID: note.id,
-                title: note.title,
-                fileName: fileName,
-                updatedAt: note.updatedAt
-            )
-            if let groupTitle = sidebarGroupTitle(fromRelativeFileName: fileName) {
-                discoveredGroupTitlesByNoteID[note.id] = groupTitle
+                let uniqueTitle = uniqueTitle(for: note.title, reserving: &reservedTitles)
+                if finalID != note.id || uniqueTitle != note.title {
+                    note = Note(
+                        id: finalID,
+                        title: uniqueTitle,
+                        content: contentBySettingDocumentTitle(uniqueTitle, in: note.content),
+                        createdAt: note.createdAt,
+                        updatedAt: Date()
+                    )
+                    let updatedURL = markdownNoteURL(for: note, inFolder: originalFolderURL, allowing: noteURL)
+                    try FileManager.default.createDirectory(
+                        at: updatedURL.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try writeMarkdownNote(note, to: updatedURL)
+                    if updatedURL != noteURL, FileManager.default.fileExists(atPath: noteURL.path) {
+                        try? FileManager.default.removeItem(at: noteURL)
+                    }
+                    noteURL = updatedURL
+                    fileName = relativeNoteFileName(for: noteURL, in: brain)
+                }
+
+                try noteIdentityDatabase?.upsert(
+                    noteID: note.id,
+                    title: note.title,
+                    fileName: fileName,
+                    updatedAt: note.updatedAt
+                )
+                if let groupTitle = sidebarGroupTitle(fromRelativeFileName: fileName) {
+                    discoveredGroupTitlesByNoteID[note.id] = groupTitle
+                }
+                seenIDs.insert(note.id)
+                loadedNotes.append(note)
+            } catch {
+                noteLoadFailures.append((url, error))
             }
-            seenIDs.insert(note.id)
-            return note
         }
         let loadedSummaries = loadedNotes
             .map { NoteSummary(id: $0.id, title: $0.title, updatedAt: $0.updatedAt) }
@@ -2877,6 +2888,14 @@ final class BrainStore: ObservableObject {
         graphLinks = buildGraphLinks(from: loadedNotes)
         rebuildSearchIndex(from: loadedNotes, in: brain)
         cacheHomeSourceNotes(from: loadedNotes)
+
+        if let firstFailure = noteLoadFailures.first {
+            let count = noteLoadFailures.count
+            let fileName = firstFailure.0.lastPathComponent
+            status = count == 1
+                ? "\(fileName) could not be read: \(firstFailure.1.localizedDescription)"
+                : "\(count) pages could not be read. First: \(fileName) - \(firstFailure.1.localizedDescription)"
+        }
     }
 
     private func loadHomePageSourceNotes() throws -> [HomePageSourceNote] {
@@ -3415,7 +3434,8 @@ final class BrainStore: ObservableObject {
     }
 
     private func readNote(from url: URL) throws -> Note {
-        try readNote(from: url, data: Data(contentsOf: url))
+        try ensureReadableNoteFile(at: url)
+        return try readNote(from: url, data: Data(contentsOf: url))
     }
 
     private func readNote(from url: URL, data: Data) throws -> Note {
@@ -3424,6 +3444,21 @@ final class BrainStore: ObservableObject {
         }
 
         return try decoder.decode(Note.self, from: data)
+    }
+
+    private func ensureReadableNoteFile(at url: URL) throws {
+        guard let byteCount = fileByteCount(at: url) else { return }
+        guard byteCount <= Self.maxNoteFileBytes else {
+            throw FileSafetyError.noteTooLarge(
+                fileName: url.lastPathComponent,
+                size: byteCount,
+                limit: Self.maxNoteFileBytes
+            )
+        }
+    }
+
+    private func formattedByteCount(_ byteCount: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file)
     }
 
     private func readMarkdownNote(from url: URL, data: Data) throws -> Note {
@@ -7533,6 +7568,12 @@ final class BrainStore: ObservableObject {
             return
         }
 
+        if let byteCount = fileByteCount(at: url),
+           exceedsMistralUploadLimit(byteCount: byteCount) {
+            status = "\(storedFileURL.lastPathComponent) attached · too large for OCR (\(formattedByteCount(byteCount)))"
+            return
+        }
+
         guard let data = try? Data(contentsOf: url) else {
             status = "\(storedFileURL.lastPathComponent) attached · OCR could not read file"
             return
@@ -7749,6 +7790,11 @@ final class BrainStore: ObservableObject {
     }
 
     private func extractedPromptDocumentText(from url: URL) -> String {
+        if let byteCount = fileByteCount(at: url),
+           exceedsMistralUploadLimit(byteCount: byteCount) {
+            return ""
+        }
+
         switch url.pathExtension.lowercased() {
         case "pdf":
             return PDFDocument(url: url)?.string ?? ""
@@ -8656,7 +8702,10 @@ final class BrainStore: ObservableObject {
         withSecurityScopedAccess(to: folderURL) {
             result = Result { try action() }
         }
-        return try result!.get()
+        guard let result else {
+            throw AssistantError.requestFailed("Could not access the active brain folder.")
+        }
+        return try result.get()
     }
 
     private func withSecurityScopedAccess(to url: URL, _ action: () -> Void) {
@@ -9263,6 +9312,19 @@ enum AssistantError: LocalizedError {
         switch self {
         case .missingConfiguration(let message), .requestFailed(let message):
             message
+        }
+    }
+}
+
+private enum FileSafetyError: LocalizedError {
+    case noteTooLarge(fileName: String, size: Int, limit: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .noteTooLarge(let fileName, let size, let limit):
+            let sizeText = ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
+            let limitText = ByteCountFormatter.string(fromByteCount: Int64(limit), countStyle: .file)
+            return "\(fileName) is too large to open (\(sizeText)). Split it into pages under \(limitText)."
         }
     }
 }

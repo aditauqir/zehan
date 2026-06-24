@@ -1,5 +1,13 @@
 # Patch Notes
 
+## v1.4.5
+
+- Fixed oversized or corrupt page files from blocking an entire vault load; readable pages continue loading and Zirn reports the skipped file clearly.
+- Fixed missing page files and broken wiki links so Zirn shows an in-app status instead of failing silently or handing custom note URLs to macOS.
+- Improved large-page editing stability by skipping full-document Markdown restyling once a document is large enough to risk UI stalls.
+- Added GitHub Actions Debug CI plus a signed, notarized manual Sparkle release workflow with Developer ID certificate/profile import.
+- Added a Codex runbook for branch preflight, Debug testing, wiki-link validation, and the GitHub Actions release checklist.
+
 ## v1.4.4
 
 - Restored Apple Passwords / Keychain support in notarized release builds by embedding a Developer ID Application provisioning profile and signing with the Keychain access group entitlement.

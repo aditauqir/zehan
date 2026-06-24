@@ -91,6 +91,10 @@ Zirn checks for updates via Sparkle. Use **Zirn → Check for Updates…** in th
 
 Setup, signing keys, and the automated `main` branch release workflow are documented in [Sparkle/README.md](Sparkle/README.md).
 
+## Continuous Integration
+
+GitHub Actions runs a clean Debug build on pushes and pull requests to `main`, `feature`, and `debug`. Signed Sparkle releases are manual-only and require the Developer ID, notarization, and Sparkle secrets documented in [Sparkle/README.md](Sparkle/README.md).
+
 ## Notes
 
 - The sidebar search field searches matching page titles and document content.

@@ -10,14 +10,20 @@ mkdir -p "$BUILD_DIR"
 
 cd "$ROOT"
 
-XCODE_FLAGS=()
 if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
-  echo "CI build: skipping code signing (no Apple certificate on runner)."
-  XCODE_FLAGS+=(
-    CODE_SIGNING_ALLOWED=NO
-    CODE_SIGNING_REQUIRED=NO
-    "CODE_SIGN_IDENTITY=-"
-  )
+  if [[ -z "${SIGN_IDENTITY:-}" || -z "${PROVISIONING_PROFILE:-}" ]]; then
+    cat >&2 <<'EOF'
+GitHub Actions release builds require Developer ID signing secrets.
+
+Run scripts/import-signing-certificate.sh first, or configure:
+  MACOS_CERTIFICATE
+  MACOS_CERTIFICATE_PASSWORD
+  KEYCHAIN_PASSWORD
+  PROVISIONING_PROFILE_BASE64
+EOF
+    exit 1
+  fi
+  echo "CI release build: signing with $SIGN_IDENTITY"
 fi
 
 xcodebuild -project Zehan.xcodeproj \
@@ -33,9 +39,6 @@ BUILD_ARGS=(
   -derivedDataPath "$DERIVED_DATA"
   clean build
 )
-if ((${#XCODE_FLAGS[@]})); then
-  BUILD_ARGS+=("${XCODE_FLAGS[@]}")
-fi
 xcodebuild "${BUILD_ARGS[@]}"
 
 APP_BUNDLE="$DERIVED_DATA/Build/Products/Release/Zirn.app"
