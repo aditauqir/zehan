@@ -3,6 +3,21 @@
     <channel>
         <title>Zirn</title>
         <item>
+            <title>1.4.3</title>
+            <pubDate>Wed, 24 Jun 2026 11:24:15 -0400</pubDate>
+            <link>https://github.com/aditauqir/zehan</link>
+            <sparkle:version>15</sparkle:version>
+            <sparkle:shortVersionString>1.4.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>Zirn v1.4.3</h2>
+<ul>
+  <li>Fixed Zirn failing to open after v1.4.2 by restoring release re-signing entitlements that macOS 26 can launch. Keychain in shipped builds remains a follow-up once the Developer ID provisioning profile is wired up.</li>
+  <li>Kept the v1.4.2 fixes for Home summary saving, DeepSeek Home compilation, and brain AI preference sync.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.3/Zirn-1.4.3.zip" length="6236710" type="application/octet-stream" sparkle:edSignature="8A/54xT5riGoA2dRItbQqBNEpBUazh4rCgWTvogbPR0m7X3Dc8xuErYYh+xNtiivfFB6sOQDEZOcyfv/hfPABw=="/>
+        </item>
+        <item>
             <title>1.4.2</title>
             <pubDate>Wed, 24 Jun 2026 10:53:31 -0400</pubDate>
             <link>https://github.com/aditauqir/zehan</link>
@@ -41,38 +56,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.1/Zirn-1.4.1.zip" length="6213471" type="application/octet-stream" sparkle:edSignature="vVFMmeJ5waiqxLSAOTNz7lhlHmcr7qi6hu8Pyl8POTG+DAgaCDuy8uTCqCgjxAh1oA85Hbo3lbgzAzhtShO4Dg=="/>
-        </item>
-        <item>
-            <title>1.4</title>
-            <pubDate>Mon, 22 Jun 2026 23:35:55 -0400</pubDate>
-            <link>https://github.com/aditauqir/zehan</link>
-            <sparkle:version>12</sparkle:version>
-            <sparkle:shortVersionString>1.4</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <description><![CDATA[<h2>Zirn v1.4 (Raxat)</h2>
-<ul>
-  <li>Added DeepSeek as a beta model provider with API key verification, model persistence, and Apple Keychain saving/loading alongside Mistral.</li>
-  <li>Added one Configure Models sheet that replaces the old split settings and lets users route content generation, Home page generation, and flashcard generation independently.</li>
-  <li>Added equal-size Mistral/DeepSeek logo switches in Configure Models and the prompt input field so provider selection no longer stretches around text labels.</li>
-  <li>Added a Document Reading Service row in Configure Models and kept document OCR on Mistral OCR because DeepSeek&#x27;s current API does not expose OCR/document-reading support.</li>
-  <li>Added native Undo/Redo menu handling so Cmd-Z, Cmd-Y, and Cmd-Shift-Z work reliably in the editor.</li>
-  <li>Added a Word-style Markdown ribbon with Bold, Italic, Underline, and Highlight controls in the editor header.</li>
-  <li>Fixed editor highlighting so highlights persist in the Markdown/rendered page instead of disappearing after render.</li>
-  <li>Changed the editor header controls from circular chrome buttons to flatter hover-only ribbon icons.</li>
-  <li>Added a dedicated editor flashcard page opened from the header, instead of showing flashcards as a popup.</li>
-  <li>Added cached page flashcard files with source fingerprints and similarity checks so Zirn loads local flashcards first and avoids unnecessary model calls.</li>
-  <li>Fixed flashcard generation fallbacks so rate-limit/error text does not become the displayed flashcard content.</li>
-  <li>Removed Highlight Flashcards from Home and page summaries while preserving the normal highlighter.</li>
-  <li>Removed page-summary flashcard UI and stopped Home generation from asking the model to create page-summary flashcards.</li>
-  <li>Improved Home and flashcard generation routing so regenerations use the configured provider instead of one shared model choice.</li>
-  <li>Tamed automatic relevance suggestions with steadier dismissal/pause behavior so suggestions do not keep taking over the editor.</li>
-  <li>Fixed the follow-up prompt composer so Cmd-Enter submits and the input grows by estimated line count instead of trapping Enter behind an oversized field.</li>
-  <li>Updated the app icon assets for the Raxat release.</li>
-  <li>Added internal agent/release-state tracking so future handoffs can preserve release status more safely.</li>
-  <li>Changed the app version to <code>1.4</code> and codename to <code>Raxat</code>.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4/Zirn-1.4.zip" length="6023397" type="application/octet-stream" sparkle:edSignature="9k8k3ZSmAkFXb7QN5gYNRDQwCtvqJI7KV3XXj047VfZzSn6EW3eCZJjHLyvinJ7FWn7CXyO0Aa1I/Qf13O5NAw=="/>
         </item>
         <item>
             <title>1.0.2</title>
