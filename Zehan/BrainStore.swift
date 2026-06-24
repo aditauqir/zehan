@@ -4574,6 +4574,7 @@ final class BrainStore: ObservableObject {
         The user may type quickly and make spelling mistakes, missing spaces, or phonetic typos. Infer the intended meaning from context instead of rejecting the question for spelling.
         Return Markdown only. Do not claim you changed the file.
         If the user asks you to edit the note, briefly tell them to turn on writing mode with the pen icon.
+        When your answer would fit naturally on the current page, end with one short offer such as "Want me to add this to your page?" or "I can write that down on the page if you want." Do not edit the page yourself.
         Keep answers concise, useful, and grounded in the supplied context.
         """
     }
@@ -6772,38 +6773,8 @@ final class BrainStore: ObservableObject {
         assistantConversationMemory.transcript { promptExcerpt($0, characterLimit: 2_000) }
     }
 
-    private func assistantIntent(for prompt: String) -> AssistantPromptIntent {
-        if isAssistantWritingMode {
-            return .writing
-        }
-
-        let cleanPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleanPrompt.isEmpty {
-            return assistantAttachment == nil ? .conversation : .writing
-        }
-
-        let lowercasedPrompt = cleanPrompt.lowercased()
-        let writingTerms = [
-            "write", "rewrite", "edit", "change", "replace", "insert", "add ",
-            "remove", "delete", "summarize this into", "turn this into",
-            "make this", "format", "fix grammar", "improve this", "continue writing",
-            "append", "draft", "create a section", "update the document"
-        ]
-        let questionStarters = [
-            "what", "why", "how", "when", "where", "who", "which",
-            "can you explain", "could you explain", "tell me", "do you know",
-            "is ", "are ", "does ", "did ", "should ", "would "
-        ]
-
-        if writingTerms.contains(where: { lowercasedPrompt.contains($0) }) {
-            return .writing
-        }
-
-        if cleanPrompt.hasSuffix("?") || questionStarters.contains(where: { lowercasedPrompt.hasPrefix($0) }) {
-            return .conversation
-        }
-
-        return .conversation
+    private func assistantIntent(for _: String) -> AssistantPromptIntent {
+        isAssistantWritingMode ? .writing : .conversation
     }
 
     private func assistantAttachmentContext(
@@ -8948,6 +8919,69 @@ struct AssistantConversationResponse: Identifiable, Equatable {
     var answer: String
     let providerTitle: String
     let createdAt: Date
+
+    var offersPageInsertion: Bool {
+        Self.detectsPageInsertionOffer(in: answer)
+    }
+
+    static func detectsPageInsertionOffer(in answer: String) -> Bool {
+        let normalized = answer
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+
+        let offerPhrases = [
+            "want me to add",
+            "want me to write",
+            "would you like me to add",
+            "would you like me to write",
+            "should i add",
+            "should i write",
+            "shall i add",
+            "shall i write",
+            "like me to add this",
+            "like me to write this",
+            "i can add this",
+            "i can write this",
+            "i can write that",
+            "add this to your page",
+            "add this to the page",
+            "add it to your page",
+            "add it to the page",
+            "add this to your note",
+            "add this to the note",
+            "write that down",
+            "write this down",
+            "write it down",
+            "put this on the page",
+            "put this in your note",
+            "put that on the page",
+            "drop this into your page",
+            "save this to your page",
+            "on the page if you want",
+            "to your page if you want",
+            "in the paper if you want",
+            "on the paper if you want",
+            "use the + button",
+            "plus button",
+            "tap +",
+            "click +",
+        ]
+
+        if offerPhrases.contains(where: { normalized.contains($0) }) {
+            return true
+        }
+
+        let questionOfferPatterns = [
+            "add this to",
+            "add it to",
+            "write this on",
+            "write that on",
+            "put this in",
+            "put that in",
+        ]
+        return normalized.contains("?")
+            && questionOfferPatterns.contains { normalized.contains($0) }
+    }
 }
 
 private struct LangChainConversationMemory {

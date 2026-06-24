@@ -2493,6 +2493,8 @@ private struct HelpDeskPromptInputView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: HelpDeskPromptScrollView, context: Context) {
         guard let textView = scrollView.documentView as? HelpDeskPromptNSTextView else { return }
+        let wasFirstResponder = textView.window?.firstResponder === textView
+        let selection = textView.selectedRange()
         context.coordinator.text = $text
         context.coordinator.selectionRange = $selectionRange
         context.coordinator.contentHeight = $contentHeight
@@ -2507,6 +2509,10 @@ private struct HelpDeskPromptInputView: NSViewRepresentable {
             textView.string = text
             textView.setSelectedRange(clamped(selectionRange, in: text))
             scrollView.syncDocumentViewFrame()
+        }
+
+        if wasFirstResponder {
+            PromptTextInputFocusSupport.restoreFirstResponder(textView, selection: selection)
         }
     }
 
@@ -2541,7 +2547,16 @@ private struct HelpDeskPromptInputView: NSViewRepresentable {
 
         func updateContentHeight(_ newHeight: CGFloat) {
             guard abs(contentHeight.wrappedValue - newHeight) > 0.5 else { return }
+            guard let textView else {
+                contentHeight.wrappedValue = newHeight
+                return
+            }
+            let wasFirstResponder = textView.window?.firstResponder === textView
+            let selection = textView.selectedRange()
             contentHeight.wrappedValue = newHeight
+            if wasFirstResponder {
+                PromptTextInputFocusSupport.restoreFirstResponder(textView, selection: selection)
+            }
         }
 
         func textDidChange(_ notification: Notification) {
@@ -2572,6 +2587,9 @@ private final class HelpDeskPromptScrollView: NSScrollView {
               let textContainer = textView.textContainer,
               let layoutManager = textView.layoutManager
         else { return }
+
+        let wasFirstResponder = window?.firstResponder === textView
+        let selection = textView.selectedRange()
 
         let contentWidth = max(contentSize.width, 1)
         textView.textContainer?.containerSize = NSSize(width: contentWidth, height: CGFloat.greatestFiniteMagnitude)
@@ -2606,6 +2624,10 @@ private final class HelpDeskPromptScrollView: NSScrollView {
             textView.scrollRangeToVisible(textView.selectedRange())
         } else {
             contentView.scroll(to: NSPoint(x: 0, y: max(0, documentHeight - visibleHeight)))
+        }
+
+        if wasFirstResponder {
+            PromptTextInputFocusSupport.restoreFirstResponder(textView, selection: selection)
         }
     }
 
@@ -3126,7 +3148,7 @@ private struct HelpDeskView: View {
                     )
                     .frame(maxWidth: .infinity)
                     .frame(height: helpDeskComposerContentHeight)
-                    .animation(.smooth(duration: 0.28), value: helpDeskComposerContentHeight)
+                    .animation(nil, value: helpDeskComposerContentHeight)
 
                     if store.helpDeskInput.isEmpty {
                         Text("Ask the vault")
@@ -6986,10 +7008,18 @@ private struct AssistantPreviewPanel: View {
 
 private struct AssistantConversationPanel: View {
     let response: AssistantConversationResponse
+    let pageTitle: String
     let addToPage: () -> Void
     let isAddingToPage: Bool
     let exitConversation: () -> Void
     let openLinkedNote: (String) -> Void
+
+    @State private var isAddToPageHovered = false
+
+    private var addToPageHelp: String {
+        let trimmedTitle = pageTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedTitle.isEmpty ? "Add this answer to the page" : "Add this answer to \(trimmedTitle)"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -7007,11 +7037,18 @@ private struct AssistantConversationPanel: View {
 
             responseContent
 
-            HStack {
-                Spacer()
-                addToPageButton
+            HStack(spacing: 10) {
+                Spacer(minLength: 0)
+
+                if response.offersPageInsertion {
+                    addInsertionPill
+                } else {
+                    addToPageButton
+                }
+
                 exitConversationButton
             }
+            .animation(.spring(response: 0.34, dampingFraction: 0.82), value: response.offersPageInsertion)
         }
         .padding(14)
         .frame(width: panelWidth, alignment: .leading)
@@ -7022,6 +7059,42 @@ private struct AssistantConversationPanel: View {
                 .stroke(Color.primary.opacity(0.14), lineWidth: 1)
         }
         .shadow(color: .black.opacity(0.22), radius: 22, y: 10)
+    }
+
+    private var addInsertionPill: some View {
+        Button(action: addToPage) {
+            HStack(spacing: 7) {
+                Text("Add?")
+                    .font(.system(size: 12.5, weight: .semibold))
+
+                Image(systemName: "plus.circle.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+            }
+            .foregroundStyle(.white.opacity(isAddingToPage ? 0.48 : 0.94))
+            .padding(.horizontal, 15)
+            .frame(height: 32)
+            .background {
+                Capsule()
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        Capsule()
+                            .fill(Color.yellow.opacity(0.18))
+                    }
+            }
+            .scaleEffect(isAddToPageHovered && !isAddingToPage ? 1.03 : 1)
+        }
+        .buttonStyle(.plain)
+        .disabled(isAddingToPage)
+        .overlay {
+            if !isAddingToPage {
+                AnimatedThinkingBorder(lineWidth: 0.85, cornerRadius: 16)
+            }
+        }
+        .help(addToPageHelp)
+        .onHover { isAddToPageHovered = $0 }
+        .animation(.easeOut(duration: 0.14), value: isAddToPageHovered)
+        .transition(.scale(scale: 0.88, anchor: .trailing).combined(with: .opacity))
     }
 
     private var addToPageButton: some View {
@@ -7042,7 +7115,7 @@ private struct AssistantConversationPanel: View {
         }
         .buttonStyle(.plain)
         .disabled(isAddingToPage)
-        .help("Add this answer to the page")
+        .help(addToPageHelp)
     }
 
     private var exitConversationButton: some View {
@@ -7073,7 +7146,7 @@ private struct AssistantConversationPanel: View {
                     .padding(.trailing, 4)
             }
             .scrollIndicators(.visible)
-            .frame(height: responseMaxHeight)
+            .frame(maxHeight: responseMaxHeight)
         } else {
             responseMarkdown
                 .padding(.trailing, 4)
@@ -7111,7 +7184,7 @@ private struct AssistantConversationPanel: View {
     }
 
     private var needsScrolling: Bool {
-        estimatedResponseHeight > responseMaxHeight
+        estimatedResponseHeight > responseMaxHeight + 12
     }
 }
 
@@ -7167,6 +7240,36 @@ private struct PillHeightPreferenceKey: PreferenceKey {
     }
 }
 
+private enum PromptTextInputFocusSupport {
+    static func restoreFirstResponder(_ textView: NSTextView, selection: NSRange, retryCount: Int = 0) {
+        DispatchQueue.main.async {
+            guard let window = textView.window else {
+                if retryCount < 6 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+                        restoreFirstResponder(textView, selection: selection, retryCount: retryCount + 1)
+                    }
+                }
+                return
+            }
+
+            if window.firstResponder !== textView {
+                window.makeFirstResponder(textView)
+            }
+
+            let clampedSelection = clamped(selection, in: textView.string)
+            if textView.selectedRange() != clampedSelection {
+                textView.setSelectedRange(clampedSelection)
+            }
+        }
+    }
+
+    private static func clamped(_ range: NSRange, in text: String) -> NSRange {
+        let length = (text as NSString).length
+        let location = min(max(0, range.location), length)
+        return NSRange(location: location, length: min(range.length, max(0, length - location)))
+    }
+}
+
 private struct PromptTextInputView: NSViewRepresentable {
     @Binding var text: String
     @Binding var selectionRange: NSRange
@@ -7180,6 +7283,7 @@ private struct PromptTextInputView: NSViewRepresentable {
     let submitOnReturn: Bool
     let submit: () -> Void
     let completeLink: (String) -> Void
+    let onBeginEditing: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -7230,6 +7334,9 @@ private struct PromptTextInputView: NSViewRepresentable {
         context.coordinator.isExpanded = isExpanded
         context.coordinator.isFocused = isFocused
         context.coordinator.submitOnReturn = submitOnReturn
+        context.coordinator.submit = submit
+        context.coordinator.completeLink = completeLink
+        context.coordinator.onBeginEditing = onBeginEditing
         context.coordinator.updateTextInsets(in: textView)
         textView.setSelectedRange(clamped(selectionRange, in: text))
         context.coordinator.applyFocus(to: textView)
@@ -7238,6 +7345,8 @@ private struct PromptTextInputView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? PromptNSTextView else { return }
+        let wasFirstResponder = textView.window?.firstResponder === textView
+        let selection = textView.selectedRange()
         context.coordinator.text = $text
         context.coordinator.selectionRange = $selectionRange
         context.coordinator.suggestionAnchor = $suggestionAnchor
@@ -7248,6 +7357,7 @@ private struct PromptTextInputView: NSViewRepresentable {
         context.coordinator.submitOnReturn = submitOnReturn
         context.coordinator.submit = submit
         context.coordinator.completeLink = completeLink
+        context.coordinator.onBeginEditing = onBeginEditing
         context.coordinator.textView = textView
         scrollView.hasVerticalScroller = isExpanded
         textView.font = NSFont.systemFont(ofSize: fontSize)
@@ -7259,6 +7369,9 @@ private struct PromptTextInputView: NSViewRepresentable {
         }
         context.coordinator.updateSuggestionAnchor()
         context.coordinator.applyFocus(to: textView)
+        if wasFirstResponder {
+            PromptTextInputFocusSupport.restoreFirstResponder(textView, selection: selection)
+        }
     }
 
     private func clamped(_ range: NSRange, in text: String) -> NSRange {
@@ -7278,6 +7391,7 @@ private struct PromptTextInputView: NSViewRepresentable {
         var isExpanded = false
         var isFocused = false
         var submitOnReturn = true
+        var onBeginEditing: (() -> Void)?
         weak var textView: NSTextView?
 
         init(
@@ -7302,20 +7416,24 @@ private struct PromptTextInputView: NSViewRepresentable {
         }
 
         func applyFocus(to textView: NSTextView, retryCount: Int = 0) {
-            guard isFocused else { return }
+            let shouldFocus = isFocused || textView.window?.firstResponder === textView
+            guard shouldFocus else { return }
+            let selection = clampedSelection(in: textView.string)
             DispatchQueue.main.async {
                 guard let window = textView.window else {
-                    if retryCount < 3 {
+                    if retryCount < 6 {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
                             self.applyFocus(to: textView, retryCount: retryCount + 1)
                         }
                     }
                     return
                 }
-                guard window.firstResponder !== textView else { return }
-
-                window.makeFirstResponder(textView)
-                textView.setSelectedRange(self.clampedSelection(in: textView.string))
+                if window.firstResponder !== textView {
+                    window.makeFirstResponder(textView)
+                }
+                if textView.selectedRange() != selection {
+                    textView.setSelectedRange(selection)
+                }
             }
         }
 
@@ -7324,6 +7442,10 @@ private struct PromptTextInputView: NSViewRepresentable {
             text.wrappedValue = textView.string
             publishSelection(from: textView)
             updateSuggestionAnchor()
+        }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            onBeginEditing?()
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
@@ -7472,7 +7594,6 @@ private struct AssistantFloatingPill: View {
     @ObservedObject var store: BrainStore
     @FocusState private var isPromptFocused: Bool
     @State private var isExpandedComposerPresented = false
-    @FocusState private var isExpandedPromptFocused: Bool
     @State private var isSendHovered = false
     @State private var isAttachmentHovered = false
     @State private var isWritingModeHovered = false
@@ -7531,6 +7652,7 @@ private struct AssistantFloatingPill: View {
             if let response = store.assistantConversationResponse {
                 AssistantConversationPanel(
                     response: response,
+                    pageTitle: store.title,
                     addToPage: {
                         store.addAssistantConversationResponseToCurrentNote()
                     },
@@ -7607,11 +7729,7 @@ private struct AssistantFloatingPill: View {
             .clipShape(RoundedRectangle(cornerRadius: pillCornerRadius, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: pillCornerRadius, style: .continuous))
             .onTapGesture {
-                if isExpandedComposerPresented {
-                    isExpandedPromptFocused = true
-                } else {
-                    isPromptFocused = true
-                }
+                isPromptFocused = true
             }
             .overlay {
                 RoundedRectangle(cornerRadius: pillCornerRadius, style: .continuous)
@@ -7629,7 +7747,6 @@ private struct AssistantFloatingPill: View {
                         isExpandedComposerPresented = false
                     }
                     DispatchQueue.main.async {
-                        isExpandedPromptFocused = false
                         isPromptFocused = true
                     }
                 }
@@ -7772,11 +7889,10 @@ private struct AssistantFloatingPill: View {
             withAnimation(.easeInOut(duration: 0.18)) {
                 isExpandedComposerPresented.toggle()
             }
-            if !isExpandedComposerPresented {
-                isExpandedPromptFocused = false
-                isPromptFocused = true
-            } else {
+            if isExpandedComposerPresented {
                 focusExpandedPromptAfterLayout()
+            } else {
+                isPromptFocused = true
             }
         } label: {
             Image(systemName: isExpandedComposerPresented ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
@@ -7888,20 +8004,20 @@ private struct AssistantFloatingPill: View {
                 suggestionRange: activePromptSuggestionNSRange,
                 suggestionAnchor: $promptSuggestionAnchor,
                 isExpanded: isExpanded,
-                isFocused: isExpanded ? isExpandedPromptFocused : isPromptFocused,
+                isFocused: isPromptFocused,
                 submitOnReturn: !isExpanded,
                 submit: submitPromptAndCollapseIfNeeded,
                 completeLink: { title in
                     completePromptWikiLink(with: title)
+                },
+                onBeginEditing: {
+                    isPromptFocused = true
                 }
             )
             .frame(width: width, height: height)
+            .animation(nil, value: height)
             .onTapGesture {
-                if isExpanded {
-                    isExpandedPromptFocused = true
-                } else {
-                    isPromptFocused = true
-                }
+                isPromptFocused = true
             }
 
             if store.assistantPrompt.isEmpty {
@@ -8159,7 +8275,7 @@ private struct AssistantFloatingPill: View {
     }
 
     private var isAnyPromptFocused: Bool {
-        isPromptFocused || isExpandedPromptFocused
+        isPromptFocused
     }
 
     private func schedulePromptLayoutRefresh(to text: String) {
@@ -8195,6 +8311,7 @@ private struct AssistantFloatingPill: View {
 
     private func expandComposerIfPromptNeedsRoom() {
         guard promptNeedsExpandedComposer, !isExpandedComposerPresented, !isThinking else { return }
+        isPromptFocused = true
         withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
             isExpandedComposerPresented = true
         }
@@ -8206,7 +8323,6 @@ private struct AssistantFloatingPill: View {
         withAnimation(.easeInOut(duration: 0.18)) {
             isExpandedComposerPresented = false
         }
-        isExpandedPromptFocused = false
         if focusCompactPrompt {
             DispatchQueue.main.async {
                 isPromptFocused = true
@@ -8215,18 +8331,17 @@ private struct AssistantFloatingPill: View {
     }
 
     private func focusExpandedPromptAfterLayout() {
-        isPromptFocused = false
-        isExpandedPromptFocused = false
+        isPromptFocused = true
         DispatchQueue.main.async {
-            isExpandedPromptFocused = true
+            isPromptFocused = true
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            isExpandedPromptFocused = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            isPromptFocused = true
         }
     }
 
     private func pastePromptImages(from providers: [NSItemProvider]) {
-        guard isPromptFocused || isExpandedPromptFocused else { return }
+        guard isPromptFocused else { return }
 
         if let fileProvider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) {
             fileProvider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
@@ -8357,27 +8472,31 @@ private struct WebSearchStatusPill: View {
 private struct AnimatedThinkingBorder: View {
     var lineWidth: CGFloat = 0.85
     var cornerRadius: CGFloat? = nil
-    @State private var rotation = Angle.degrees(0)
+    private let spinDuration: TimeInterval = 1.35
 
     var body: some View {
-        Group {
-            if let cornerRadius {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(thinkingGradient, lineWidth: lineWidth)
-            } else {
-                Capsule()
-                    .strokeBorder(thinkingGradient, lineWidth: lineWidth)
-            }
-        }
-        .onAppear {
-            rotation = .degrees(0)
-            withAnimation(.linear(duration: 1.35).repeatForever(autoreverses: false)) {
-                rotation = .degrees(360)
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+            let rotation = spinAngle(at: timeline.date)
+
+            Group {
+                if let cornerRadius {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .strokeBorder(thinkingGradient(angle: rotation), lineWidth: lineWidth)
+                } else {
+                    Capsule()
+                        .strokeBorder(thinkingGradient(angle: rotation), lineWidth: lineWidth)
+                }
             }
         }
     }
 
-    private var thinkingGradient: AngularGradient {
+    private func spinAngle(at date: Date) -> Angle {
+        let progress = date.timeIntervalSinceReferenceDate
+            .truncatingRemainder(dividingBy: spinDuration) / spinDuration
+        return .degrees(progress * 360)
+    }
+
+    private func thinkingGradient(angle: Angle) -> AngularGradient {
         AngularGradient(
             colors: [
                 .white.opacity(0.12),
@@ -8387,7 +8506,7 @@ private struct AnimatedThinkingBorder: View {
                 .white.opacity(0.12)
             ],
             center: .center,
-            angle: rotation
+            angle: angle
         )
     }
 }
