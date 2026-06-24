@@ -5,8 +5,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_PATH="${1:-$ROOT/build/Zirn.app}"
 ENTITLEMENTS="$ROOT/Zehan/Zirn.release.entitlements"
 ADHOC_ENTITLEMENTS="$ROOT/Zehan/Zirn.adhoc.entitlements"
+FIND_PROFILE="$ROOT/scripts/find-developer-id-profile.py"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 ALLOW_ADHOC_RELEASE="${ALLOW_ADHOC_RELEASE:-0}"
+PROVISIONING_PROFILE="${PROVISIONING_PROFILE:-}"
 
 if [[ ! -d "$APP_PATH" ]]; then
   echo "Missing app bundle: $APP_PATH"
@@ -60,10 +62,50 @@ release_app_is_developer_id_signed() {
   codesign -dvvv "$APP_PATH" 2>&1 | grep -q "Authority=Developer ID Application:"
 }
 
+embed_developer_id_provision_profile() {
+  local profile="$1"
+  mkdir -p "$APP_PATH/Contents"
+  cp "$profile" "$APP_PATH/Contents/embedded.provisionprofile"
+  echo "Embedded provisioning profile: $(basename "$profile")"
+}
+
+find_developer_id_provision_profile() {
+  if [[ -n "$PROVISIONING_PROFILE" ]]; then
+    if [[ -f "$PROVISIONING_PROFILE" ]]; then
+      echo "$PROVISIONING_PROFILE"
+      return 0
+    fi
+    echo "PROVISIONING_PROFILE not found: $PROVISIONING_PROFILE" >&2
+    return 1
+  fi
+
+  if [[ ! -x "$FIND_PROFILE" ]]; then
+    chmod +x "$FIND_PROFILE"
+  fi
+
+  "$FIND_PROFILE"
+}
+
 developer_id_sign_release_app() {
   local identity="$1"
+  local profile
   local signing_args=(--force --sign "$identity" --timestamp --options runtime)
 
+  if ! profile="$(find_developer_id_provision_profile)"; then
+    cat >&2 <<'EOF'
+Missing Developer ID Application provisioning profile for noortech.Zirn.
+
+Create one in Apple Developer → Profiles → + → Developer ID Application,
+select App ID noortech.Zirn (Keychain Sharing enabled), and your Developer ID
+certificate. Download it, then in Xcode open Settings → Accounts → Download
+Manual Profiles.
+
+Or set PROVISIONING_PROFILE to the downloaded .provisionprofile path.
+EOF
+    exit 1
+  fi
+
+  embed_developer_id_provision_profile "$profile"
   resign_sparkle_binaries "$identity" "${signing_args[@]}"
   codesign "${signing_args[@]}" \
     --entitlements "$ENTITLEMENTS" \
@@ -109,14 +151,20 @@ verify_release_launch_entitlements() {
   embedded="$(codesign -d --entitlements - "$APP_PATH" 2>/dev/null || true)"
 
   if grep -q 'keychain-access-groups' <<<"$embedded"; then
-    cat >&2 <<'EOF'
-ERROR: Release build includes keychain-access-groups in the signed app.
+    if [[ ! -f "$APP_PATH/Contents/embedded.provisionprofile" ]]; then
+      cat >&2 <<'EOF'
+ERROR: Release build claims keychain-access-groups but has no embedded.provisionprofile.
 
-On macOS 26 this breaks launch unless a matching Developer ID provisioning
-profile is embedded. Remove keychain from Zirn.release.entitlements until the
-profile workflow is fixed.
+On macOS 26 the app will fail to launch. Embed a Developer ID Application
+provisioning profile before shipping.
 EOF
-    exit 1
+      exit 1
+    fi
+    return 0
+  fi
+
+  if [[ -f "$APP_PATH/Contents/embedded.provisionprofile" ]]; then
+    echo "Warning: embedded.provisionprofile present but keychain entitlement missing."
   fi
 }
 

@@ -1,5 +1,10 @@
 # Patch Notes
 
+## v1.4.4
+
+- Restored Apple Passwords / Keychain support in notarized release builds by embedding a Developer ID Application provisioning profile and signing with the Keychain access group entitlement.
+- Release signing now fails early if the Developer ID profile for `noortech.Zirn` is missing, so broken Keychain builds cannot ship again.
+
 ## v1.4.3
 
 - Fixed Zirn failing to open after v1.4.2 by restoring release re-signing entitlements that macOS 26 can launch. Keychain in shipped builds remains a follow-up once the Developer ID provisioning profile is wired up.

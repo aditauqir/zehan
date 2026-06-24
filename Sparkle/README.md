@@ -42,6 +42,21 @@ The ship scripts default to `NOTARYTOOL_PROFILE=ZirnNotary`. Release signing run
 in `/tmp/ZirnReleaseStage` because codesign rejects Sparkle binaries inside the
 iCloud `nosync` workspace folder.
 
+### Keychain / Apple Passwords (Developer ID profile)
+
+Release builds that save API keys to Apple Passwords need a **Developer ID
+Application** provisioning profile for `noortech.Zirn` with **Keychain Sharing**
+enabled on the App ID. `scripts/sign-release-app.sh` embeds
+`Contents/embedded.provisionprofile` and signs with `keychain-access-groups`.
+
+One-time setup:
+
+1. [developer.apple.com/account/resources/profiles/add](https://developer.apple.com/account/resources/profiles/add) → **Developer ID Application** → App ID `noortech.Zirn` → your Developer ID certificate → download.
+2. Double-click the `.provisionprofile` file, or in Xcode: **Settings → Accounts → Download Manual Profiles**.
+3. Verify: `python3 scripts/find-developer-id-profile.py` prints the profile path.
+
+Override for CI or custom paths: `PROVISIONING_PROFILE=/path/to/profile.provisionprofile`.
+
 **First-time Apple Developer accounts:** after enrolling, sign all agreements at
 [developer.apple.com/account](https://developer.apple.com/account) and
 [appstoreconnect.apple.com/agreements](https://appstoreconnect.apple.com/agreements).
