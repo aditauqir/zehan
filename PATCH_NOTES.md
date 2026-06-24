@@ -1,5 +1,10 @@
 # Patch Notes
 
+## v1.4.3
+
+- Fixed Zirn failing to open after v1.4.2 by restoring release re-signing entitlements that macOS 26 can launch. Keychain in shipped builds remains a follow-up once the Developer ID provisioning profile is wired up.
+- Kept the v1.4.2 fixes for Home summary saving, DeepSeek Home compilation, and brain AI preference sync.
+
 ## v1.4.2
 
 - Fixed Apple Passwords / Keychain storage by embedding the keychain access group in release-signed builds.

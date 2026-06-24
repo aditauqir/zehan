@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_PATH="${1:-$ROOT/build/Zirn.app}"
-ENTITLEMENTS="$ROOT/Zehan/Zirn.adhoc.entitlements"
+ENTITLEMENTS="$ROOT/Zehan/Zirn.release.entitlements"
+ADHOC_ENTITLEMENTS="$ROOT/Zehan/Zirn.adhoc.entitlements"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 ALLOW_ADHOC_RELEASE="${ALLOW_ADHOC_RELEASE:-0}"
 
@@ -20,13 +21,13 @@ strip_release_metadata() {
     xattr -d com.apple.provenance "$path" 2>/dev/null || true
     xattr -d com.apple.FinderInfo "$path" 2>/dev/null || true
   done
-  rm -f "$APP_PATH/Contents/embedded.provisionprofile"
 }
 
 sign_path() {
   local target="$1"
+  shift
   xattr -cr "$target" 2>/dev/null || true
-  codesign "${signing_args[@]}" "$target"
+  codesign "$@" "$target"
 }
 
 sign_release_app() {
@@ -34,34 +35,13 @@ sign_release_app() {
 
   strip_release_metadata
 
-  local signing_args=(--force --sign "$identity")
-  if [[ "$identity" != "-" ]]; then
-    signing_args+=(--timestamp --options runtime)
+  if [[ "$identity" == "-" ]]; then
+    adhoc_sign_release_app "$identity"
+  elif release_app_is_developer_id_signed; then
+    echo "Keeping existing Developer ID signature."
+  else
+    developer_id_sign_release_app "$identity"
   fi
-
-  # Nested Sparkle code must be signed consistently with the main binary.
-  local sparkle_b="$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B"
-  if [[ -d "$sparkle_b" ]]; then
-    for bin in \
-      "$sparkle_b/XPCServices/Downloader.xpc/Contents/MacOS/Downloader" \
-      "$sparkle_b/XPCServices/Installer.xpc/Contents/MacOS/Installer" \
-      "$sparkle_b/Autoupdate" \
-      "$sparkle_b/Updater.app/Contents/MacOS/Updater" \
-      "$sparkle_b/Sparkle"
-    do
-      if [[ -f "$bin" ]]; then
-        sign_path "$bin"
-      fi
-    done
-    sign_path "$sparkle_b/Updater.app"
-    sign_path "$sparkle_b"
-    sign_path "$APP_PATH/Contents/Frameworks/Sparkle.framework"
-  fi
-
-  xattr -cr "$APP_PATH" 2>/dev/null || true
-  codesign "${signing_args[@]}" \
-    --entitlements "$ENTITLEMENTS" \
-    "$APP_PATH"
 
   strip_release_metadata
 
@@ -71,31 +51,70 @@ sign_release_app() {
     exit 1
   fi
 
-  verify_keychain_entitlement
+  verify_release_launch_entitlements
 
-  echo "Signed: $APP_PATH"
+  echo "Release app ready: $APP_PATH"
 }
 
-verify_keychain_entitlement() {
+release_app_is_developer_id_signed() {
+  codesign -dvvv "$APP_PATH" 2>&1 | grep -q "Authority=Developer ID Application:"
+}
+
+developer_id_sign_release_app() {
+  local identity="$1"
+  local signing_args=(--force --sign "$identity" --timestamp --options runtime)
+
+  resign_sparkle_binaries "$identity" "${signing_args[@]}"
+  codesign "${signing_args[@]}" \
+    --entitlements "$ENTITLEMENTS" \
+    "$APP_PATH"
+}
+
+adhoc_sign_release_app() {
+  local identity="$1"
+  local signing_args=(--force --sign "$identity")
+
+  resign_sparkle_binaries "$identity" "${signing_args[@]}"
+  codesign "${signing_args[@]}" \
+    --entitlements "$ADHOC_ENTITLEMENTS" \
+    "$APP_PATH"
+}
+
+resign_sparkle_binaries() {
+  local identity="$1"
+  shift
+  local signing_args=("$@")
+
+  local sparkle_b="$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B"
+  [[ -d "$sparkle_b" ]] || return 0
+
+  for bin in \
+    "$sparkle_b/XPCServices/Downloader.xpc/Contents/MacOS/Downloader" \
+    "$sparkle_b/XPCServices/Installer.xpc/Contents/MacOS/Installer" \
+    "$sparkle_b/Autoupdate" \
+    "$sparkle_b/Updater.app/Contents/MacOS/Updater" \
+    "$sparkle_b/Sparkle"
+  do
+    if [[ -f "$bin" ]]; then
+      sign_path "$bin" "${signing_args[@]}"
+    fi
+  done
+  sign_path "$sparkle_b/Updater.app" "${signing_args[@]}"
+  sign_path "$sparkle_b" "${signing_args[@]}"
+  sign_path "$APP_PATH/Contents/Frameworks/Sparkle.framework" "${signing_args[@]}"
+}
+
+verify_release_launch_entitlements() {
   local embedded
   embedded="$(codesign -d --entitlements - "$APP_PATH" 2>/dev/null || true)"
 
-  if ! grep -q 'keychain-access-groups' <<<"$embedded"; then
+  if grep -q 'keychain-access-groups' <<<"$embedded"; then
     cat >&2 <<'EOF'
-ERROR: Signed app is missing keychain-access-groups.
+ERROR: Release build includes keychain-access-groups in the signed app.
 
-Add to Keychain / Apple Passwords will not work. Check Zehan/Zirn.adhoc.entitlements
-before shipping another release.
-EOF
-    exit 1
-  fi
-
-  if grep -q 'AppIdentifierPrefix' <<<"$embedded"; then
-    cat >&2 <<'EOF'
-ERROR: keychain-access-groups was not expanded during signing.
-
-Use the literal team-prefixed group (for example L22992699P.noortech.Zirn) in
-Zehan/Zirn.adhoc.entitlements for release re-signing.
+On macOS 26 this breaks launch unless a matching Developer ID provisioning
+profile is embedded. Remove keychain from Zirn.release.entitlements until the
+profile workflow is fixed.
 EOF
     exit 1
   fi
