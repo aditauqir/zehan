@@ -2506,8 +2506,8 @@ private struct HelpDeskPromptInputView: NSViewRepresentable {
         if textView.string != text {
             textView.string = text
             textView.setSelectedRange(clamped(selectionRange, in: text))
+            scrollView.syncDocumentViewFrame()
         }
-        scrollView.syncDocumentViewFrame()
     }
 
     private func clamped(_ range: NSRange, in text: String) -> NSRange {
@@ -2546,7 +2546,9 @@ private struct HelpDeskPromptInputView: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            text.wrappedValue = textView.string
+            if text.wrappedValue != textView.string {
+                text.wrappedValue = textView.string
+            }
             publishSelection(from: textView)
             (textView.enclosingScrollView as? HelpDeskPromptScrollView)?.syncDocumentViewFrame()
         }
@@ -2578,9 +2580,20 @@ private final class HelpDeskPromptScrollView: NSScrollView {
         let usedHeight = layoutManager.usedRect(for: textContainer).height
         let inset = textView.textContainerInset
         let contentNeeded = ceil(usedHeight + inset.height * 2)
+        let lineHeight = HelpDeskComposerMetrics.lineHeight
+        let contentLines = max(
+            1,
+            min(
+                HelpDeskComposerMetrics.maxVisibleLines,
+                Int(ceil(max(0, contentNeeded - inset.height * 2) / lineHeight))
+            )
+        )
         let preferredVisibleHeight = min(
             HelpDeskComposerMetrics.maxInputHeight,
-            max(HelpDeskComposerMetrics.minInputHeight, contentNeeded)
+            max(
+                HelpDeskComposerMetrics.minInputHeight,
+                CGFloat(contentLines) * lineHeight + inset.height * 2
+            )
         )
         onContentHeightChange?(preferredVisibleHeight)
 
@@ -3113,7 +3126,7 @@ private struct HelpDeskView: View {
                     )
                     .frame(maxWidth: .infinity)
                     .frame(height: helpDeskComposerContentHeight)
-                    .animation(.easeOut(duration: 0.12), value: helpDeskComposerContentHeight)
+                    .animation(.smooth(duration: 0.28), value: helpDeskComposerContentHeight)
 
                     if store.helpDeskInput.isEmpty {
                         Text("Ask the vault")
@@ -5572,7 +5585,14 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            syncTextAndSelectionAfterUndoRedo(in: textView)
+            if text.wrappedValue != textView.string {
+                text.wrappedValue = textView.string
+            }
+            publishSelection(from: textView, deferUpdate: true)
+            updateTypingAttributesForCurrentLine(in: textView)
+            scheduleMarkdownStyling()
+            updateSuggestionAnchor()
+            updateRelevanceAnchor()
         }
 
         func textDidEndEditing(_ notification: Notification) {
@@ -7458,6 +7478,8 @@ private struct AssistantFloatingPill: View {
     @State private var isWritingModeHovered = false
     @State private var promptSelectionRange = NSRange(location: 0, length: 0)
     @State private var promptSuggestionAnchor: CGPoint?
+    @State private var promptLayoutText = ""
+    @State private var promptLayoutRefreshTask: Task<Void, Never>?
 
     private var noteTitles: [String] {
         store.notes.map(\.title)
@@ -7613,14 +7635,20 @@ private struct AssistantFloatingPill: View {
                 }
             }
         }
-        .animation(.easeOut(duration: 0.18), value: pillWidth)
-        .animation(.easeInOut(duration: 0.18), value: pillCornerRadius)
         .animation(.easeOut(duration: 0.18), value: isThinking)
         .animation(.easeInOut(duration: 0.18), value: store.assistantAttachment)
         .animation(.easeInOut(duration: 0.18), value: store.assistantConversationResponse)
         .animation(.easeInOut(duration: 0.16), value: store.isAssistantWritingMode)
         .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isExpandedComposerPresented)
-        .onChange(of: store.assistantPrompt) { _, _ in
+        .animation(.smooth(duration: 0.28), value: promptLayoutText)
+        .onAppear {
+            promptLayoutText = store.assistantPrompt
+        }
+        .onDisappear {
+            promptLayoutRefreshTask?.cancel()
+        }
+        .onChange(of: store.assistantPrompt) { _, newValue in
+            schedulePromptLayoutRefresh(to: newValue)
             expandComposerIfPromptNeedsRoom()
         }
         .onChange(of: store.assistantConversationResponse) { _, response in
@@ -7920,7 +7948,7 @@ private struct AssistantFloatingPill: View {
     }
 
     private var measuredPromptText: String {
-        let prompt = store.assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = promptLayoutText.trimmingCharacters(in: .whitespacesAndNewlines)
         return prompt.isEmpty ? promptPlaceholder : prompt
     }
 
@@ -7930,7 +7958,9 @@ private struct AssistantFloatingPill: View {
 
     private var estimatedPromptWidth: CGFloat {
         let characterWidth = averagePromptCharacterWidth(fontSize: compactPromptFontSize)
-        return min(524, max(86, CGFloat(measuredPromptText.count) * characterWidth))
+        let raw = min(524, max(86, CGFloat(measuredPromptText.count) * characterWidth))
+        let step: CGFloat = 32
+        return min(524, max(86, ceil(raw / step) * step))
     }
 
     private var compactPromptLineCount: Int {
@@ -7977,7 +8007,7 @@ private struct AssistantFloatingPill: View {
     ) -> Int {
         let availableWidth = max(48, width - horizontalInset)
         let charactersPerLine = max(8, Int(floor(availableWidth / averagePromptCharacterWidth(fontSize: fontSize))))
-        let source = store.assistantPrompt.isEmpty ? measuredPromptText : store.assistantPrompt
+        let source = promptLayoutText.isEmpty ? measuredPromptText : promptLayoutText
         let visualLines = source.components(separatedBy: .newlines).reduce(0) { count, line in
             let utf16Count = max(1, (line as NSString).length)
             return count + max(1, Int(ceil(Double(utf16Count) / Double(charactersPerLine))))
@@ -8130,6 +8160,15 @@ private struct AssistantFloatingPill: View {
 
     private var isAnyPromptFocused: Bool {
         isPromptFocused || isExpandedPromptFocused
+    }
+
+    private func schedulePromptLayoutRefresh(to text: String) {
+        promptLayoutRefreshTask?.cancel()
+        promptLayoutRefreshTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+            promptLayoutText = text
+        }
     }
 
     private func submitPromptAndCollapseIfNeeded() {
