@@ -3,6 +3,24 @@
     <channel>
         <title>Zirn</title>
         <item>
+            <title>1.4.2</title>
+            <pubDate>Wed, 24 Jun 2026 10:53:31 -0400</pubDate>
+            <link>https://github.com/aditauqir/zehan</link>
+            <sparkle:version>14</sparkle:version>
+            <sparkle:shortVersionString>1.4.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>Zirn v1.4.2</h2>
+<ul>
+  <li>Fixed Apple Passwords / Keychain storage by embedding the keychain access group in release-signed builds.</li>
+  <li>Fixed Home page generation failing to save <code>home-summary.md</code> when a vault is open by restoring security-scoped folder access before writing summaries.</li>
+  <li>Fixed DeepSeek Home page and summary generation by disabling V4 thinking mode for structured markdown output so the model returns complete Home documents instead of truncated reasoning.</li>
+  <li>Fixed brain vault AI preference sync failing after loading API keys from Keychain when a vault is open.</li>
+  <li>Added a release signing check that blocks shipping builds missing the Keychain entitlement.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.2/Zirn-1.4.2.zip" length="6228522" type="application/octet-stream" sparkle:edSignature="j1JTbh6hT4q/3UJ1WNvAt3NAaJak7PKrvwjd1lGurcj9w13DPEfzS9IoxDU0x8AWBYUZEL7C1UJ6gBo0ExbxDw=="/>
+        </item>
+        <item>
             <title>1.4.1</title>
             <pubDate>Tue, 23 Jun 2026 17:35:20 -0400</pubDate>
             <link>https://github.com/aditauqir/zehan</link>
@@ -55,27 +73,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4/Zirn-1.4.zip" length="6023397" type="application/octet-stream" sparkle:edSignature="9k8k3ZSmAkFXb7QN5gYNRDQwCtvqJI7KV3XXj047VfZzSn6EW3eCZJjHLyvinJ7FWn7CXyO0Aa1I/Qf13O5NAw=="/>
-        </item>
-        <item>
-            <title>1.2</title>
-            <pubDate>Sun, 21 Jun 2026 23:36:26 -0400</pubDate>
-            <link>https://github.com/aditauqir/zehan</link>
-            <sparkle:version>11</sparkle:version>
-            <sparkle:shortVersionString>1.2</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <description><![CDATA[<h2>Zirn v1.2</h2>
-<ul>
-  <li>Added liquid-glass relevance suggestions while writing Markdown, with in-place wiki-link creation and cursor placement at the end of the inserted link.</li>
-  <li>Added page flashcards from the Home page, with question/answer cards, source navigation, close/regenerate controls, and cached <code>.fcard</code> storage per vault.</li>
-  <li>Fixed Home summary refresh so Zirn reads newly added vault pages without regenerating unchanged existing page summaries.</li>
-  <li>Fixed Home summary formatting by keeping the vault overview as a compact paragraph and page summaries as concise bullets without divider artifacts.</li>
-  <li>Fixed Home reopening so cached Home content is not regenerated unless the similarity trigger or manual refresh requires it.</li>
-  <li>Improved relevance suggestion behavior so it persists until whitespace or dismissal, uses a system/liquid-glass star style, and no longer triggers the normal link autocomplete popup.</li>
-  <li>Added <code>.fcard/</code> git-ignore coverage for generated flashcard caches.</li>
-  <li>Changed the app version to <code>1.2</code>.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.2/Zirn-1.2.zip" length="5991242" type="application/octet-stream" sparkle:edSignature="gQh2mtesyJ4FpzyKkbL8kwNdVH+PaL45E+RVsvy2hljRdM6NBFZXFOdohwVmvPNLqVQve0Hxol84wH4kS+jGCg=="/>
         </item>
         <item>
             <title>1.0.2</title>
