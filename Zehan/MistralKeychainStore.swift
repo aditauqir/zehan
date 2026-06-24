@@ -53,7 +53,7 @@ enum MistralKeychainStore {
         var errorDescription: String? {
             switch self {
             case .missingAccessGroup:
-                return "Couldn't access Keychain. Run Zirn from Xcode with your Apple ID team selected in Signing & Capabilities."
+                return "Couldn't access Keychain. Reinstall the latest Zirn build, or run from Xcode with your Apple ID team selected in Signing & Capabilities."
             case .authenticationUnavailable(let message):
                 return message
             case .authenticationCancelled:

@@ -4347,7 +4347,8 @@ final class BrainStore: ObservableObject {
             "messages": requestMessages,
             "temperature": 0.35,
             "max_tokens": maxTokens,
-            "stream": stream
+            "stream": stream,
+            "thinking": ["type": "disabled"]
         ]
     }
 
@@ -6896,7 +6897,8 @@ final class BrainStore: ObservableObject {
     }
 
     private func cleanedAssistantMarkdown(_ markdown: String) -> String {
-        var output = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        var output = stripDeepSeekThinkingArtifacts(from: markdown)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if output.hasPrefix("```markdown") {
             output.removeFirst("```markdown".count)
         } else if output.hasPrefix("```") {
@@ -6906,6 +6908,32 @@ final class BrainStore: ObservableObject {
             output.removeLast(3)
         }
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func stripDeepSeekThinkingArtifacts(from text: String) -> String {
+        let lt = "\u{003C}"
+        let gt = "\u{003E}"
+        var output = text
+        for (open, close) in [
+            (lt + "think" + gt, lt + "/think" + gt),
+            (lt + "redacted_thinking" + gt, lt + "/redacted_thinking" + gt)
+        ] {
+            output = stripDelimitedBlocks(from: output, open: open, close: close)
+        }
+        return output
+    }
+
+    private func stripDelimitedBlocks(from text: String, open: String, close: String) -> String {
+        var output = text
+        while let start = output.range(of: open) {
+            if let end = output.range(of: close, range: start.upperBound..<output.endIndex) {
+                output.removeSubrange(start.lowerBound..<end.upperBound)
+            } else {
+                output.removeSubrange(start.lowerBound..<output.endIndex)
+                break
+            }
+        }
+        return output
     }
 
     private func cleanedWritingAssistantMarkdown(_ markdown: String) -> String {
@@ -7028,13 +7056,17 @@ final class BrainStore: ObservableObject {
             content = nil
         }
 
-        guard let content else {
+        let cleanedContent = content.map(stripDeepSeekThinkingArtifacts(from:)).flatMap { text in
+            text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
+        }
+
+        guard let cleanedContent else {
             throw AssistantError.requestFailed("The model returned no Markdown.")
         }
 
         let usage = json["usage"] as? [String: Any]
         return ChatCompletionResult(
-            content: content,
+            content: cleanedContent,
             inputTokens: usage?["prompt_tokens"] as? Int
                 ?? usage?["input_tokens"] as? Int,
             outputTokens: usage?["completion_tokens"] as? Int
@@ -7264,15 +7296,18 @@ final class BrainStore: ObservableObject {
     }
 
     private func syncBrainAIPreferencesIfPossible() throws {
-        guard let activeBrain else { return }
-        var brain = try readBrain(from: activeBrain.brainURL)
-        brain.ai.provider = selectedAssistantModel.rawValue
-        brain.ai.mistralModel = mistralModel
-        brain.ai.deepSeekModel = deepSeekModel
-        brain.ai.ollamaModel = ollamaModel
-        brain.ai.ollamaURL = cleanOllamaURL(ollamaURL)
-        brain.vault.updatedAt = Date()
-        try writeBrain(brain, to: activeBrain.brainURL)
+        guard activeBrain != nil else { return }
+        try withActiveBrainAccessThrowing {
+            guard let activeBrain else { return }
+            var brain = try readBrain(from: activeBrain.brainURL)
+            brain.ai.provider = selectedAssistantModel.rawValue
+            brain.ai.mistralModel = mistralModel
+            brain.ai.deepSeekModel = deepSeekModel
+            brain.ai.ollamaModel = ollamaModel
+            brain.ai.ollamaURL = cleanOllamaURL(ollamaURL)
+            brain.vault.updatedAt = Date()
+            try writeBrain(brain, to: activeBrain.brainURL)
+        }
     }
 
     private func searchPreview(
@@ -8025,29 +8060,32 @@ final class BrainStore: ObservableObject {
     }
 
     private func persistHighlightSummary(_ summary: HighlightSummary) throws {
-        guard let brain = activeBrain else { return }
-        let folder = hiddenSummariesFolderURL(for: brain)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        guard activeBrain != nil else { return }
+        try withActiveBrainAccessThrowing {
+            guard let brain = activeBrain else { return }
+            let folder = hiddenSummariesFolderURL(for: brain)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 
-        let metadata = HighlightSummaryMetadata(
-            id: summary.id,
-            sourceNoteID: summary.sourceNoteID,
-            sourceTitle: summary.sourceTitle,
-            title: summary.title,
-            compiledAt: summary.compiledAt,
-            compileDuration: summary.compileDuration,
-            modelTitle: summary.modelTitle,
-            sourceFingerprint: summary.sourceFingerprint,
-            sourceDiceTokens: summary.sourceDiceTokens
-        )
-        let metadataData = try encoder.encode(metadata)
-        guard let metadataText = String(data: metadataData, encoding: .utf8) else {
-            throw CocoaError(.fileWriteUnknown)
+            let metadata = HighlightSummaryMetadata(
+                id: summary.id,
+                sourceNoteID: summary.sourceNoteID,
+                sourceTitle: summary.sourceTitle,
+                title: summary.title,
+                compiledAt: summary.compiledAt,
+                compileDuration: summary.compileDuration,
+                modelTitle: summary.modelTitle,
+                sourceFingerprint: summary.sourceFingerprint,
+                sourceDiceTokens: summary.sourceDiceTokens
+            )
+            let metadataData = try encoder.encode(metadata)
+            guard let metadataText = String(data: metadataData, encoding: .utf8) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+
+            let fileURL = folder.appendingPathComponent("\(summary.id).md")
+            let markdown = "---\n\(metadataText)\n---\n\n\(summary.markdown)"
+            try Data(markdown.utf8).write(to: fileURL, options: .atomic)
         }
-
-        let fileURL = folder.appendingPathComponent("\(summary.id).md")
-        let markdown = "---\n\(metadataText)\n---\n\n\(summary.markdown)"
-        try Data(markdown.utf8).write(to: fileURL, options: .atomic)
     }
 
     private func readHighlightSummary(from url: URL) throws -> HighlightSummary? {

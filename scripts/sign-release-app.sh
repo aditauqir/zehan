@@ -71,7 +71,34 @@ sign_release_app() {
     exit 1
   fi
 
+  verify_keychain_entitlement
+
   echo "Signed: $APP_PATH"
+}
+
+verify_keychain_entitlement() {
+  local embedded
+  embedded="$(codesign -d --entitlements - "$APP_PATH" 2>/dev/null || true)"
+
+  if ! grep -q 'keychain-access-groups' <<<"$embedded"; then
+    cat >&2 <<'EOF'
+ERROR: Signed app is missing keychain-access-groups.
+
+Add to Keychain / Apple Passwords will not work. Check Zehan/Zirn.adhoc.entitlements
+before shipping another release.
+EOF
+    exit 1
+  fi
+
+  if grep -q 'AppIdentifierPrefix' <<<"$embedded"; then
+    cat >&2 <<'EOF'
+ERROR: keychain-access-groups was not expanded during signing.
+
+Use the literal team-prefixed group (for example L22992699P.noortech.Zirn) in
+Zehan/Zirn.adhoc.entitlements for release re-signing.
+EOF
+    exit 1
+  fi
 }
 
 find_developer_id_identity() {

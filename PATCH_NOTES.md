@@ -1,5 +1,13 @@
 # Patch Notes
 
+## v1.4.2
+
+- Fixed Apple Passwords / Keychain storage by embedding the keychain access group in release-signed builds.
+- Fixed Home page generation failing to save `home-summary.md` when a vault is open by restoring security-scoped folder access before writing summaries.
+- Fixed DeepSeek Home page and summary generation by disabling V4 thinking mode for structured markdown output so the model returns complete Home documents instead of truncated reasoning.
+- Fixed brain vault AI preference sync failing after loading API keys from Keychain when a vault is open.
+- Added a release signing check that blocks shipping builds missing the Keychain entitlement.
+
 ## v1.4.1 (Raxat)
 
 - Redesigned the Zirn Chat start screen with PT Serif branding, the full-color app icon, and a centered composer that animates into place when a conversation begins.

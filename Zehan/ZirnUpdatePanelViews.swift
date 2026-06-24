@@ -189,11 +189,12 @@ struct ZirnReleaseNotesText: NSViewRepresentable {
         Coordinator()
     }
 
-    func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
+    func makeNSView(context: Context) -> ZirnReleaseNotesScrollView {
+        let scrollView = ZirnReleaseNotesScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
-        scrollView.autohidesScrollers = true
+        scrollView.autohidesScrollers = false
+        scrollView.scrollerStyle = .overlay
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
 
@@ -209,34 +210,97 @@ struct ZirnReleaseNotesText: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.heightTracksTextView = false
+        textView.textContainer?.lineFragmentPadding = 0
 
         scrollView.documentView = textView
-        context.coordinator.apply(html: html, to: textView)
+        context.coordinator.apply(html: html, to: textView, in: scrollView)
         return scrollView
     }
 
-    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+    func updateNSView(_ scrollView: ZirnReleaseNotesScrollView, context: Context) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
-        context.coordinator.apply(html: html, to: textView)
+        context.coordinator.apply(html: html, to: textView, in: scrollView)
     }
 
     final class Coordinator {
         private var appliedHTML: String?
 
-        func apply(html: String, to textView: NSTextView) {
-            guard appliedHTML != html else { return }
+        func apply(html: String, to textView: NSTextView, in scrollView: ZirnReleaseNotesScrollView) {
+            guard appliedHTML != html else {
+                scrollView.syncDocumentHeight()
+                return
+            }
             appliedHTML = html
 
             if let attributed = Self.attributedReleaseNotes(from: html) {
                 textView.textStorage?.setAttributedString(attributed)
             } else {
-                textView.string = html
+                textView.string = Self.plainText(fromHTML: html)
+                textView.font = NSFont.systemFont(ofSize: 13)
+                textView.textColor = .labelColor
             }
+
+            scrollView.syncDocumentHeight()
         }
 
         private static func attributedReleaseNotes(from html: String) -> NSAttributedString? {
-            guard let data = html.data(using: .utf8),
-                  let attributed = try? NSMutableAttributedString(
+            let items = extractListItems(from: html)
+            guard !items.isEmpty else { return nil }
+
+            let bodyFont = NSFont.systemFont(ofSize: 13)
+            let result = NSMutableAttributedString()
+
+            for (index, itemHTML) in items.enumerated() {
+                if index > 0 {
+                    result.append(NSAttributedString(string: "\n", attributes: [.font: bodyFont]))
+                }
+
+                let itemText = plainText(fromHTML: itemHTML)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !itemText.isEmpty else { continue }
+
+                let paragraphStyle = NSMutableParagraphStyle()
+                paragraphStyle.paragraphSpacing = index == items.count - 1 ? 0 : 10
+                paragraphStyle.lineSpacing = 2
+                paragraphStyle.headIndent = 17
+                paragraphStyle.firstLineHeadIndent = 0
+                paragraphStyle.tabStops = [
+                    NSTextTab(textAlignment: .left, location: 17, options: [:]),
+                ]
+
+                let line = NSMutableAttributedString(string: "•\t\(itemText)")
+                line.addAttributes(
+                    [
+                        .font: bodyFont,
+                        .foregroundColor: NSColor.labelColor,
+                        .paragraphStyle: paragraphStyle,
+                    ],
+                    range: NSRange(location: 0, length: line.length)
+                )
+                result.append(line)
+            }
+
+            return result.length > 0 ? result : nil
+        }
+
+        private static func extractListItems(from html: String) -> [String] {
+            guard let regex = try? NSRegularExpression(
+                pattern: #"<li(?: [^>]*)?>(.*?)</li>"#,
+                options: [.caseInsensitive, .dotMatchesLineSeparators]
+            ) else { return [] }
+
+            let nsHTML = html as NSString
+            let fullRange = NSRange(location: 0, length: nsHTML.length)
+            return regex.matches(in: html, range: fullRange).compactMap { match in
+                guard match.numberOfRanges > 1 else { return nil }
+                return nsHTML.substring(with: match.range(at: 1))
+            }
+        }
+
+        private static func plainText(fromHTML fragment: String) -> String {
+            let wrapped = "<meta charset=\"utf-8\">\(fragment)"
+            guard let data = wrapped.data(using: .utf8),
+                  let attributed = try? NSAttributedString(
                     data: data,
                     options: [
                         .documentType: NSAttributedString.DocumentType.html,
@@ -244,17 +308,47 @@ struct ZirnReleaseNotesText: NSViewRepresentable {
                     ],
                     documentAttributes: nil
                   )
-            else { return nil }
+            else {
+                return fragment
+                    .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+                    .replacingOccurrences(of: "&amp;", with: "&")
+                    .replacingOccurrences(of: "&lt;", with: "<")
+                    .replacingOccurrences(of: "&gt;", with: ">")
+            }
 
-            let fullRange = NSRange(location: 0, length: attributed.length)
-            attributed.addAttributes(
-                [
-                    .foregroundColor: NSColor.labelColor,
-                    .font: NSFont.systemFont(ofSize: 13),
-                ],
-                range: fullRange
-            )
-            return attributed
+            return attributed.string
+                .replacingOccurrences(of: "\u{FFFC}", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         }
+    }
+}
+
+final class ZirnReleaseNotesScrollView: NSScrollView {
+    func syncDocumentHeight() {
+        guard let textView = documentView as? NSTextView,
+              let textContainer = textView.textContainer,
+              let layoutManager = textView.layoutManager
+        else { return }
+
+        let contentWidth = max(contentSize.width, 1)
+        textContainer.containerSize = NSSize(width: contentWidth, height: CGFloat.greatestFiniteMagnitude)
+        layoutManager.ensureLayout(for: textContainer)
+
+        let usedHeight = layoutManager.usedRect(for: textContainer).height
+        let inset = textView.textContainerInset
+        let documentHeight = max(contentSize.height, usedHeight + inset.height * 2)
+
+        textView.frame = NSRect(x: 0, y: 0, width: contentWidth, height: documentHeight)
+        reflectScrolledClipView(contentView)
+    }
+
+    override func layout() {
+        super.layout()
+        syncDocumentHeight()
+    }
+
+    override func resize(withOldSuperviewSize oldSize: NSSize) {
+        super.resize(withOldSuperviewSize: oldSize)
+        syncDocumentHeight()
     }
 }
