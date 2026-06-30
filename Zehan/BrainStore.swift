@@ -12,6 +12,7 @@ import NaturalLanguage
 import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
+import WebKit
 
 extension UTType {
     static let brainFile = UTType(filenameExtension: "brain") ?? .json
@@ -216,6 +217,10 @@ final class BrainStore: ObservableObject {
             .split { $0.isWhitespace || $0.isNewline }
             .count
         return "\(wordCount) words · \(content.count.formatted()) characters"
+    }
+
+    var canShareCurrentDocument: Bool {
+        currentShareDocument != nil
     }
 
     func openPreviousBrainAfterFirstFrame() async {
@@ -719,6 +724,101 @@ final class BrainStore: ObservableObject {
 
     func saveCurrentNote() {
         saveCurrentNote(statusText: "Autosaved")
+    }
+
+    func exportCurrentDocumentAsPDF() {
+        guard let document = currentShareDocument else {
+            status = "Open a page to export"
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = "\(document.fileName).pdf"
+        panel.title = "Export as PDF"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        Task { @MainActor in
+            do {
+                status = "Exporting PDF"
+                try await MarkdownPDFRenderer().writePDF(
+                    markdown: document.markdown,
+                    title: document.title,
+                    to: url,
+                    imageData: { [weak self] path in
+                        self?.markdownImageData(for: path)
+                    }
+                )
+                status = "PDF exported"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    func airDropCurrentDocumentAsPDFAndMarkdown() {
+        guard let document = currentShareDocument else {
+            status = "Open a page to AirDrop"
+            return
+        }
+
+        Task { @MainActor in
+            do {
+                status = "Preparing AirDrop files"
+                let exportFolder = try temporaryExportFolder()
+                let pdfURL = exportFolder.appendingPathComponent("\(document.fileName).pdf")
+                let markdownURL = exportFolder.appendingPathComponent("\(document.fileName).md")
+
+                try Data(document.markdown.utf8).write(to: markdownURL, options: .atomic)
+                try await MarkdownPDFRenderer().writePDF(
+                    markdown: document.markdown,
+                    title: document.title,
+                    to: pdfURL,
+                    imageData: { [weak self] path in
+                        self?.markdownImageData(for: path)
+                    }
+                )
+
+                guard let sharingService = NSSharingService(named: .sendViaAirDrop) else {
+                    status = "AirDrop is unavailable"
+                    return
+                }
+
+                sharingService.perform(withItems: [pdfURL, markdownURL])
+                status = "AirDrop ready"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    private var currentShareDocument: ShareExportDocument? {
+        guard !isShowingHomePage, !isShowingHelpDesk else { return nil }
+
+        if let summary = currentHighlightSummary {
+            return ShareExportDocument(title: summary.title, markdown: summary.markdown)
+        }
+
+        let cleanContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanContent.isEmpty else { return nil }
+
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let exportTitle = cleanTitle.isEmpty ? "Untitled" : cleanTitle
+        return ShareExportDocument(
+            title: exportTitle,
+            markdown: contentBySettingDocumentTitle(exportTitle, in: content)
+        )
+    }
+
+    private func temporaryExportFolder() throws -> URL {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ZirnExports", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
     }
 
     private func saveCurrentNote(statusText: String) {
@@ -9474,6 +9574,417 @@ struct BrainAppCompatibility: Codable {
     var appID: String
     var minAppVersion: String
     var lastOpenedWith: String
+}
+
+private struct ShareExportDocument {
+    let title: String
+    let markdown: String
+
+    var fileName: String {
+        let invalidCharacters = CharacterSet(charactersIn: "/\\:?%*|\"<>")
+            .union(.newlines)
+            .union(.controlCharacters)
+        let clean = title
+            .components(separatedBy: invalidCharacters)
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean.isEmpty ? "Untitled" : String(clean.prefix(96))
+    }
+}
+
+private final class MarkdownPDFRenderer: NSObject, WKNavigationDelegate {
+    private enum ExportError: LocalizedError {
+        case loadFailed
+        case printFailed
+        case pdfMissing
+
+        var errorDescription: String? {
+            switch self {
+            case .loadFailed:
+                return "Could not prepare the PDF."
+            case .printFailed:
+                return "Could not write the PDF."
+            case .pdfMissing:
+                return "The PDF export did not finish."
+            }
+        }
+    }
+
+    private var continuation: CheckedContinuation<Void, Error>?
+
+    @MainActor
+    func writePDF(
+        markdown: String,
+        title: String,
+        to url: URL,
+        imageData: @escaping (String) -> Data?
+    ) async throws {
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 794, height: 1123))
+        webView.navigationDelegate = self
+
+        let html = MarkdownExportHTMLBuilder(
+            title: title,
+            markdown: markdown,
+            imageData: imageData
+        ).html()
+
+        try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            webView.loadHTMLString(html, baseURL: nil)
+        }
+
+        try await Task.sleep(nanoseconds: 180_000_000)
+
+        let printInfo = NSPrintInfo()
+        printInfo.paperSize = NSSize(width: 595.2, height: 841.8)
+        printInfo.leftMargin = 54
+        printInfo.rightMargin = 54
+        printInfo.topMargin = 54
+        printInfo.bottomMargin = 54
+        printInfo.horizontalPagination = .fit
+        printInfo.verticalPagination = .automatic
+        printInfo.jobDisposition = .save
+        printInfo.dictionary()[NSPrintInfo.AttributeKey.jobSavingURL] = url
+
+        let operation = webView.printOperation(with: printInfo)
+        operation.showsPrintPanel = false
+        operation.showsProgressPanel = false
+
+        guard operation.run() else {
+            throw ExportError.printFailed
+        }
+
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw ExportError.pdfMissing
+        }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        Task { @MainActor [weak self] in
+            self?.finishLoading()
+        }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        Task { @MainActor [weak self] in
+            self?.failLoading(error)
+        }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        Task { @MainActor [weak self] in
+            self?.failLoading(error)
+        }
+    }
+
+    @MainActor
+    private func finishLoading() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    @MainActor
+    private func failLoading(_ error: Error) {
+        continuation?.resume(throwing: error)
+        continuation = nil
+    }
+}
+
+private struct MarkdownExportHTMLBuilder {
+    let title: String
+    let markdown: String
+    let imageData: (String) -> Data?
+
+    func html() -> String {
+        """
+        <!doctype html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <style>
+        body {
+          color: #111;
+          font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+          font-size: 14px;
+          line-height: 1.55;
+          margin: 0;
+        }
+        h1, h2, h3, h4, h5, h6 { line-height: 1.18; margin: 0.82em 0 0.32em; }
+        h1 { font-size: 28px; }
+        h2 { font-size: 23px; }
+        h3 { font-size: 19px; }
+        p { margin: 0 0 10px; }
+        ul, ol { margin: 0 0 12px; padding-left: 24px; }
+        li { margin: 4px 0; }
+        blockquote { border-left: 3px solid #c9ced6; color: #4a4f57; margin: 12px 0; padding: 2px 0 2px 13px; }
+        pre { background: #f3f5f7; border: 1px solid #dfe3e8; border-radius: 6px; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; padding: 11px 12px; white-space: pre-wrap; }
+        code { background: #eef1f4; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.92em; padding: 1px 4px; }
+        pre code { background: transparent; padding: 0; }
+        mark { background: rgba(255, 224, 102, 0.62); border-radius: 3px; padding: 0 2px; }
+        table { border-collapse: collapse; margin: 12px 0 16px; width: 100%; }
+        th, td { border: 1px solid #d9dde3; padding: 7px 8px; text-align: left; vertical-align: top; }
+        th { background: #f2f4f6; font-weight: 600; }
+        hr { border: 0; border-top: 1px solid #d9dde3; margin: 18px 0; }
+        img { display: block; height: auto; margin: 12px auto; max-width: 100%; }
+        figcaption { color: #666; font-size: 12px; margin-top: -5px; text-align: center; }
+        a { color: #1f66d1; text-decoration: underline; }
+        .task-marker { color: #3f8f46; font-weight: 600; }
+        </style>
+        </head>
+        <body>
+        \(bodyHTML())
+        </body>
+        </html>
+        """
+    }
+
+    private func bodyHTML() -> String {
+        let lines = markdown.components(separatedBy: .newlines)
+        var output: [String] = []
+        var paragraph: [String] = []
+        var codeLines: [String] = []
+        var isInCodeBlock = false
+        var index = 0
+
+        func flushParagraph() {
+            guard !paragraph.isEmpty else { return }
+            output.append("<p>\(paragraph.map(inlineHTML).joined(separator: "<br>"))</p>")
+            paragraph.removeAll()
+        }
+
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.hasPrefix("```") {
+                if isInCodeBlock {
+                    output.append("<pre><code>\(escapeHTML(codeLines.joined(separator: "\n")))</code></pre>")
+                    codeLines.removeAll()
+                } else {
+                    flushParagraph()
+                }
+                isInCodeBlock.toggle()
+                index += 1
+                continue
+            }
+
+            if isInCodeBlock {
+                codeLines.append(line)
+                index += 1
+                continue
+            }
+
+            if trimmed.isEmpty {
+                flushParagraph()
+                index += 1
+                continue
+            }
+
+            if let table = tableHTML(startingAt: index, in: lines) {
+                flushParagraph()
+                output.append(table.html)
+                index += table.consumed
+                continue
+            }
+
+            if let heading = headingHTML(trimmed) {
+                flushParagraph()
+                output.append(heading)
+            } else if let image = imageHTML(trimmed) {
+                flushParagraph()
+                output.append(image)
+            } else if isDivider(trimmed) {
+                flushParagraph()
+                output.append("<hr>")
+            } else if let task = taskHTML(trimmed) {
+                flushParagraph()
+                output.append("<ul><li>\(task)</li></ul>")
+            } else if let bullet = bulletText(trimmed) {
+                flushParagraph()
+                output.append("<ul><li>\(inlineHTML(bullet))</li></ul>")
+            } else if let numbered = numberedText(trimmed) {
+                flushParagraph()
+                output.append("<ol start=\"\(numbered.number)\"><li>\(inlineHTML(numbered.text))</li></ol>")
+            } else if trimmed.hasPrefix(">") {
+                flushParagraph()
+                output.append("<blockquote>\(inlineHTML(String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)))</blockquote>")
+            } else {
+                paragraph.append(trimmed)
+            }
+
+            index += 1
+        }
+
+        flushParagraph()
+        if isInCodeBlock, !codeLines.isEmpty {
+            output.append("<pre><code>\(escapeHTML(codeLines.joined(separator: "\n")))</code></pre>")
+        }
+
+        return output.joined(separator: "\n")
+    }
+
+    private func headingHTML(_ line: String) -> String? {
+        let markers = line.prefix { $0 == "#" }
+        guard !markers.isEmpty, markers.count <= 6 else { return nil }
+        let rest = line.dropFirst(markers.count)
+        guard rest.first == " " else { return nil }
+        let level = markers.count
+        return "<h\(level)>\(inlineHTML(rest.trimmingCharacters(in: .whitespaces)))</h\(level)>"
+    }
+
+    private func imageHTML(_ line: String) -> String? {
+        guard line.hasPrefix("!["),
+              let altEnd = line.range(of: "]("),
+              line.hasSuffix(")")
+        else { return nil }
+
+        let alt = String(line[line.index(line.startIndex, offsetBy: 2)..<altEnd.lowerBound])
+        let path = String(line[altEnd.upperBound..<line.index(before: line.endIndex)])
+        let source: String
+
+        if let data = imageData(path) {
+            source = "data:\(imageMimeType(for: path, data: data));base64,\(data.base64EncodedString())"
+        } else {
+            source = path
+        }
+
+        let caption = alt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? ""
+            : "<figcaption>\(escapeHTML(alt))</figcaption>"
+        return "<figure><img src=\"\(escapeAttribute(source))\" alt=\"\(escapeAttribute(alt))\">\(caption)</figure>"
+    }
+
+    private func tableHTML(startingAt index: Int, in lines: [String]) -> (html: String, consumed: Int)? {
+        guard index + 1 < lines.count else { return nil }
+        let headerLine = lines[index].trimmingCharacters(in: .whitespaces)
+        let separatorLine = lines[index + 1].trimmingCharacters(in: .whitespaces)
+        guard headerLine.contains("|") else { return nil }
+
+        let headers = splitTableRow(headerLine)
+        let separators = splitTableRow(separatorLine)
+        guard headers.count >= 2,
+              separators.count >= 2,
+              separators.allSatisfy({ $0.replacingOccurrences(of: ":", with: "").allSatisfy { $0 == "-" } })
+        else { return nil }
+
+        var rows: [[String]] = []
+        var cursor = index + 2
+        while cursor < lines.count {
+            let line = lines[cursor].trimmingCharacters(in: .whitespaces)
+            guard line.contains("|"), !line.isEmpty else { break }
+            rows.append(splitTableRow(line))
+            cursor += 1
+        }
+
+        let headerHTML = headers.map { "<th>\(inlineHTML($0))</th>" }.joined()
+        let rowsHTML = rows
+            .map { row in
+                "<tr>\(row.map { "<td>\(inlineHTML($0))</td>" }.joined())</tr>"
+            }
+            .joined(separator: "\n")
+        return ("<table><thead><tr>\(headerHTML)</tr></thead><tbody>\(rowsHTML)</tbody></table>", cursor - index)
+    }
+
+    private func splitTableRow(_ line: String) -> [String] {
+        var clean = line
+        if clean.hasPrefix("|") { clean.removeFirst() }
+        if clean.hasSuffix("|") { clean.removeLast() }
+        return clean.split(separator: "|", omittingEmptySubsequences: false)
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+    }
+
+    private func taskHTML(_ line: String) -> String? {
+        if line.hasPrefix("- [x] ") || line.hasPrefix("* [x] ") {
+            return "<span class=\"task-marker\">☑</span> \(inlineHTML(String(line.dropFirst(6))))"
+        }
+        if line.hasPrefix("- [ ] ") || line.hasPrefix("* [ ] ") {
+            return "<span class=\"task-marker\">☐</span> \(inlineHTML(String(line.dropFirst(6))))"
+        }
+        return nil
+    }
+
+    private func bulletText(_ line: String) -> String? {
+        guard line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") else { return nil }
+        return String(line.dropFirst(2))
+    }
+
+    private func numberedText(_ line: String) -> (number: Int, text: String)? {
+        guard let dotIndex = line.firstIndex(of: ".") else { return nil }
+        let numberText = String(line[..<dotIndex])
+        guard let number = Int(numberText) else { return nil }
+        let textStart = line.index(after: dotIndex)
+        guard textStart < line.endIndex, line[textStart] == " " else { return nil }
+        return (number, String(line[line.index(after: textStart)...]))
+    }
+
+    private func isDivider(_ line: String) -> Bool {
+        let clean = line.replacingOccurrences(of: " ", with: "")
+        return clean.count >= 3 && Set(clean).isSubset(of: Set<Character>(["-", "*", "_"]))
+    }
+
+    private func inlineHTML(_ markdown: String) -> String {
+        var html = escapeHTML(markdown)
+        html = replacePattern(#"`([^`]+)`"#, in: html, template: "<code>$1</code>")
+        html = replacePattern(#"==(.+?)=="#, in: html, template: "<mark>$1</mark>")
+        html = replacePattern(#"\*\*(.+?)\*\*"#, in: html, template: "<strong>$1</strong>")
+        html = replacePattern(#"__(.+?)__"#, in: html, template: "<strong>$1</strong>")
+        html = replacePattern(#"(?<!\*)\*([^*]+)\*(?!\*)"#, in: html, template: "<em>$1</em>")
+        html = replacePattern(#"~~(.+?)~~"#, in: html, template: "<s>$1</s>")
+        html = replacePattern(#"&lt;u&gt;(.+?)&lt;/u&gt;"#, in: html, template: "<u>$1</u>")
+        html = linkHTML(in: html)
+        html = wikiLinkHTML(in: html)
+        html = html.replacingOccurrences(of: "%%", with: "")
+        return html
+    }
+
+    private func linkHTML(in html: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\(([^)]+)\)"#) else { return html }
+        return regex.stringByReplacingMatches(
+            in: html,
+            range: NSRange(location: 0, length: (html as NSString).length),
+            withTemplate: #"<a href="$2">$1</a>"#
+        )
+    }
+
+    private func wikiLinkHTML(in html: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: #"\[\[([^\]]+)\]\]"#) else { return html }
+        return regex.stringByReplacingMatches(
+            in: html,
+            range: NSRange(location: 0, length: (html as NSString).length),
+            withTemplate: "<strong>$1</strong>"
+        )
+    }
+
+    private func replacePattern(_ pattern: String, in text: String, template: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        return regex.stringByReplacingMatches(
+            in: text,
+            range: NSRange(location: 0, length: (text as NSString).length),
+            withTemplate: template
+        )
+    }
+
+    private func imageMimeType(for path: String, data: Data) -> String {
+        let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+        if ext == "jpg" || ext == "jpeg" { return "image/jpeg" }
+        if ext == "gif" { return "image/gif" }
+        if ext == "webp" { return "image/webp" }
+        if data.starts(with: [0xFF, 0xD8]) { return "image/jpeg" }
+        if data.starts(with: [0x47, 0x49, 0x46]) { return "image/gif" }
+        return "image/png"
+    }
+
+    private func escapeHTML(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
+    private func escapeAttribute(_ text: String) -> String {
+        escapeHTML(text).replacingOccurrences(of: "'", with: "&#39;")
+    }
 }
 
 private extension String {

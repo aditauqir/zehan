@@ -541,6 +541,7 @@ private struct WorkspaceView: View {
                     HStack {
                         DocumentChromeControls(
                             canDelete: !store.isViewingGeneratedPage && (store.selectedNoteID != nil || store.currentNoteID != nil),
+                            canShare: store.canShareCurrentDocument,
                             canShowFlashcards: editorFlashcardNoteID != nil,
                             isFlashcardOpen: isEditorFlashcardOpen,
                             canUseFormattingTools: !isReadingMode,
@@ -564,6 +565,14 @@ private struct WorkspaceView: View {
                                 isEditingMarkdown = false
                                 isEditorFlashcardOpen = false
                                 store.deleteSelectedNote()
+                            },
+                            exportPDF: {
+                                isEditingMarkdown = false
+                                store.exportCurrentDocumentAsPDF()
+                            },
+                            airDropPDFAndMarkdown: {
+                                isEditingMarkdown = false
+                                store.airDropCurrentDocumentAsPDFAndMarkdown()
                             },
                             bold: { NSApp.sendAction(NSSelectorFromString("toggleBoldface:"), to: nil, from: nil) },
                             italic: { NSApp.sendAction(NSSelectorFromString("toggleItalics:"), to: nil, from: nil) },
@@ -1118,6 +1127,7 @@ private struct DocumentDropSplash: View {
 
 private struct DocumentChromeControls: View {
     let canDelete: Bool
+    let canShare: Bool
     let canShowFlashcards: Bool
     let isFlashcardOpen: Bool
     let canUseFormattingTools: Bool
@@ -1125,6 +1135,8 @@ private struct DocumentChromeControls: View {
     let newPage: () -> Void
     let flashcards: () -> Void
     let delete: () -> Void
+    let exportPDF: () -> Void
+    let airDropPDFAndMarkdown: () -> Void
     let bold: () -> Void
     let italic: () -> Void
     let underline: () -> Void
@@ -1179,6 +1191,19 @@ private struct DocumentChromeControls: View {
                 activeIconColor: .white,
                 action: highlight
             )
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.13))
+                .frame(width: 1, height: 24)
+                .padding(.horizontal, 6)
+
+            GlassChromeMenuButton(
+                systemImage: "square.and.arrow.up",
+                help: "Share",
+                exportPDF: exportPDF,
+                airDropPDFAndMarkdown: airDropPDFAndMarkdown
+            )
+            .disabled(!canShare)
 
             Rectangle()
                 .fill(Color.primary.opacity(0.13))
@@ -1346,6 +1371,51 @@ private struct HelpCode: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.quaternary.opacity(0.52))
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct GlassChromeMenuButton: View {
+    let systemImage: String
+    let help: String
+    let exportPDF: () -> Void
+    let airDropPDFAndMarkdown: () -> Void
+
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    var body: some View {
+        Menu {
+            Button(action: exportPDF) {
+                Label("Export as PDF", systemImage: "doc.richtext")
+            }
+
+            Button(action: airDropPDFAndMarkdown) {
+                Label("AirDrop as PDF and Markdown", systemImage: "paperplane")
+            }
+        } label: {
+            Image(systemName: systemImage)
+                .font(.system(size: 14, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(Color.primary.opacity(isHovered ? 0.92 : 0.58))
+                .frame(width: 30, height: 30)
+                .background {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(.white.opacity(isHovered ? 0.13 : 0))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(.white.opacity(isHovered ? 0.22 : 0), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(isHovered ? 0.18 : 0), radius: isHovered ? 5 : 0, y: isHovered ? 2 : 0)
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .help(help)
+        .opacity(isEnabled ? 1 : 0.36)
+        .onHover { hovering in
+            isHovered = hovering && isEnabled
+        }
     }
 }
 
