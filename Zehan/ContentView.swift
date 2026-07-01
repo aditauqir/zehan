@@ -7281,7 +7281,11 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
                 return
             }
 
-            let anchor = anchorForFormulaAssistBubble(in: textView, context: context)
+            let anchor = anchorForFormulaAssistBubble(
+                in: textView,
+                context: context,
+                caretLocation: selectedRange.location
+            )
             if formulaAssistContext.wrappedValue != context {
                 formulaAssistContext.wrappedValue = context
             }
@@ -7299,7 +7303,40 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             }
         }
 
-        private func anchorForFormulaAssistBubble(in textView: NSTextView, context: FormulaAssistContext) -> CGPoint? {
+        private func anchorForFormulaAssistBubble(
+            in textView: NSTextView,
+            context: FormulaAssistContext,
+            caretLocation: Int
+        ) -> CGPoint? {
+            if let caretAnchor = anchorForFormulaAssistCaret(in: textView, caretLocation: caretLocation) {
+                return caretAnchor
+            }
+
+            return anchorForFormulaMarker(in: textView, context: context)
+        }
+
+        private func anchorForFormulaAssistCaret(in textView: NSTextView, caretLocation: Int) -> CGPoint? {
+            guard let window = textView.window else { return nil }
+
+            let textLength = (textView.string as NSString).length
+            let location = min(max(0, caretLocation), textLength)
+            let caretRange = NSRange(location: location, length: 0)
+            let screenRect = textView.firstRect(forCharacterRange: caretRange, actualRange: nil)
+            guard !screenRect.isNull,
+                  !screenRect.isInfinite,
+                  screenRect.height > 0
+            else { return nil }
+
+            let windowRect = window.convertFromScreen(screenRect)
+            let viewRect = textView.convert(windowRect, from: nil)
+            let visibleOrigin = textView.enclosingScrollView?.contentView.bounds.origin ?? .zero
+            return CGPoint(
+                x: viewRect.minX - visibleOrigin.x,
+                y: viewRect.maxY - visibleOrigin.y
+            )
+        }
+
+        private func anchorForFormulaMarker(in textView: NSTextView, context: FormulaAssistContext) -> CGPoint? {
             guard let layoutManager = textView.layoutManager,
                   let textContainer = textView.textContainer,
                   let textStorage = layoutManager.textStorage
