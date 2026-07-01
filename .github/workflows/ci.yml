@@ -13,7 +13,7 @@ on:
       - debug
 
 jobs:
-  debug-build:
+  release-build:
     runs-on: macos-26
     steps:
       - name: Checkout
@@ -22,11 +22,90 @@ jobs:
       - name: Select Xcode 26.5
         run: sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
 
-      - name: Build Debug app
+      - name: Build Release app without signing
         run: |
           xcodebuild -project Zehan.xcodeproj \
             -scheme Zehan \
-            -configuration Debug \
+            -configuration Release \
             -derivedDataPath /tmp/ZehanDerivedData \
             CODE_SIGNING_ALLOWED=NO \
             clean build
+
+  public-release-check:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Select Xcode 26.5
+        run: sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
+
+      - name: Import Developer ID certificate and profile
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          chmod +x scripts/import-signing-certificate.sh
+          scripts/import-signing-certificate.sh
+
+      - name: Build signed Release app
+        run: |
+          chmod +x scripts/build-release.sh
+          scripts/build-release.sh
+
+      - name: Verify Developer ID signature
+        run: |
+          codesign --verify --deep --strict --verbose=4 build/Zirn.app
+          codesign -dv --verbose=4 build/Zirn.app 2>&1 | tee /tmp/zirn-codesign.txt
+          grep -q "Authority=Developer ID Application:" /tmp/zirn-codesign.txt
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/Zirn.app/Contents/Info.plist)"
+          BUILD_NUMBER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/Zirn.app/Contents/Info.plist)"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          echo "Verified Zirn $VERSION ($BUILD_NUMBER)"
+
+      - name: Notarize app
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          NOTARYTOOL_PROFILE: ""
+        run: |
+          chmod +x scripts/notarize-release.sh
+          scripts/notarize-release.sh build/Zirn.app
+
+      - name: Verify notarized app
+        run: |
+          xcrun stapler validate build/Zirn.app
+          spctl -a -vvv -t exec build/Zirn.app
+
+      - name: Package signed DMG
+        run: |
+          chmod +x scripts/create-dmg.sh
+          scripts/create-dmg.sh build/Zirn.app
+
+      - name: Notarize DMG
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          NOTARYTOOL_PROFILE: ""
+        run: |
+          chmod +x scripts/notarize-release.sh
+          scripts/notarize-release.sh "dist/Zirn-${VERSION}.dmg"
+
+      - name: Verify notarized DMG
+        run: |
+          xcrun stapler validate "dist/Zirn-${VERSION}.dmg"
+          codesign --verify --verbose=2 "dist/Zirn-${VERSION}.dmg"
+
+      - name: Upload checked public build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zirn-${{ env.VERSION }}-${{ env.BUILD_NUMBER }}-public-check
+          path: dist/Zirn-${{ env.VERSION }}.dmg
+          retention-days: 7
