@@ -8,6 +8,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import WebKit
 
 struct ContentView: View {
     @ObservedObject var store: BrainStore
@@ -325,6 +326,8 @@ private struct WorkspaceView: View {
     @State private var typingStatus = MarkdownTypingStatus()
     @State private var isEditorFlashcardOpen = false
     @State private var readingHighlightRequestID = 0
+    @State private var tableInsertionRequest: MarkdownTableInsertionRequest?
+    @State private var formulaInsertionRequest: MarkdownFormulaInsertionRequest?
     @FocusState private var isSidebarSearchFocused: Bool
 
     private var cleanSidebarSearchQuery: String {
@@ -570,13 +573,29 @@ private struct WorkspaceView: View {
                                 isEditingMarkdown = false
                                 store.exportCurrentDocumentAsPDF()
                             },
-                            airDropPDFAndMarkdown: {
+                            airDropPDF: {
                                 isEditingMarkdown = false
-                                store.airDropCurrentDocumentAsPDFAndMarkdown()
+                                store.airDropCurrentDocumentAsPDF()
+                            },
+                            airDropMarkdown: {
+                                isEditingMarkdown = false
+                                store.airDropCurrentDocumentAsMarkdown()
                             },
                             bold: { NSApp.sendAction(NSSelectorFromString("toggleBoldface:"), to: nil, from: nil) },
                             italic: { NSApp.sendAction(NSSelectorFromString("toggleItalics:"), to: nil, from: nil) },
                             underline: { NSApp.sendAction(NSSelectorFromString("underline:"), to: nil, from: nil) },
+                            insertTable: { columns, rows in
+                                tableInsertionRequest = MarkdownTableInsertionRequest(columns: columns, rows: rows)
+                            },
+                            assistFormulaLatex: { description, completion in
+                                Task {
+                                    let latex = await store.generateFormulaLatex(from: description)
+                                    completion(latex)
+                                }
+                            },
+                            insertFormula: { action in
+                                formulaInsertionRequest = MarkdownFormulaInsertionRequest(action: action)
+                            },
                             highlight: {
                                 if isReadingMode {
                                     readingHighlightRequestID += 1
@@ -587,13 +606,14 @@ private struct WorkspaceView: View {
                         )
 
                         Spacer(minLength: 0)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                isEditingMarkdown = false
+                            }
                     }
                     .padding(.horizontal, 64)
                     .frame(height: 44)
                     .background(Color(nsColor: .textBackgroundColor))
-                    .onTapGesture {
-                        isEditingMarkdown = false
-                    }
                 }
 
                     Group {
@@ -618,6 +638,9 @@ private struct WorkspaceView: View {
                             EditorPageFlashcardView(
                                 state: store.pageFlashcardStates[noteID] ?? .idle,
                                 regenerate: { store.requestPageFlashcards(noteID: noteID, force: true) },
+                                togglePin: { cardID in
+                                    store.togglePinnedPageFlashcard(noteID: noteID, cardID: cardID)
+                                },
                                 goTo: { query in
                                     store.openPageFlashcardSource(noteID: noteID, query: query)
                                     withAnimation(.easeOut(duration: 0.16)) {
@@ -642,6 +665,14 @@ private struct WorkspaceView: View {
                                 insertImageFile: store.insertMarkdownImage,
                                 insertImageData: store.insertMarkdownImage,
                                 highlightRequestID: readingHighlightRequestID,
+                                tableInsertionRequest: $tableInsertionRequest,
+                                formulaInsertionRequest: $formulaInsertionRequest,
+                                assistFormulaLatex: { description, completion in
+                                    Task {
+                                        let latex = await store.generateFormulaLatex(from: description)
+                                        completion(latex)
+                                    }
+                                },
                                 typingStatus: $typingStatus
                             )
                         }
@@ -1136,10 +1167,14 @@ private struct DocumentChromeControls: View {
     let flashcards: () -> Void
     let delete: () -> Void
     let exportPDF: () -> Void
-    let airDropPDFAndMarkdown: () -> Void
+    let airDropPDF: () -> Void
+    let airDropMarkdown: () -> Void
     let bold: () -> Void
     let italic: () -> Void
     let underline: () -> Void
+    let insertTable: (Int, Int) -> Void
+    let assistFormulaLatex: (String, @escaping (String?) -> Void) -> Void
+    let insertFormula: (MarkdownFormulaInsertionRequest.Action) -> Void
     let highlight: () -> Void
 
     var body: some View {
@@ -1184,6 +1219,19 @@ private struct DocumentChromeControls: View {
             )
             .disabled(!canUseFormattingTools)
 
+            GlassChromeTablePickerButton(
+                help: canUseFormattingTools ? "Insert Table" : "Insert Table is unavailable in Reading Mode",
+                insertTable: insertTable
+            )
+            .disabled(!canUseFormattingTools)
+
+            GlassChromeFormulaPickerButton(
+                help: canUseFormattingTools ? "Insert Equation" : "Insert Equation is unavailable in Reading Mode",
+                assistFormulaLatex: assistFormulaLatex,
+                insertFormula: insertFormula
+            )
+            .disabled(!canUseFormattingTools)
+
             GlassChromeIconButton(
                 systemImage: "paintbrush.pointed",
                 help: canUseFormattingTools ? "Highlight" : "Highlight selected text in Reading Mode",
@@ -1201,7 +1249,8 @@ private struct DocumentChromeControls: View {
                 systemImage: "square.and.arrow.up",
                 help: "Share",
                 exportPDF: exportPDF,
-                airDropPDFAndMarkdown: airDropPDFAndMarkdown
+                airDropPDF: airDropPDF,
+                airDropMarkdown: airDropMarkdown
             )
             .disabled(!canShare)
 
@@ -1378,7 +1427,8 @@ private struct GlassChromeMenuButton: View {
     let systemImage: String
     let help: String
     let exportPDF: () -> Void
-    let airDropPDFAndMarkdown: () -> Void
+    let airDropPDF: () -> Void
+    let airDropMarkdown: () -> Void
 
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovered = false
@@ -1386,11 +1436,16 @@ private struct GlassChromeMenuButton: View {
     var body: some View {
         Menu {
             Button(action: exportPDF) {
-                Label("Export as PDF", systemImage: "doc.richtext")
+                Label("Export as PDF", systemImage: "doc.fill")
             }
 
-            Button(action: airDropPDFAndMarkdown) {
-                Label("AirDrop as PDF and Markdown", systemImage: "paperplane")
+            Button(action: airDropPDF) {
+                Label("AirDrop as PDF", systemImage: "arrowshape.bounce.forward")
+                    .environment(\.layoutDirection, .rightToLeft)
+            }
+
+            Button(action: airDropMarkdown) {
+                Label("AirDrop as Markdown", systemImage: "arrowshape.bounce.forward")
             }
         } label: {
             Image(systemName: systemImage)
@@ -1411,6 +1466,418 @@ private struct GlassChromeMenuButton: View {
         }
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
+        .help(help)
+        .opacity(isEnabled ? 1 : 0.36)
+        .onHover { hovering in
+            isHovered = hovering && isEnabled
+        }
+    }
+}
+
+private struct GlassChromeTablePickerButton: View {
+    let help: String
+    let insertTable: (Int, Int) -> Void
+
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+    @State private var isShowingPicker = false
+    @State private var hoveredColumns = 0
+    @State private var hoveredRows = 0
+
+    var body: some View {
+        Button {
+            hoveredColumns = max(hoveredColumns, 1)
+            hoveredRows = max(hoveredRows, 1)
+            isShowingPicker.toggle()
+        } label: {
+            Image(systemName: "tablecells")
+                .font(.system(size: 14, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(Color.primary.opacity(isHovered ? 0.92 : 0.58))
+                .frame(width: 30, height: 30)
+                .background {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(.white.opacity(isHovered ? 0.13 : 0))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(.white.opacity(isHovered ? 0.22 : 0), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(isHovered ? 0.18 : 0), radius: isHovered ? 5 : 0, y: isHovered ? 2 : 0)
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .opacity(isEnabled ? 1 : 0.36)
+        .onHover { hovering in
+            isHovered = hovering && isEnabled
+        }
+        .popover(isPresented: $isShowingPicker, arrowEdge: .bottom) {
+            TableSizePicker(
+                hoveredColumns: $hoveredColumns,
+                hoveredRows: $hoveredRows
+            ) { columns, rows in
+                isShowingPicker = false
+                insertTable(columns, rows)
+            }
+            .presentationBackground(.regularMaterial)
+        }
+    }
+}
+
+private struct TableSizePicker: View {
+    @Binding var hoveredColumns: Int
+    @Binding var hoveredRows: Int
+    let select: (Int, Int) -> Void
+
+    private let gridSize = 10
+    private let customRange = 1...50
+    @State private var customColumns = 10
+    @State private var customRows = 10
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("\(max(hoveredColumns, 1)) x \(max(hoveredRows, 1)) table")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.primary.opacity(0.78))
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(spacing: 4) {
+                ForEach(1...gridSize, id: \.self) { row in
+                    HStack(spacing: 4) {
+                        ForEach(1...gridSize, id: \.self) { column in
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(cellFill(column: column, row: row))
+                                .frame(width: 18, height: 18)
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .stroke(cellStroke(column: column, row: row), lineWidth: 1)
+                                }
+                                .contentShape(Rectangle())
+                                .onHover { hovering in
+                                    guard hovering else { return }
+                                    hoveredColumns = column
+                                    hoveredRows = row
+                                }
+                                .onTapGesture {
+                                    select(column, row)
+                                }
+                        }
+                    }
+                }
+            }
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.12))
+                .frame(height: 1)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 9) {
+                Text("Custom Size")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.72))
+
+                HStack(spacing: 8) {
+                    customSizeField("Columns", value: $customColumns)
+                    customSizeField("Rows", value: $customRows)
+
+                    Button {
+                        select(clamped(customColumns), clamped(customRows))
+                    } label: {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .frame(width: 26, height: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .background(.regularMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+                    }
+                    .help("Insert Custom Table")
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 268)
+    }
+
+    private func customSizeField(_ title: String, value: Binding<Int>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            TextField(title, value: value, format: .number)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12.5, weight: .medium))
+                .frame(width: 64, height: 26)
+                .padding(.horizontal, 8)
+                .background(Color.primary.opacity(0.055))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(Color.primary.opacity(0.13), lineWidth: 1)
+                }
+                .onSubmit {
+                    value.wrappedValue = clamped(value.wrappedValue)
+                }
+        }
+    }
+
+    private func clamped(_ value: Int) -> Int {
+        min(max(value, customRange.lowerBound), customRange.upperBound)
+    }
+
+    private func isSelected(column: Int, row: Int) -> Bool {
+        column <= max(hoveredColumns, 1) && row <= max(hoveredRows, 1)
+    }
+
+    private func cellFill(column: Int, row: Int) -> Color {
+        isSelected(column: column, row: row)
+            ? Color.accentColor.opacity(0.28)
+            : Color.primary.opacity(0.055)
+    }
+
+    private func cellStroke(column: Int, row: Int) -> Color {
+        isSelected(column: column, row: row)
+            ? Color.accentColor.opacity(0.58)
+            : Color.primary.opacity(0.12)
+    }
+}
+
+private struct GlassChromeFormulaPickerButton: View {
+    let help: String
+    let assistFormulaLatex: (String, @escaping (String?) -> Void) -> Void
+    let insertFormula: (MarkdownFormulaInsertionRequest.Action) -> Void
+
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+    @State private var isShowingPicker = false
+
+    var body: some View {
+        Button {
+            isShowingPicker.toggle()
+        } label: {
+            Image(systemName: "function")
+                .font(.system(size: 14, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(Color.primary.opacity(isHovered ? 0.92 : 0.58))
+                .frame(width: 30, height: 30)
+                .background {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(.white.opacity(isHovered ? 0.13 : 0))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(.white.opacity(isHovered ? 0.22 : 0), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(isHovered ? 0.18 : 0), radius: isHovered ? 5 : 0, y: isHovered ? 2 : 0)
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .opacity(isEnabled ? 1 : 0.36)
+        .onHover { hovering in
+            isHovered = hovering && isEnabled
+        }
+        .popover(isPresented: $isShowingPicker, arrowEdge: .bottom) {
+            FormulaInsertPicker(
+                assistFormulaLatex: assistFormulaLatex,
+                onManual: {
+                    isShowingPicker = false
+                    insertFormula(.manual)
+                },
+                onGenerated: { latex in
+                    isShowingPicker = false
+                    insertFormula(.generated(latex))
+                }
+            )
+            .presentationBackground(.regularMaterial)
+        }
+    }
+}
+
+private struct FormulaInsertPicker: View {
+    let assistFormulaLatex: (String, @escaping (String?) -> Void) -> Void
+    let onManual: () -> Void
+    let onGenerated: (String) -> Void
+
+    @State private var description = ""
+    @State private var isGenerating = false
+
+    var body: some View {
+        FormulaInsertPanel(
+            title: "Insert Formula",
+            description: $description,
+            isGenerating: isGenerating,
+            showsManualInput: true,
+            generate: generateFormula,
+            manualInput: onManual
+        )
+    }
+
+    private func generateFormula() {
+        let prompt = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, !isGenerating else { return }
+
+        isGenerating = true
+        assistFormulaLatex(prompt) { latex in
+            isGenerating = false
+            guard let latex, !latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            onGenerated(latex)
+            description = ""
+        }
+    }
+}
+
+private struct FormulaInsertPanel: View {
+    let title: String
+    @Binding var description: String
+    let isGenerating: Bool
+    let showsManualInput: Bool
+    let generate: () -> Void
+    let manualInput: () -> Void
+    var onDismiss: (() -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.78))
+
+                Spacer(minLength: 0)
+
+                if let onDismiss {
+                    Button(action: onDismiss) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9.5, weight: .bold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16, height: 16)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Dismiss")
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 9) {
+                Text("Assist with AI")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.72))
+
+                HStack(spacing: 8) {
+                    formulaField("Describe the formula", text: $description, onSubmit: generate)
+
+                    Button(action: generate) {
+                        Group {
+                            if isGenerating {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.up")
+                                    .font(.system(size: 11, weight: .bold))
+                            }
+                        }
+                        .frame(width: 26, height: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .background(.regularMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+                    }
+                    .disabled(isGenerating || description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .help("Generate LaTeX")
+                }
+            }
+
+            if showsManualInput {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.12))
+                    .frame(height: 1)
+                    .padding(.top, 2)
+
+                Button(action: manualInput) {
+                    FormulaManualInputLabel()
+                }
+                .buttonStyle(.plain)
+                .help("Insert /formula{} and type LaTeX yourself")
+            }
+        }
+        .padding(14)
+        .frame(width: 268)
+    }
+
+    private func formulaField(_ placeholder: String, text: Binding<String>, onSubmit: @escaping () -> Void) -> some View {
+        TextField(placeholder, text: text)
+            .textFieldStyle(.plain)
+            .font(.system(size: 12.5, weight: .medium))
+            .frame(maxWidth: .infinity, minHeight: 26, alignment: .leading)
+            .padding(.horizontal, 8)
+            .background(Color.primary.opacity(0.055))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(Color.primary.opacity(0.13), lineWidth: 1)
+            }
+            .onSubmit(onSubmit)
+    }
+}
+
+private struct FormulaManualInputLabel: View {
+    @State private var isHovered = false
+
+    var body: some View {
+        Text("Enter manually")
+            .font(.system(size: 12.5, weight: .medium))
+            .foregroundStyle(
+                isHovered
+                    ? Color(nsColor: .selectedMenuItemTextColor)
+                    : Color.primary.opacity(0.86)
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background {
+                if isHovered {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color(nsColor: .selectedContentBackgroundColor))
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .onHover { isHovered = $0 }
+    }
+}
+
+private struct GlassChromeTextButton: View {
+    let title: String
+    let help: String
+    let action: () -> Void
+
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(Color.primary.opacity(isHovered ? 0.92 : 0.58))
+                .frame(width: 30, height: 30)
+                .background {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(.white.opacity(isHovered ? 0.13 : 0))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(.white.opacity(isHovered ? 0.22 : 0), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(isHovered ? 0.18 : 0), radius: isHovered ? 5 : 0, y: isHovered ? 2 : 0)
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
         .help(help)
         .opacity(isEnabled ? 1 : 0.36)
         .onHover { hovering in
@@ -4117,6 +4584,7 @@ private struct HomePageCardFlashcardPanel: View {
 private struct EditorPageFlashcardView: View {
     let state: PageFlashcardState
     let regenerate: () -> Void
+    let togglePin: (PageFlashcard.ID) -> Void
     let goTo: (String?) -> Void
 
     private var displayBundle: PageFlashcardBundle? {
@@ -4146,7 +4614,12 @@ private struct EditorPageFlashcardView: View {
                 if !cards.isEmpty {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         ForEach(cards) { card in
-                            EditorPageFlashcardCard(card: card, goTo: { goTo(card.anchor) })
+                            EditorPageFlashcardCard(
+                                card: card,
+                                isPinned: state.pinnedCardIDs.contains(card.id),
+                                togglePin: { togglePin(card.id) },
+                                goTo: { goTo(card.anchor) }
+                            )
                         }
                     }
                 }
@@ -4249,61 +4722,72 @@ private struct EditorPageFlashcardView: View {
 
 private struct EditorPageFlashcardCard: View {
     let card: PageFlashcard
+    let isPinned: Bool
+    let togglePin: () -> Void
     let goTo: () -> Void
     @State private var showsAnswer = false
     @State private var isHovered = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
-            Button {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Text("Question")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.secondary)
+
+                    Spacer(minLength: 0)
+
+                    Button(action: togglePin) {
+                        Image(systemName: isPinned ? "star.fill" : "star")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(isPinned ? Color.yellow.opacity(0.95) : Color.secondary.opacity(0.82))
+                            .frame(width: 24, height: 24)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(isPinned ? "Unpin flashcard" : "Pin flashcard")
+
+                    Label(showsAnswer ? "Hide answer" : "Show answer", systemImage: showsAnswer ? "eye.slash" : "eye")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary.opacity(0.88))
+                }
+
+                HomeInlineMarkdownText(card.question)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.92))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if showsAnswer {
+                    Divider().opacity(0.36)
+                    Text("Answer")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.secondary)
+                    HomeInlineMarkdownText(card.answer)
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(.primary.opacity(0.86))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                } else {
+                    Text("Tap to reveal answer")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary.opacity(0.78))
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.primary.opacity(isHovered ? 0.062 : 0.042))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.primary.opacity(isHovered ? 0.13 : 0.075), lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .onTapGesture {
                 withAnimation(.easeOut(duration: 0.14)) {
                     showsAnswer.toggle()
                 }
-            } label: {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        Text("Question")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.secondary)
-
-                        Spacer(minLength: 0)
-
-                        Label(showsAnswer ? "Hide answer" : "Show answer", systemImage: showsAnswer ? "eye.slash" : "eye")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary.opacity(0.88))
-                    }
-
-                    HomeInlineMarkdownText(card.question)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.primary.opacity(0.92))
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if showsAnswer {
-                        Divider().opacity(0.36)
-                        Text("Answer")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.secondary)
-                        HomeInlineMarkdownText(card.answer)
-                            .font(.system(size: 13.5))
-                            .foregroundStyle(.primary.opacity(0.86))
-                            .fixedSize(horizontal: false, vertical: true)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                    } else {
-                        Text("Tap to reveal answer")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary.opacity(0.78))
-                    }
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.primary.opacity(isHovered ? 0.062 : 0.042))
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.primary.opacity(isHovered ? 0.13 : 0.075), lineWidth: 1)
-                }
             }
-            .buttonStyle(.plain)
             .onHover { isHovered = $0 }
 
             Button(action: goTo) {
@@ -4686,9 +5170,18 @@ private struct MarkdownEditingSurface: View {
     let insertImageFile: (URL) -> Void
     let insertImageData: (Data, String?) -> Void
     let highlightRequestID: Int
+    @Binding var tableInsertionRequest: MarkdownTableInsertionRequest?
+    @Binding var formulaInsertionRequest: MarkdownFormulaInsertionRequest?
+    let assistFormulaLatex: (String, @escaping (String?) -> Void) -> Void
     @Binding var typingStatus: MarkdownTypingStatus
     @State private var suggestionAnchor: CGPoint?
     @State private var relevanceAnchor: CGPoint?
+    @State private var formulaAssistAnchor: CGPoint?
+    @State private var formulaAssistContext: FormulaAssistContext?
+    @State private var formulaAIDescription = ""
+    @State private var isGeneratingFormulaAI = false
+    @State private var dismissedFormulaAssistMarkerLocation: Int?
+    @State private var shouldInsertFormulaInSource = false
     @State private var dismissedRelevanceSuggestionID: String?
     @State private var idleRelevanceSuggestionID: String?
     @State private var relevanceSuggestionPauseTask: Task<Void, Never>?
@@ -4756,6 +5249,31 @@ private struct MarkdownEditingSurface: View {
             guard isReadOnly else { return }
             highlightRenderedSelection()
         }
+        .onChange(of: tableInsertionRequest) { _, request in
+            guard let request else { return }
+            insertRenderedTable(columns: request.columns, rows: request.rows)
+            tableInsertionRequest = nil
+        }
+        .onChange(of: formulaInsertionRequest) { _, request in
+            guard let request else { return }
+            dismissedFormulaAssistMarkerLocation = nil
+            formulaAssistContext = nil
+            formulaAssistAnchor = nil
+
+            let insertLocation = formulaInsertionLocation()
+
+            switch request.action {
+            case .manual:
+                insertManualFormulaPlaceholder(at: insertLocation)
+            case .generated(let latex):
+                insertGeneratedFormula(latex, at: insertLocation)
+            }
+
+            if !isEditing {
+                setEditing(true)
+            }
+            formulaInsertionRequest = nil
+        }
     }
 
     private var editor: some View {
@@ -4773,6 +5291,9 @@ private struct MarkdownEditingSurface: View {
                     suggestionAnchor: $suggestionAnchor,
                     relevanceHighlightRange: relevanceSuggestion?.phraseRange,
                     relevanceAnchor: $relevanceAnchor,
+                    formulaAssistContext: $formulaAssistContext,
+                    formulaAssistAnchor: $formulaAssistAnchor,
+                    shouldInsertFormula: $shouldInsertFormulaInSource,
                     insertImageData: insertImageData,
                     isEditable: true,
                     allowsReadOnlyHighlighting: false,
@@ -4819,6 +5340,26 @@ private struct MarkdownEditingSurface: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
                     .zIndex(2)
                 }
+
+                if activeWikiLinkContext == nil,
+                   showsFormulaAssistBubble,
+                   let formulaAssistAnchor {
+                    FormulaEditorAssistBubble(
+                        description: $formulaAIDescription,
+                        isGenerating: isGeneratingFormulaAI,
+                        generate: { generateFormulaFromAI() },
+                        dismiss: dismissFormulaAssist
+                    )
+                    .offset(
+                        x: min(
+                            max(0, formulaAssistAnchor.x),
+                            max(0, proxy.size.width - FormulaEditorAssistBubble.width - 12)
+                        ),
+                        y: formulaAssistAnchor.y + FormulaEditorAssistBubble.gapBelowLine
+                    )
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .zIndex(3)
+                }
             }
         }
         .background(Color(nsColor: .textBackgroundColor).opacity(0.72))
@@ -4838,6 +5379,11 @@ private struct MarkdownEditingSurface: View {
         }
         .onChange(of: editorSelectionRange) { _, _ in
             scheduleRelevanceSuggestionPause()
+        }
+        .onChange(of: formulaAssistContext) { oldValue, newValue in
+            if oldValue?.markerLocation != newValue?.markerLocation {
+                dismissedFormulaAssistMarkerLocation = nil
+            }
         }
         .onDisappear {
             relevanceSuggestionPauseTask?.cancel()
@@ -4895,6 +5441,19 @@ private struct MarkdownEditingSurface: View {
         CGFloat(linkSuggestions.count) * 30
             + CGFloat(max(0, linkSuggestions.count - 1)) * 4
             + 38
+    }
+
+    private var showsFormulaAssistBubble: Bool {
+        guard formulaAssistAnchor != nil,
+              let formulaAssistContext,
+              dismissedFormulaAssistMarkerLocation != formulaAssistContext.markerLocation
+        else { return false }
+        return true
+    }
+
+    private func dismissFormulaAssist() {
+        guard let formulaAssistContext else { return }
+        dismissedFormulaAssistMarkerLocation = formulaAssistContext.markerLocation
     }
 
     private var renderedPreview: some View {
@@ -4957,8 +5516,108 @@ private struct MarkdownEditingSurface: View {
             searchHighlight: searchHighlight,
             openLinkedNote: openLinkedNote,
             imageURL: imageURL,
-            imageData: imageData
+            imageData: imageData,
+            editBlock: isReadOnly ? nil : { sourceLocation in
+                if searchHighlight != nil {
+                    clearSearchHighlight()
+                } else {
+                    beginEditing(at: sourceLocation)
+                }
+            },
+            editTable: isReadOnly ? nil : { edit in
+                applyTableEdit(edit)
+            }
         )
+    }
+
+    private func applyTableEdit(_ edit: MarkdownTableEdit) {
+        guard !isReadOnly,
+              let block = MarkdownBlock.parse(content).first(where: { $0.sourceLocation == edit.sourceLocation }),
+              case .table(let table) = block.kind,
+              let sourceRange = tableSourceRange(for: block, table: table),
+              let swiftRange = Range(sourceRange, in: content)
+        else { return }
+
+        var updatedTable = table
+        switch edit.action {
+        case .updateCell(let row, let column, let value):
+            updatedTable.updateCell(row: row, column: column, value: value)
+        case .appendColumn:
+            updatedTable.appendColumn()
+        case .appendRow:
+            updatedTable.appendRow()
+        }
+
+        let existingBlock = (content as NSString).substring(with: sourceRange)
+        let trailingNewline = existingBlock.hasSuffix("\n")
+        content.replaceSubrange(swiftRange, with: updatedTable.markdownString + (trailingNewline ? "\n" : ""))
+        previewScrollBlockID = block.id
+        pendingPreviewScrollBlockID = block.id
+    }
+
+    private func insertRenderedTable(columns: Int, rows: Int) {
+        guard !isReadOnly else { return }
+
+        let safeColumns = min(max(columns, 1), 50)
+        let safeRows = min(max(rows, 1), 50)
+        let tableMarkdown = Self.tableMarkdown(columns: safeColumns, rows: safeRows)
+        let source = content as NSString
+        let insertionRange = clampedInsertionRange(in: source)
+
+        let prefix = insertionRange.location == 0
+            ? ""
+            : (source.substring(to: insertionRange.location).hasSuffix("\n\n") ? "" : "\n\n")
+        let suffix = insertionRange.upperBound >= source.length
+            ? "\n"
+            : (source.substring(from: insertionRange.upperBound).hasPrefix("\n\n") ? "" : "\n\n")
+        let replacement = "\(prefix)\(tableMarkdown)\(suffix)"
+
+        guard let swiftRange = Range(insertionRange, in: content) else { return }
+        content.replaceSubrange(swiftRange, with: replacement)
+
+        let tableStartLocation = insertionRange.location + (prefix as NSString).length
+        editorSelectionRange = NSRange(location: tableStartLocation, length: 0)
+        editorVisibleSourceLocation = tableStartLocation
+        if let blockID = markdownBlockID(containing: tableStartLocation) {
+            previewScrollBlockID = blockID
+            pendingPreviewScrollBlockID = blockID
+        }
+        setEditing(false)
+    }
+
+    private func clampedInsertionRange(in source: NSString) -> NSRange {
+        guard editorSelectionRange.location >= 0,
+              editorSelectionRange.location <= source.length,
+              editorSelectionRange.upperBound <= source.length
+        else {
+            return NSRange(location: source.length, length: 0)
+        }
+
+        return editorSelectionRange
+    }
+
+    private static func tableMarkdown(columns: Int, rows: Int) -> String {
+        let headers = Array(repeating: "", count: columns)
+        let separator = Array(repeating: "---", count: columns)
+        let bodyRows = (0..<max(0, rows - 1)).map { _ in
+            Array(repeating: "", count: columns)
+        }
+        return ([headers, separator] + bodyRows)
+            .map { cells in "| \(cells.joined(separator: " | ")) |" }
+            .joined(separator: "\n")
+    }
+
+    private func tableSourceRange(for block: MarkdownBlock, table: MarkdownTable) -> NSRange? {
+        let source = content as NSString
+        guard block.sourceLocation >= 0, block.sourceLocation < source.length else { return nil }
+
+        var upperBound = block.sourceLocation
+        for _ in 0..<table.sourceLineCount {
+            let lineRange = source.lineRange(for: NSRange(location: min(upperBound, source.length), length: 0))
+            upperBound = lineRange.upperBound
+        }
+
+        return NSRange(location: block.sourceLocation, length: max(0, upperBound - block.sourceLocation))
     }
 
     private func setEditing(_ editing: Bool) {
@@ -4976,6 +5635,32 @@ private struct MarkdownEditingSurface: View {
                 modeSurfaceOpacity = 1
             }
         }
+    }
+
+    private func beginEditing(at sourceLocation: Int) {
+        let nsContent = content as NSString
+        let location = min(max(0, sourceLocation), nsContent.length)
+        var caret = location
+
+        if let block = MarkdownBlock.parse(content).first(where: { $0.sourceLocation == sourceLocation }),
+           case .formula = block.kind {
+            let lineRange = nsContent.lineRange(for: NSRange(location: sourceLocation, length: 0))
+            let rawLine = nsContent.substring(with: lineRange)
+            let trimmedLeading = rawLine.prefix { $0 == " " || $0 == "\t" }.count
+            let trimmedStart = lineRange.location + trimmedLeading
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            let lower = trimmed.lowercased()
+            if lower.hasPrefix("/formula{") {
+                caret = trimmedStart + "/formula{".count
+            } else if lower.hasPrefix("formula {") {
+                caret = trimmedStart + "formula {".count
+            }
+            dismissedFormulaAssistMarkerLocation = nil
+        }
+
+        editorSelectionRange = NSRange(location: caret, length: 0)
+        editorVisibleSourceLocation = caret
+        setEditing(true)
     }
 
     private func syncEditorSelectionToPreviewViewport() {
@@ -5007,6 +5692,86 @@ private struct MarkdownEditingSurface: View {
         guard !blocks.isEmpty else { return nil }
         let clampedLocation = min(max(0, sourceLocation), (content as NSString).length)
         return blocks.last(where: { $0.sourceLocation <= clampedLocation })?.id ?? blocks.first?.id
+    }
+
+    private func generateFormulaFromAI() {
+        let prompt = formulaAIDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, !isGeneratingFormulaAI else { return }
+
+        isGeneratingFormulaAI = true
+        assistFormulaLatex(prompt) { latex in
+            isGeneratingFormulaAI = false
+            guard let latex, !latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+            guard let formulaAssistContext,
+                  let liveRange = Self.liveFormulaContentRange(for: formulaAssistContext, in: content),
+                  let swiftRange = Range(liveRange, in: content)
+            else { return }
+
+            content.replaceSubrange(swiftRange, with: latex)
+            let caret = liveRange.location + (latex as NSString).length
+            editorSelectionRange = NSRange(location: caret, length: 0)
+            formulaAIDescription = ""
+            dismissedFormulaAssistMarkerLocation = formulaAssistContext.markerLocation
+        }
+    }
+
+    private func formulaInsertionLocation() -> Int {
+        if isEditing {
+            return editorSelectionRange.location + editorSelectionRange.length
+        }
+
+        syncEditorSelectionToPreviewViewport()
+        return clampedInsertionRange(in: content as NSString).location
+    }
+
+    private func insertGeneratedFormula(_ latex: String, at location: Int) {
+        let trimmed = latex.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let snippet = trimmed.contains("\n") ? "/formula{\n\(trimmed)\n}" : "/formula{\(trimmed)}"
+        let source = content as NSString
+        let insertLocation = min(max(0, location), source.length)
+        content = source.replacingCharacters(in: NSRange(location: insertLocation, length: 0), with: snippet)
+        editorSelectionRange = NSRange(location: insertLocation + (snippet as NSString).length, length: 0)
+        dismissedFormulaAssistMarkerLocation = insertLocation
+    }
+
+    private func insertManualFormulaPlaceholder(at location: Int) {
+        let source = content as NSString
+        let insertLocation = min(max(0, location), source.length)
+        let insertionRange = NSRange(location: insertLocation, length: 0)
+
+        let prefix = insertLocation == 0
+            ? ""
+            : (source.substring(to: insertLocation).hasSuffix("\n\n") ? "" : "\n\n")
+        let suffix = insertLocation >= source.length
+            ? "\n"
+            : (source.substring(from: insertLocation).hasPrefix("\n\n") ? "" : "\n\n")
+        let snippet = "/formula{}"
+        let replacement = "\(prefix)\(snippet)\(suffix)"
+
+        content = source.replacingCharacters(in: insertionRange, with: replacement)
+        editorSelectionRange = NSRange(
+            location: insertLocation + (prefix as NSString).length + "/formula{".count,
+            length: 0
+        )
+    }
+
+    private static func liveFormulaContentRange(for context: FormulaAssistContext, in text: String) -> NSRange? {
+        let nsText = text as NSString
+        guard context.markerLocation >= 0,
+              context.markerLocation < nsText.length,
+              let refreshed = InlineMarkdownEditor.formulaContext(
+                at: min(context.contentRange.upperBound, nsText.length),
+                in: text
+              ),
+              refreshed.markerLocation == context.markerLocation
+        else { return nil }
+
+        let range = refreshed.contentRange
+        guard range.location >= 0, range.upperBound <= nsText.length else { return nil }
+        return range
     }
 
     private func highlightRenderedSelection() {
@@ -5412,7 +6177,47 @@ private struct MarkdownEditingSurface: View {
     private static let supportedImageDropTypes = [UTType.fileURL.identifier, UTType.image.identifier]
 }
 
+private struct FormulaAssistContext: Equatable {
+    let markerLocation: Int
+    let contentRange: NSRange
+}
+
+private struct FormulaEditorAssistBubble: View {
+    static let width: CGFloat = 268
+    static let estimatedHeight: CGFloat = 96
+    static let gapBelowLine: CGFloat = 1.3
+
+    @Binding var description: String
+    let isGenerating: Bool
+    let generate: () -> Void
+    let dismiss: () -> Void
+
+    var body: some View {
+        FormulaInsertPanel(
+            title: "Assist with AI",
+            description: $description,
+            isGenerating: isGenerating,
+            showsManualInput: false,
+            generate: generate,
+            manualInput: {},
+            onDismiss: dismiss
+        )
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.14), radius: 10, y: 4)
+        .onTapGesture { }
+    }
+}
+
 private struct InlineMarkdownEditor: NSViewRepresentable {
+    static func formulaContext(at location: Int, in text: String) -> FormulaAssistContext? {
+        Coordinator.formulaContext(at: location, in: text)
+    }
+
     @Binding var text: String
     @Binding var selectionRange: NSRange
     @Binding var typingStatus: MarkdownTypingStatus
@@ -5422,6 +6227,9 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
     @Binding var suggestionAnchor: CGPoint?
     let relevanceHighlightRange: NSRange?
     @Binding var relevanceAnchor: CGPoint?
+    @Binding var formulaAssistContext: FormulaAssistContext?
+    @Binding var formulaAssistAnchor: CGPoint?
+    @Binding var shouldInsertFormula: Bool
     let insertImageData: (Data, String?) -> Void
     let isEditable: Bool
     let allowsReadOnlyHighlighting: Bool
@@ -5437,6 +6245,9 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             suggestionAnchor: $suggestionAnchor,
             relevanceAnchor: $relevanceAnchor,
             relevanceHighlightRange: relevanceHighlightRange,
+            formulaAssistContext: $formulaAssistContext,
+            formulaAssistAnchor: $formulaAssistAnchor,
+            shouldInsertFormula: $shouldInsertFormula,
             insertImageData: insertImageData,
             isEditable: isEditable,
             allowsReadOnlyHighlighting: allowsReadOnlyHighlighting,
@@ -5498,6 +6309,9 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         context.coordinator.linkTabCompletionTitle = linkTabCompletionTitle
         context.coordinator.suggestionRange = suggestionRange
         context.coordinator.relevanceAnchor = $relevanceAnchor
+        context.coordinator.formulaAssistContext = $formulaAssistContext
+        context.coordinator.formulaAssistAnchor = $formulaAssistAnchor
+        context.coordinator.shouldInsertFormula = $shouldInsertFormula
         context.coordinator.finishEditing = finishEditing
         context.coordinator.isEditable = isEditable
         context.coordinator.allowsReadOnlyHighlighting = allowsReadOnlyHighlighting
@@ -5518,7 +6332,8 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         }
 
         let clampedSelection = Self.clamped(selectionRange, in: text)
-        if didReplaceText || textView.selectedRange() != clampedSelection {
+        let isActivelyEditing = textView.window?.firstResponder === textView
+        if didReplaceText || (!isActivelyEditing && textView.selectedRange() != clampedSelection) {
             textView.setSelectedRange(clampedSelection)
             if context.coordinator.hasStoredViewport {
                 context.coordinator.restoreViewport(in: scrollView)
@@ -5532,7 +6347,16 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         }
         context.coordinator.updateSuggestionAnchor()
         context.coordinator.updateRelevanceAnchor()
+        context.coordinator.updateFormulaAssist()
         context.coordinator.publishVisibleSourceLocation(in: scrollView)
+
+        if shouldInsertFormula, textView.isEditable {
+            shouldInsertFormula = false
+            let coordinator = context.coordinator
+            DispatchQueue.main.async {
+                coordinator.insertEquation(in: textView)
+            }
+        }
     }
 
     private static func clamped(_ range: NSRange, in text: String) -> NSRange {
@@ -5552,6 +6376,9 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         var typingStatus: Binding<MarkdownTypingStatus>
         var suggestionAnchor: Binding<CGPoint?>
         var relevanceAnchor: Binding<CGPoint?>
+        var formulaAssistContext: Binding<FormulaAssistContext?>
+        var formulaAssistAnchor: Binding<CGPoint?>
+        var shouldInsertFormula: Binding<Bool>
         var insertImageData: (Data, String?) -> Void
         var isEditable: Bool
         var allowsReadOnlyHighlighting: Bool
@@ -5564,6 +6391,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         weak var textView: NSTextView?
         private var isApplyingMarkdownStyling = false
         private var pendingStylingWorkItem: DispatchWorkItem?
+        private var pendingFormulaAssistWorkItem: DispatchWorkItem?
         private var didAutoFocusEditor = false
         private var activeInlineCommands: Set<MarkdownInlineCommand> = []
         private var scrollObservation: NSObjectProtocol?
@@ -5575,6 +6403,9 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             suggestionAnchor: Binding<CGPoint?>,
             relevanceAnchor: Binding<CGPoint?>,
             relevanceHighlightRange: NSRange?,
+            formulaAssistContext: Binding<FormulaAssistContext?>,
+            formulaAssistAnchor: Binding<CGPoint?>,
+            shouldInsertFormula: Binding<Bool>,
             insertImageData: @escaping (Data, String?) -> Void,
             isEditable: Bool,
             allowsReadOnlyHighlighting: Bool,
@@ -5588,6 +6419,9 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             self.suggestionAnchor = suggestionAnchor
             self.relevanceAnchor = relevanceAnchor
             self.relevanceHighlightRange = relevanceHighlightRange
+            self.formulaAssistContext = formulaAssistContext
+            self.formulaAssistAnchor = formulaAssistAnchor
+            self.shouldInsertFormula = shouldInsertFormula
             self.insertImageData = insertImageData
             self.isEditable = isEditable
             self.allowsReadOnlyHighlighting = allowsReadOnlyHighlighting
@@ -5669,8 +6503,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
 
             DispatchQueue.main.async { [weak self] in
                 guard let textView = self?.textView,
-                      let window = textView.window,
-                      window.firstResponder == nil || window.firstResponder === textView.enclosingScrollView
+                      let window = textView.window
                 else { return }
 
                 window.makeFirstResponder(textView)
@@ -5687,12 +6520,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             scheduleMarkdownStyling()
             updateSuggestionAnchor()
             updateRelevanceAnchor()
-        }
-
-        func textDidEndEditing(_ notification: Notification) {
-            DispatchQueue.main.async { [finishEditing] in
-                finishEditing()
-            }
+            updateFormulaAssist()
         }
 
         func syncTextAndSelectionAfterUndoRedo(in textView: NSTextView) {
@@ -5702,6 +6530,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             scheduleMarkdownStyling()
             updateSuggestionAnchor()
             updateRelevanceAnchor()
+            updateFormulaAssist()
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
@@ -5712,6 +6541,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             }
             updateSuggestionAnchor()
             updateRelevanceAnchor()
+            updateFormulaAssist()
         }
 
         func pasteImageFromClipboard() -> Bool {
@@ -5971,8 +6801,93 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             }
         }
 
-        private var activeCommandsInRenderOrder: [MarkdownInlineCommand] {
+    private var activeCommandsInRenderOrder: [MarkdownInlineCommand] {
             [.bold, .italic, .underline, .highlight].filter { activeInlineCommands.contains($0) }
+        }
+
+        func insertTable(columns: Int, rows: Int, in textView: NSTextView) {
+            guard isEditable else { return }
+            let safeColumns = min(max(columns, 1), 10)
+            let safeRows = min(max(rows, 1), 10)
+            let markdown = Self.tableMarkdown(columns: safeColumns, rows: safeRows)
+            insertBlock(markdown, in: textView, selectFirstEditableCell: true)
+        }
+
+        func insertEquation(in textView: NSTextView) {
+            guard isEditable else { return }
+            insertInline("/formula{}", in: textView, caretOffset: "/formula{".count)
+        }
+
+        private func insertInline(_ snippet: String, in textView: NSTextView, caretOffset: Int) {
+            let rawText = textView.string as NSString
+            let selectedRange = textView.selectedRange()
+            guard selectedRange.location <= rawText.length,
+                  selectedRange.upperBound <= rawText.length
+            else { return }
+
+            textView.replaceCharacters(in: selectedRange, with: snippet)
+
+            let replacementStart = selectedRange.location
+            let newSelection = NSRange(location: replacementStart + caretOffset, length: 0)
+
+            textView.setSelectedRange(newSelection)
+            text.wrappedValue = textView.string
+            selectionRange.wrappedValue = newSelection
+            typingStatus.wrappedValue = typingStatus(in: textView, selectedRange: newSelection)
+            applyMarkdownStyling()
+            updateSuggestionAnchor()
+            updateRelevanceAnchor()
+            updateFormulaAssist()
+        }
+
+        private func insertBlock(_ block: String, in textView: NSTextView, selectFirstEditableCell: Bool = false, selectFormulaInterior: Bool = false) {
+            let rawText = textView.string as NSString
+            let selectedRange = textView.selectedRange()
+            guard selectedRange.location <= rawText.length,
+                  selectedRange.upperBound <= rawText.length
+            else { return }
+
+            let prefix = selectedRange.location == 0
+                ? ""
+                : (rawText.substring(to: selectedRange.location).hasSuffix("\n\n") ? "" : "\n\n")
+            let suffix = selectedRange.upperBound >= rawText.length
+                ? "\n"
+                : (rawText.substring(from: selectedRange.upperBound).hasPrefix("\n\n") ? "" : "\n\n")
+            let replacement = "\(prefix)\(block)\(suffix)"
+            textView.replaceCharacters(in: selectedRange, with: replacement)
+
+            let replacementStart = selectedRange.location + (prefix as NSString).length
+            let newSelection: NSRange
+            if selectFirstEditableCell,
+               let cellRange = (textView.string as NSString).range(of: "Header 1", options: [], range: NSRange(location: replacementStart, length: (replacement as NSString).length)).nilIfNotFound {
+                newSelection = cellRange
+            } else if selectFormulaInterior {
+                newSelection = NSRange(location: replacementStart + "/formula{".count, length: 0)
+            } else {
+                newSelection = NSRange(location: replacementStart + (block as NSString).length, length: 0)
+            }
+
+            textView.setSelectedRange(newSelection)
+            text.wrappedValue = textView.string
+            selectionRange.wrappedValue = newSelection
+            typingStatus.wrappedValue = typingStatus(in: textView, selectedRange: newSelection)
+            applyMarkdownStyling()
+            updateSuggestionAnchor()
+            updateRelevanceAnchor()
+        }
+
+        private static func tableMarkdown(columns: Int, rows: Int) -> String {
+            let headers = Array(repeating: "", count: columns)
+            let separator = Array(repeating: "---", count: columns)
+            let bodyRowCount = max(0, rows - 1)
+            let bodyRows = (0..<bodyRowCount)
+                .map { _ in
+                    Array(repeating: "", count: columns)
+                }
+            let allRows = [headers, separator] + bodyRows
+            return allRows
+                .map { cells in "| \(cells.joined(separator: " | ")) |" }
+                .joined(separator: "\n")
         }
 
         private func isCaretInsideActiveFormattedRun(_ location: Int, in textView: NSTextView) -> Bool {
@@ -6194,6 +7109,14 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
                     return
                 }
 
+                if Self.isFormulaLine(trimmedLine) {
+                    textStorage.addAttributes([
+                        .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
+                        .foregroundColor: NSColor.labelColor
+                    ], range: lineRange)
+                    return
+                }
+
                 if trimmedLine.hasPrefix(">") {
                     textStorage.addAttributes([
                         .font: Self.italicFont(size: 15),
@@ -6249,6 +7172,9 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             if let headingLevel = Self.headingLevel(in: rawLine) {
                 attributes[.font] = NSFont.systemFont(ofSize: Self.headingFontSize(for: headingLevel), weight: .bold)
                 attributes[.paragraphStyle] = Self.paragraphStyle(for: trimmedLine, isCode: false)
+            } else if Self.isFormulaLine(trimmedLine) {
+                attributes[.font] = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+                attributes[.foregroundColor] = NSColor.labelColor
             } else if trimmedLine.hasPrefix(">") {
                 attributes[.font] = Self.italicFont(size: 15)
                 attributes[.foregroundColor] = NSColor.secondaryLabelColor
@@ -6290,6 +7216,134 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             DispatchQueue.main.async {
                 self.relevanceAnchor.wrappedValue = anchor
             }
+        }
+
+        func updateFormulaAssist() {
+            pendingFormulaAssistWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                self?.applyFormulaAssistUpdate()
+            }
+            pendingFormulaAssistWorkItem = workItem
+            DispatchQueue.main.async(execute: workItem)
+        }
+
+        private func applyFormulaAssistUpdate() {
+            guard let textView else {
+                clearFormulaAssistState()
+                return
+            }
+
+            let selectedRange = textView.selectedRange()
+            guard selectedRange.length == 0,
+                  selectedRange.location >= 0,
+                  let context = Self.formulaContext(at: selectedRange.location, in: textView.string)
+            else {
+                clearFormulaAssistState()
+                return
+            }
+
+            let anchor = anchorForFormulaAssistBubble(in: textView, context: context)
+            if formulaAssistContext.wrappedValue != context {
+                formulaAssistContext.wrappedValue = context
+            }
+            if formulaAssistAnchor.wrappedValue != anchor {
+                formulaAssistAnchor.wrappedValue = anchor
+            }
+        }
+
+        private func clearFormulaAssistState() {
+            if formulaAssistContext.wrappedValue != nil {
+                formulaAssistContext.wrappedValue = nil
+            }
+            if formulaAssistAnchor.wrappedValue != nil {
+                formulaAssistAnchor.wrappedValue = nil
+            }
+        }
+
+        private func anchorForFormulaAssistBubble(in textView: NSTextView, context: FormulaAssistContext) -> CGPoint? {
+            guard let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer,
+                  let textStorage = layoutManager.textStorage
+            else { return nil }
+
+            let textLength = textStorage.length
+            let markerIndex = context.markerLocation
+            guard markerIndex >= 0, markerIndex < textLength else { return nil }
+
+            let nsText = textView.string as NSString
+            let lineRange = nsText.lineRange(for: NSRange(location: markerIndex, length: 0))
+            guard lineRange.location != NSNotFound, lineRange.upperBound <= textLength else { return nil }
+
+            layoutManager.ensureLayout(forCharacterRange: lineRange)
+            let lineGlyphRange = layoutManager.glyphRange(forCharacterRange: lineRange, actualCharacterRange: nil)
+            guard lineGlyphRange.location != NSNotFound else { return nil }
+
+            let lineRect = layoutManager.boundingRect(forGlyphRange: lineGlyphRange, in: textContainer)
+            guard let markerRect = characterRect(at: markerIndex, in: textView) else { return nil }
+
+            let visibleOrigin = textView.enclosingScrollView?.contentView.bounds.origin ?? .zero
+            let inset = textView.textContainerInset
+            return CGPoint(
+                x: markerRect.minX + inset.width - visibleOrigin.x,
+                y: lineRect.maxY + inset.height - visibleOrigin.y
+            )
+        }
+
+        private func characterRect(at index: Int, in textView: NSTextView) -> CGRect? {
+            guard let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer,
+                  let textStorage = layoutManager.textStorage
+            else { return nil }
+
+            guard index >= 0, index < textStorage.length else { return nil }
+
+            let characterRange = NSRange(location: index, length: 1)
+            layoutManager.ensureLayout(forCharacterRange: characterRange)
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: characterRange, actualCharacterRange: nil)
+            guard glyphRange.location != NSNotFound, glyphRange.length > 0 else { return nil }
+
+            let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            guard !rect.isNull, !rect.isInfinite else { return nil }
+            return rect
+        }
+
+        static func formulaContext(at location: Int, in text: String) -> FormulaAssistContext? {
+            let nsText = text as NSString
+            guard location >= 0, location <= nsText.length else { return nil }
+
+            let marker = "/formula{"
+            let legacyMarker = "formula {"
+            let searchRange = NSRange(location: 0, length: min(location + 1, nsText.length))
+            let markerRange = nsText.range(of: marker, options: .backwards, range: searchRange)
+            let resolvedMarkerRange: NSRange
+            let contentStart: Int
+
+            if markerRange.location != NSNotFound {
+                resolvedMarkerRange = markerRange
+                contentStart = markerRange.location + marker.count
+            } else {
+                let legacyRange = nsText.range(of: legacyMarker, options: .backwards, range: searchRange)
+                guard legacyRange.location != NSNotFound else { return nil }
+                resolvedMarkerRange = legacyRange
+                contentStart = legacyRange.location + legacyMarker.count
+            }
+
+            guard location >= contentStart else { return nil }
+
+            let tailRange = NSRange(location: contentStart, length: nsText.length - contentStart)
+            let closeRange = nsText.range(of: "}", options: [], range: tailRange)
+            let contentEnd: Int
+            if closeRange.location == NSNotFound {
+                contentEnd = location
+            } else {
+                guard location <= closeRange.location else { return nil }
+                contentEnd = closeRange.location
+            }
+
+            return FormulaAssistContext(
+                markerLocation: resolvedMarkerRange.location,
+                contentRange: NSRange(location: contentStart, length: max(0, contentEnd - contentStart))
+            )
         }
 
         private func anchor(for range: NSRange?) -> CGPoint? {
@@ -6501,6 +7555,7 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
 
         private static func isListLine(_ line: String) -> Bool {
             guard !line.isEmpty else { return false }
+            if isFormulaLine(line) { return false }
             if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
                 return true
             }
@@ -6509,6 +7564,11 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
             return parts.count == 2
                 && parts[0].allSatisfy(\.isNumber)
                 && parts[1].hasPrefix(" ")
+        }
+
+        private static func isFormulaLine(_ line: String) -> Bool {
+            let lower = line.lowercased()
+            return lower.hasPrefix("/formula") || lower.hasPrefix("formula {")
         }
 
         private static func tintLeadingMarker(
@@ -6631,6 +7691,12 @@ private extension String {
     }
 }
 
+private extension NSRange {
+    var nilIfNotFound: NSRange? {
+        location == NSNotFound ? nil : self
+    }
+}
+
 private extension NSImage {
     func pngData() -> Data? {
         guard let tiffRepresentation,
@@ -6694,6 +7760,35 @@ private enum PasteboardImageReader {
         (NSPasteboard.PasteboardType("public.heic"), "heic", false),
         (NSPasteboard.PasteboardType("org.webmproject.webp"), "webp", false)
     ]
+}
+
+private final class MarkdownTableInsertionCommand: NSObject {
+    let columns: Int
+    let rows: Int
+
+    init(columns: Int, rows: Int) {
+        self.columns = columns
+        self.rows = rows
+    }
+}
+
+private struct MarkdownTableInsertionRequest: Equatable {
+    let id = UUID()
+    let columns: Int
+    let rows: Int
+}
+
+private struct MarkdownFormulaInsertionRequest: Equatable {
+    enum Action: Equatable {
+        case manual
+        case generated(String)
+    }
+
+    let action: Action
+}
+
+private enum MarkdownFormulaDefaults {
+    static let placeholder = "any LaTeX formula goes here"
 }
 
 private final class MarkdownNSTextView: NSTextView {
@@ -6763,6 +7858,17 @@ private final class MarkdownNSTextView: NSTextView {
     @objc(highlightSelection:)
     func highlightSelection(_ sender: Any?) {
         commandHandler?.toggleInlineCommand(.highlight, in: self)
+    }
+
+    @objc(insertMarkdownTable:)
+    func insertMarkdownTable(_ sender: Any?) {
+        guard let command = sender as? MarkdownTableInsertionCommand else { return }
+        commandHandler?.insertTable(columns: command.columns, rows: command.rows, in: self)
+    }
+
+    @objc(insertMarkdownEquation:)
+    func insertMarkdownEquation(_ sender: Any?) {
+        commandHandler?.insertEquation(in: self)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -8595,6 +9701,8 @@ private struct MarkdownPreview: View {
     let imageURL: (String) -> URL?
     let imageData: (String) -> Data?
     let showsCodeCopyButton: Bool
+    let editBlock: ((Int) -> Void)?
+    let editTable: ((MarkdownTableEdit) -> Void)?
 
     init(
         content: String,
@@ -8602,7 +9710,9 @@ private struct MarkdownPreview: View {
         openLinkedNote: @escaping (String) -> Void,
         imageURL: @escaping (String) -> URL? = { _ in nil },
         imageData: @escaping (String) -> Data? = { _ in nil },
-        showsCodeCopyButton: Bool = true
+        showsCodeCopyButton: Bool = true,
+        editBlock: ((Int) -> Void)? = nil,
+        editTable: ((MarkdownTableEdit) -> Void)? = nil
     ) {
         self.content = content
         self.searchHighlight = searchHighlight
@@ -8610,6 +9720,8 @@ private struct MarkdownPreview: View {
         self.imageURL = imageURL
         self.imageData = imageData
         self.showsCodeCopyButton = showsCodeCopyButton
+        self.editBlock = editBlock
+        self.editTable = editTable
     }
 
     private var blocks: [MarkdownBlock] {
@@ -8702,10 +9814,12 @@ private struct MarkdownPreview: View {
                 .padding(.top, level == 1 ? 0 : 5)
                 .padding(.bottom, 2)
                 .highlightedSearchBlock(isHighlighted)
+                .editableMarkdownBlock(sourceLocation: block.sourceLocation, editBlock: editBlock)
 
         case .paragraph(let text):
             paragraphText(text, highlighted: isHighlighted)
                 .highlightedSearchBlock(isHighlighted)
+                .editableMarkdownBlock(sourceLocation: block.sourceLocation, editBlock: editBlock)
 
         case .bullet(let text):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -8715,6 +9829,7 @@ private struct MarkdownPreview: View {
                     .font(.system(size: 15.5))
             }
             .highlightedSearchBlock(isHighlighted)
+            .editableMarkdownBlock(sourceLocation: block.sourceLocation, editBlock: editBlock)
 
         case .task(let isDone, let text):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -8726,6 +9841,7 @@ private struct MarkdownPreview: View {
                     .foregroundStyle(isDone ? .secondary : .primary)
             }
             .highlightedSearchBlock(isHighlighted)
+            .editableMarkdownBlock(sourceLocation: block.sourceLocation, editBlock: editBlock)
 
         case .numbered(let number, let text):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -8736,6 +9852,7 @@ private struct MarkdownPreview: View {
                     .font(.system(size: 15.5))
             }
             .highlightedSearchBlock(isHighlighted)
+            .editableMarkdownBlock(sourceLocation: block.sourceLocation, editBlock: editBlock)
 
         case .quote(let text):
             HStack(alignment: .top, spacing: 12) {
@@ -8748,30 +9865,78 @@ private struct MarkdownPreview: View {
             }
             .padding(.vertical, 2)
             .highlightedSearchBlock(isHighlighted)
+            .editableMarkdownBlock(sourceLocation: block.sourceLocation, editBlock: editBlock)
 
         case .code(let text):
             MarkdownCodeBlockView(text: text, showsCopyButton: showsCodeCopyButton)
             .highlightedSearchBlock(isHighlighted)
+            .editableMarkdownBlock(sourceLocation: block.sourceLocation, editBlock: editBlock)
 
         case .image(let alt, let path):
             MarkdownImageView(alt: alt, path: path, url: imageURL(path), imageData: imageData(path), maxWidth: 520, maxHeight: 360)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .highlightedSearchBlock(isHighlighted)
+                .editableMarkdownBlock(sourceLocation: block.sourceLocation, editBlock: editBlock)
 
         case .table(let table):
-            tableView(table, highlighted: isHighlighted)
+            tableView(table, sourceLocation: block.sourceLocation, highlighted: isHighlighted)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .highlightedSearchBlock(isHighlighted)
+
+        case .formula(let formula):
+            formulaView(formula, sourceLocation: block.sourceLocation, highlighted: isHighlighted)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .highlightedSearchBlock(isHighlighted)
+                .editableMarkdownBlock(sourceLocation: block.sourceLocation, editBlock: editBlock)
 
         case .divider:
             Rectangle()
                 .fill(.secondary.opacity(0.22))
                 .frame(height: 1)
                 .padding(.vertical, 10)
+                .editableMarkdownBlock(sourceLocation: block.sourceLocation, editBlock: editBlock)
         }
     }
 
-    private func tableView(_ table: MarkdownTable, highlighted: Bool) -> some View {
+    @ViewBuilder
+    private func formulaView(_ formula: MarkdownFormula, sourceLocation: Int, highlighted: Bool) -> some View {
+        readOnlyFormulaView(formula, highlighted: highlighted)
+    }
+
+    private func readOnlyFormulaView(_ formula: MarkdownFormula, highlighted: Bool) -> some View {
+        FormulaRenderCard(
+            latex: formula.latex,
+            hasRenderableLatex: formula.hasRenderableLatex,
+            showsCopyButton: formula.hasRenderableLatex,
+            onTap: nil
+        )
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .background(.quaternary.opacity(0.18))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(highlighted ? 0.24 : 0.10), lineWidth: 1)
+        }
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func tableView(_ table: MarkdownTable, sourceLocation: Int, highlighted: Bool) -> some View {
+        if let editTable {
+            EditableMarkdownTableView(
+                table: table,
+                sourceLocation: sourceLocation,
+                highlighted: highlighted,
+                editTable: editTable
+            )
+        } else {
+            readOnlyTableView(table, highlighted: highlighted)
+        }
+    }
+
+    private func readOnlyTableView(_ table: MarkdownTable, highlighted: Bool) -> some View {
         let columnWidths = tableColumnWidths(for: table)
 
         return ScrollView(.horizontal) {
@@ -9081,6 +10246,433 @@ private struct MarkdownPreview: View {
     }
 }
 
+private extension View {
+    @ViewBuilder
+    func editableMarkdownBlock(sourceLocation: Int, editBlock: ((Int) -> Void)?) -> some View {
+        if let editBlock {
+            self
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    editBlock(sourceLocation)
+                }
+        } else {
+            self
+        }
+    }
+}
+
+private struct EditableMarkdownTableView: View {
+    let table: MarkdownTable
+    let sourceLocation: Int
+    let highlighted: Bool
+    let editTable: (MarkdownTableEdit) -> Void
+
+    @State private var isHovered = false
+
+    private var columnWidths: [CGFloat] {
+        let columnCount = max(table.headers.count, table.rows.map(\.count).max() ?? 0)
+        guard columnCount > 0 else { return [] }
+
+        return (0..<columnCount).map { index in
+            let values = [table.headers[safe: index] ?? ""] + table.rows.map { $0[safe: index] ?? "" }
+            let longest = values
+                .map { $0.replacingOccurrences(of: #"[*_`=<>\[\]\(\)!]"#, with: "", options: .regularExpression) }
+                .map(\.count)
+                .max() ?? 0
+            return min(620, max(150, CGFloat(longest) * 7.8 + 44))
+        }
+    }
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            ScrollView(.horizontal) {
+                VStack(alignment: .leading, spacing: 0) {
+                    editableRow(table.headers, rowIndex: 0, isHeader: true)
+
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.16))
+                        .frame(height: 1)
+
+                    ForEach(Array(table.rows.enumerated()), id: \.offset) { index, row in
+                        editableRow(row, rowIndex: index + 1, isHeader: false)
+                            .background(index.isMultiple(of: 2) ? Color.primary.opacity(0.025) : Color.clear)
+                    }
+                }
+                .fixedSize(horizontal: true, vertical: false)
+                .background(.quaternary.opacity(0.18))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.primary.opacity(highlighted ? 0.24 : 0.10), lineWidth: 1)
+                }
+                .padding(.vertical, 4)
+                .padding(.trailing, isHovered ? 34 : 0)
+                .frame(maxWidth: .infinity, alignment: .center)
+            }
+            .scrollIndicators(.visible)
+            .frame(maxWidth: .infinity, alignment: .center)
+
+            if isHovered {
+                VStack(spacing: 8) {
+                    tableControlButton(help: "Add Column") {
+                        editTable(MarkdownTableEdit(sourceLocation: sourceLocation, action: .appendColumn))
+                    }
+
+                    Spacer(minLength: 0)
+
+                    tableControlButton(help: "Add Row") {
+                        editTable(MarkdownTableEdit(sourceLocation: sourceLocation, action: .appendRow))
+                    }
+                }
+                .padding(.vertical, 12)
+                .padding(.trailing, 2)
+                .transition(.opacity)
+            }
+        }
+        .padding(.vertical, 4)
+        .onHover { isHovered = $0 }
+        .onTapGesture { }
+    }
+
+    private func editableRow(_ cells: [String], rowIndex: Int, isHeader: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(cells.indices, id: \.self) { columnIndex in
+                TextField(
+                    "",
+                    text: Binding(
+                        get: { cells[columnIndex] },
+                        set: { value in
+                            editTable(
+                                MarkdownTableEdit(
+                                    sourceLocation: sourceLocation,
+                                    action: .updateCell(row: rowIndex, column: columnIndex, value: value)
+                                )
+                            )
+                        }
+                    )
+                )
+                .textFieldStyle(.plain)
+                .font(.system(size: isHeader ? 13.5 : 13, weight: isHeader ? .semibold : .regular))
+                .multilineTextAlignment(textAlignment(for: table.alignments[safe: columnIndex] ?? .left))
+                .frame(
+                    width: columnWidths[safe: columnIndex] ?? 150,
+                    alignment: frameAlignment(for: table.alignments[safe: columnIndex] ?? .left)
+                )
+                .padding(.horizontal, 12)
+                .padding(.vertical, isHeader ? 9 : 8)
+                .background(isHeader ? Color.primary.opacity(0.055) : Color.clear)
+                .overlay(alignment: .trailing) {
+                    if columnIndex < cells.count - 1 {
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.08))
+                            .frame(width: 1)
+                    }
+                }
+            }
+        }
+    }
+
+    private func tableControlButton(help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "plus")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(Color.primary.opacity(0.82))
+                .frame(width: 24, height: 24)
+                .background(.regularMaterial)
+                .clipShape(Circle())
+                .overlay {
+                    Circle()
+                        .stroke(Color.primary.opacity(0.16), lineWidth: 1)
+                }
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    private func textAlignment(for alignment: MarkdownTableAlignment) -> TextAlignment {
+        switch alignment {
+        case .left:
+            return .leading
+        case .center:
+            return .center
+        case .right:
+            return .trailing
+        }
+    }
+
+    private func frameAlignment(for alignment: MarkdownTableAlignment) -> Alignment {
+        switch alignment {
+        case .left:
+            return .leading
+        case .center:
+            return .center
+        case .right:
+            return .trailing
+        }
+    }
+}
+
+private struct MarkdownFormula {
+    let latex: String
+    let sourceLineCount: Int
+
+    var hasRenderableLatex: Bool {
+        let trimmed = latex.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed != MarkdownFormulaDefaults.placeholder
+    }
+}
+
+private extension MarkdownFormula {
+    nonisolated var markdownString: String {
+        let trimmed = latex.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return "/formula{}"
+        }
+        if latex.contains("\n") {
+            return "/formula{\n\(latex)\n}"
+        }
+        return "/formula{\(latex)}"
+    }
+
+    mutating func updateLatex(_ value: String) {
+        self = MarkdownFormula(latex: value, sourceLineCount: sourceLineCount)
+    }
+}
+
+private struct FormulaRenderCard: View {
+    let latex: String
+    let hasRenderableLatex: Bool
+    let showsCopyButton: Bool
+    let onTap: (() -> Void)?
+
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var previewHeight: CGFloat = 56
+    @State private var didCopy = false
+    @State private var isCopyHovered = false
+
+    private var copyableLatex: String {
+        let trimmed = latex.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == MarkdownFormulaDefaults.placeholder {
+            return ""
+        }
+        return trimmed
+    }
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if hasRenderableLatex {
+                    LatexFormulaPreviewView(
+                        latex: latex,
+                        height: $previewHeight,
+                        usesDarkAppearance: colorScheme == .dark
+                    )
+                        .frame(height: previewHeight)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                } else {
+                    Text(MarkdownFormulaDefaults.placeholder)
+                        .font(.system(size: 13.5, design: .monospaced))
+                        .foregroundStyle(.secondary.opacity(0.72))
+                        .italic()
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+            }
+            .padding(.top, hasRenderableLatex ? 8 : 0)
+            .padding(.trailing, showsCopyButton ? 34 : 0)
+            .frame(maxWidth: .infinity, alignment: .center)
+
+            if showsCopyButton, !copyableLatex.isEmpty {
+                Button {
+                    copyTextToPasteboard(copyableLatex)
+                    didCopy = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                        didCopy = false
+                    }
+                } label: {
+                    Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary.opacity(isCopyHovered ? 0.95 : 0.72))
+                        .frame(width: 24, height: 24)
+                        .background {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.primary.opacity(isCopyHovered ? 0.10 : 0.06))
+                        }
+                }
+                .buttonStyle(.plain)
+                .help("Copy LaTeX")
+                .onHover { isCopyHovered = $0 }
+                .padding(.top, 4)
+                .padding(.trailing, 4)
+            }
+        }
+        .contentShape(Rectangle())
+        .modifier(FormulaRenderTapModifier(onTap: onTap))
+    }
+}
+
+private struct FormulaRenderTapModifier: ViewModifier {
+    let onTap: (() -> Void)?
+
+    func body(content: Content) -> some View {
+        if let onTap {
+            content.onTapGesture(perform: onTap)
+        } else {
+            content
+        }
+    }
+}
+
+private struct LatexFormulaPreviewView: NSViewRepresentable {
+    let latex: String
+    let usesDarkAppearance: Bool
+    @Binding var height: CGFloat
+
+    init(latex: String, height: Binding<CGFloat> = .constant(56), usesDarkAppearance: Bool = false) {
+        self.latex = latex
+        self.usesDarkAppearance = usesDarkAppearance
+        self._height = height
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(height: $height)
+    }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.navigationDelegate = context.coordinator
+        context.coordinator.webView = webView
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        let html = Self.htmlDocument(for: latex, usesDarkAppearance: usesDarkAppearance)
+        if context.coordinator.lastHTML != html {
+            context.coordinator.lastHTML = html
+            webView.loadHTMLString(html, baseURL: URL(string: "https://cdn.jsdelivr.net"))
+        }
+    }
+
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        coordinator.webView = nil
+    }
+
+    private static func htmlDocument(for latex: String, usesDarkAppearance: Bool) -> String {
+        let escapedLatex = jsStringLiteral(latex)
+        let textColor = usesDarkAppearance ? "#f5f5f7" : "#1d1d1f"
+        let fallbackColor = usesDarkAppearance ? "rgba(245,245,247,0.92)" : "rgba(29,29,31,0.92)"
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+        <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            background: transparent;
+            overflow: hidden;
+            color: \(textColor);
+        }
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 4px 0;
+        }
+        #math {
+            max-width: 100%;
+            overflow-x: auto;
+        }
+        .katex {
+            color: \(textColor) !important;
+        }
+        .katex .mord,
+        .katex .mbin,
+        .katex .mrel,
+        .katex .mopen,
+        .katex .mclose,
+        .katex .mpunct,
+        .katex .minner,
+        .katex .mop {
+            color: \(textColor) !important;
+        }
+        .fallback {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 13px;
+            color: \(fallbackColor);
+            white-space: pre-wrap;
+        }
+        </style>
+        </head>
+        <body>
+        <div id="math"></div>
+        <script>
+        window.onload = function() {
+            const latex = \(escapedLatex);
+            const target = document.getElementById("math");
+            try {
+                if (window.katex) {
+                    katex.render(latex, target, { displayMode: true, throwOnError: false });
+                } else {
+                    target.className = "fallback";
+                    target.textContent = latex;
+                }
+            } catch (error) {
+                target.className = "fallback";
+                target.textContent = latex;
+            }
+        };
+        </script>
+        </body>
+        </html>
+        """
+    }
+
+    private static func jsStringLiteral(_ text: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: [text], options: []),
+              let encoded = String(data: data, encoding: .utf8),
+              encoded.count >= 2
+        else { return "\"\"" }
+        return String(encoded.dropFirst().dropLast())
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var webView: WKWebView?
+        var lastHTML: String?
+        var height: Binding<CGFloat>
+
+        init(height: Binding<CGFloat>) {
+            self.height = height
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { [weak self] result, _ in
+                guard let self else { return }
+                let measured: CGFloat
+                if let value = result as? CGFloat {
+                    measured = value
+                } else if let value = result as? Double {
+                    measured = CGFloat(value)
+                } else {
+                    return
+                }
+                let clamped = min(max(36, measured + 8), 420)
+                if abs(clamped - self.height.wrappedValue) > 1 {
+                    DispatchQueue.main.async {
+                        self.height.wrappedValue = clamped
+                    }
+                }
+            }
+        }
+    }
+}
+
 private struct MarkdownHighlightTokenSpan {
     let startMarker: String
     let endMarker: String
@@ -9205,12 +10797,104 @@ private struct MarkdownTable {
     let headers: [String]
     let alignments: [MarkdownTableAlignment]
     let rows: [[String]]
+    let sourceLineCount: Int
+}
+
+private extension MarkdownTable {
+    nonisolated var markdownString: String {
+        let separator = alignments.map(\.separatorCell)
+        return ([headers, separator] + rows)
+            .map { cells in "| \(cells.map(Self.escapedCell).joined(separator: " | ")) |" }
+            .joined(separator: "\n")
+    }
+
+    mutating func updateCell(row: Int, column: Int, value: String) {
+        guard column >= 0 else { return }
+
+        if row == 0 {
+            guard column < headers.count else { return }
+            var updatedHeaders = headers
+            updatedHeaders[column] = value
+            self = MarkdownTable(
+                headers: updatedHeaders,
+                alignments: alignments,
+                rows: rows,
+                sourceLineCount: sourceLineCount
+            )
+            return
+        }
+
+        let rowIndex = row - 1
+        guard rows.indices.contains(rowIndex),
+              column < rows[rowIndex].count
+        else { return }
+
+        var updatedRows = rows
+        updatedRows[rowIndex][column] = value
+        self = MarkdownTable(
+            headers: headers,
+            alignments: alignments,
+            rows: updatedRows,
+            sourceLineCount: sourceLineCount
+        )
+    }
+
+    mutating func appendColumn() {
+        let nextIndex = headers.count + 1
+        self = MarkdownTable(
+            headers: headers + ["Column \(nextIndex)"],
+            alignments: alignments + [.left],
+            rows: rows.map { $0 + [""] },
+            sourceLineCount: sourceLineCount
+        )
+    }
+
+    mutating func appendRow() {
+        let columnCount = max(max(headers.count, alignments.count), rows.map(\.count).max() ?? 0)
+        self = MarkdownTable(
+            headers: headers,
+            alignments: alignments,
+            rows: rows + [Array(repeating: "", count: columnCount)],
+            sourceLineCount: sourceLineCount + 1
+        )
+    }
+
+    nonisolated private static func escapedCell(_ cell: String) -> String {
+        cell
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "|", with: "/")
+            .trimmingCharacters(in: .whitespaces)
+    }
 }
 
 private enum MarkdownTableAlignment {
     case left
     case center
     case right
+}
+
+private extension MarkdownTableAlignment {
+    nonisolated var separatorCell: String {
+        switch self {
+        case .left:
+            return "---"
+        case .center:
+            return ":---:"
+        case .right:
+            return "---:"
+        }
+    }
+}
+
+private struct MarkdownTableEdit {
+    enum Action {
+        case updateCell(row: Int, column: Int, value: String)
+        case appendColumn
+        case appendRow
+    }
+
+    let sourceLocation: Int
+    let action: Action
 }
 
 private struct MarkdownBlock: Identifiable {
@@ -9224,6 +10908,7 @@ private struct MarkdownBlock: Identifiable {
         case code(String)
         case image(alt: String, path: String)
         case table(MarkdownTable)
+        case formula(MarkdownFormula)
         case divider
     }
 
@@ -9293,6 +10978,10 @@ private struct MarkdownBlock: Identifiable {
                 flushParagraph()
                 append(.table(parsedTable.table), sourceLineIndex: lineIndex)
                 lineIndex += parsedTable.consumedLineCount
+            } else if let parsedFormula = parseFormula(startingAt: lineIndex, in: lines) {
+                flushParagraph()
+                append(.formula(parsedFormula.formula), sourceLineIndex: lineIndex)
+                lineIndex += parsedFormula.consumedLineCount
             } else if let heading = parseHeading(trimmed) {
                 flushParagraph()
                 append(.heading(level: heading.level, text: heading.text), sourceLineIndex: lineIndex)
@@ -9337,6 +11026,125 @@ private struct MarkdownBlock: Identifiable {
         }
 
         return blocks
+    }
+
+    private static func parseFormula(startingAt index: Int, in lines: [String]) -> (formula: MarkdownFormula, consumedLineCount: Int)? {
+        let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+        let lower = trimmed.lowercased()
+
+        if lower.hasPrefix("/formula{") {
+            return parseSlashFormulaLine(trimmed, lineIndex: index, in: lines)
+        }
+
+        if lower.hasPrefix("formula {") {
+            return parseLegacyFormula(startingAt: index, in: lines, trimmed: trimmed)
+        }
+
+        return nil
+    }
+
+    private static func parseSlashFormulaLine(
+        _ trimmed: String,
+        lineIndex: Int,
+        in lines: [String]
+    ) -> (formula: MarkdownFormula, consumedLineCount: Int)? {
+        let prefix = "/formula{"
+        guard trimmed.lowercased().hasPrefix(prefix) else { return nil }
+
+        let afterOpen = trimmed.dropFirst(prefix.count)
+        if trimmed.hasSuffix("}"), trimmed.count > prefix.count {
+            let content = String(afterOpen.dropLast())
+            return (MarkdownFormula(latex: content, sourceLineCount: 1), 1)
+        }
+
+        var contentLines: [String] = []
+        if !afterOpen.isEmpty {
+            contentLines.append(String(afterOpen))
+        }
+
+        var cursor = lineIndex + 1
+        while cursor < lines.count {
+            let row = lines[cursor]
+            let rowTrimmed = row.trimmingCharacters(in: .whitespaces)
+            if rowTrimmed == "}" {
+                return (
+                    MarkdownFormula(latex: contentLines.joined(separator: "\n"), sourceLineCount: cursor - lineIndex + 1),
+                    cursor - lineIndex + 1
+                )
+            }
+            if rowTrimmed.hasSuffix("}"), rowTrimmed != "}" {
+                let withoutClose = rowTrimmed.dropLast()
+                if !withoutClose.isEmpty {
+                    contentLines.append(String(withoutClose))
+                }
+                return (
+                    MarkdownFormula(latex: contentLines.joined(separator: "\n"), sourceLineCount: cursor - lineIndex + 1),
+                    cursor - lineIndex + 1
+                )
+            }
+            contentLines.append(row)
+            cursor += 1
+        }
+
+        return (
+            MarkdownFormula(latex: contentLines.joined(separator: "\n"), sourceLineCount: max(1, lines.count - lineIndex)),
+            max(1, lines.count - lineIndex)
+        )
+    }
+
+    private static func parseLegacyFormula(
+        startingAt index: Int,
+        in lines: [String],
+        trimmed: String
+    ) -> (formula: MarkdownFormula, consumedLineCount: Int)? {
+        let prefixLength = "formula {".count
+        let afterOpen = trimmed.dropFirst(prefixLength)
+
+        if trimmed.hasSuffix("}"), trimmed.count > prefixLength + 1 {
+            let content = String(afterOpen.dropLast()).trimmingCharacters(in: .whitespaces)
+            return (
+                MarkdownFormula(latex: content, sourceLineCount: 1),
+                1
+            )
+        }
+
+        var contentLines: [String] = []
+        let firstLineRemainder = String(afterOpen).trimmingCharacters(in: .whitespaces)
+        if !firstLineRemainder.isEmpty {
+            contentLines.append(firstLineRemainder)
+        }
+
+        var cursor = index + 1
+        while cursor < lines.count {
+            let row = lines[cursor]
+            let rowTrimmed = row.trimmingCharacters(in: .whitespaces)
+
+            if rowTrimmed == "}" {
+                return (
+                    MarkdownFormula(latex: contentLines.joined(separator: "\n"), sourceLineCount: cursor - index + 1),
+                    cursor - index + 1
+                )
+            }
+
+            if rowTrimmed.hasSuffix("}"), rowTrimmed != "}" {
+                let withoutClose = rowTrimmed.dropLast().trimmingCharacters(in: .whitespaces)
+                if !withoutClose.isEmpty {
+                    contentLines.append(String(withoutClose))
+                }
+                return (
+                    MarkdownFormula(latex: contentLines.joined(separator: "\n"), sourceLineCount: cursor - index + 1),
+                    cursor - index + 1
+                )
+            }
+
+            contentLines.append(row)
+            cursor += 1
+        }
+
+        return (
+            MarkdownFormula(latex: contentLines.joined(separator: "\n"), sourceLineCount: max(1, lines.count - index)),
+            max(1, lines.count - index)
+        )
     }
 
     private static func parseHeading(_ line: String) -> (level: Int, text: String)? {
@@ -9401,7 +11209,8 @@ private struct MarkdownBlock: Identifiable {
             MarkdownTable(
                 headers: headers,
                 alignments: normalizedTableAlignments(alignments, columnCount: columnCount),
-                rows: rows
+                rows: rows,
+                sourceLineCount: cursor - index
             ),
             cursor - index
         )

@@ -191,13 +191,12 @@ enum MistralKeychainStore {
         context.localizedReason = "Authenticate to load your \(provider.displayName) API key from Apple Passwords."
 
         var policyError: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) else {
-            throw KeychainError.authenticationUnavailable(
-                policyError?.localizedDescription ?? "Touch ID or your device passcode is required."
-            )
+        if context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError),
+           let key = loadStoredAPIKey(provider: provider, authenticationContext: context) {
+            return key
         }
 
-        return loadStoredAPIKey(provider: provider, authenticationContext: context)
+        return loadStoredAPIKey(provider: provider, authenticationContext: nil)
     }
 
     static func hasSavedMistralAPIKey() -> Bool {
@@ -397,7 +396,7 @@ enum MistralKeychainStore {
         return false
     }
 
-    private static func loadStoredAPIKey(provider: Provider, authenticationContext: LAContext) -> String? {
+    private static func loadStoredAPIKey(provider: Provider, authenticationContext: LAContext?) -> String? {
         var accountCandidates = [provider.account]
         if provider == .mistral {
             accountCandidates.append(contentsOf: [appName, appName.lowercased(), legacyGenericAccount])

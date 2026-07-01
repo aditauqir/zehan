@@ -192,7 +192,7 @@ final class BrainStore: ObservableObject {
     private static let homeCompilationAfterAutosaveNanoseconds: UInt64 = 300_000_000
     private static let homeDirectCharacterBudget = 18_000
     private static let homeNoteCondenseCharacterLimit = 4_500
-    private static let pageFlashcardSimilarityRegenerateThreshold = 0.99
+    private static let pageFlashcardSimilarityRegenerateThreshold = 0.92
     private static let pageFlashcardMaxOutputTokens = 900
     private static let helpDeskContextCharacterBudget = 16_000
     private static let helpDeskRelevantBlockLimit = 10
@@ -498,7 +498,11 @@ final class BrainStore: ObservableObject {
         }
     }
 
-    func openBrain(fileURL: URL, showsInvalidVaultAlert: Bool = false) {
+    func openBrain(
+        fileURL: URL,
+        showsInvalidVaultAlert: Bool = false,
+        restoring recentVault: RecentVault? = nil
+    ) {
         let folderURL = isBrainFile(fileURL)
             ? fileURL.deletingLastPathComponent()
             : fileURL
@@ -530,8 +534,14 @@ final class BrainStore: ObservableObject {
                 try loadNotes()
                 try loadHighlightSummaries()
                 try loadHelpDeskDatabase()
-                openHomePageForLaunch()
-                recordRecentVault(note: notes.first)
+
+                if let activeBrain,
+                   let noteID = recentVault?.noteFileName.flatMap({ noteID(forRecentNoteFileName: $0, in: activeBrain) }) {
+                    openNote(id: noteID)
+                } else {
+                    openHomePageForLaunch()
+                    recordRecentVault(note: nil)
+                }
                 status = "\(brain.vault.name) opened"
             } catch {
                 status = error.localizedDescription
@@ -759,7 +769,7 @@ final class BrainStore: ObservableObject {
         }
     }
 
-    func airDropCurrentDocumentAsPDFAndMarkdown() {
+    func airDropCurrentDocumentAsPDF() {
         guard let document = currentShareDocument else {
             status = "Open a page to AirDrop"
             return
@@ -767,12 +777,10 @@ final class BrainStore: ObservableObject {
 
         Task { @MainActor in
             do {
-                status = "Preparing AirDrop files"
+                status = "Preparing PDF for AirDrop"
                 let exportFolder = try temporaryExportFolder()
                 let pdfURL = exportFolder.appendingPathComponent("\(document.fileName).pdf")
-                let markdownURL = exportFolder.appendingPathComponent("\(document.fileName).md")
 
-                try Data(document.markdown.utf8).write(to: markdownURL, options: .atomic)
                 try await MarkdownPDFRenderer().writePDF(
                     markdown: document.markdown,
                     title: document.title,
@@ -787,11 +795,35 @@ final class BrainStore: ObservableObject {
                     return
                 }
 
-                sharingService.perform(withItems: [pdfURL, markdownURL])
+                sharingService.perform(withItems: [pdfURL])
                 status = "AirDrop ready"
             } catch {
                 status = error.localizedDescription
             }
+        }
+    }
+
+    func airDropCurrentDocumentAsMarkdown() {
+        guard let document = currentShareDocument else {
+            status = "Open a page to AirDrop"
+            return
+        }
+
+        do {
+            status = "Preparing Markdown for AirDrop"
+            let exportFolder = try temporaryExportFolder()
+            let markdownURL = exportFolder.appendingPathComponent("\(document.fileName).md")
+            try Data(document.markdown.utf8).write(to: markdownURL, options: .atomic)
+
+            guard let sharingService = NSSharingService(named: .sendViaAirDrop) else {
+                status = "AirDrop is unavailable"
+                return
+            }
+
+            sharingService.perform(withItems: [markdownURL])
+            status = "AirDrop ready"
+        } catch {
+            status = error.localizedDescription
         }
     }
 
@@ -1277,12 +1309,56 @@ final class BrainStore: ObservableObject {
         pageFlashcardStates[noteID] = PageFlashcardState(
             isLoading: true,
             bundle: existingGeneratedPageFlashcardBundle(for: noteID),
+            pinnedCardIDs: existingPinnedPageFlashcardIDs(for: noteID),
             errorMessage: nil
         )
         status = force ? "Regenerating flashcards" : "Preparing flashcards"
 
         Task { [weak self] in
             await self?.loadOrGeneratePageFlashcards(noteID: noteID, force: force)
+        }
+    }
+
+    func togglePinnedPageFlashcard(noteID: Note.ID, cardID: PageFlashcard.ID) {
+        guard let currentBundle = pageFlashcardStates[noteID]?.bundle,
+              isGeneratedPageFlashcardBundle(currentBundle)
+        else {
+            status = "Generate flashcards before pinning"
+            return
+        }
+
+        do {
+            try withActiveBrainAccessThrowing {
+                let cachedRecord = try loadPageFlashcardCache(noteID: noteID)
+                    ?? initialPageFlashcardCache(for: currentBundle)
+                var pinnedIDs = pinnedPageFlashcardIDs(in: cachedRecord)
+                if pinnedIDs.contains(cardID) {
+                    pinnedIDs.remove(cardID)
+                } else {
+                    pinnedIDs.insert(cardID)
+                }
+
+                let sortedBundle = pageFlashcardBundle(cachedRecord.bundle, sortingPinnedCardIDs: pinnedIDs)
+                let updatedRecord = PageFlashcardCacheFile(
+                    version: PageFlashcardCacheFile.currentVersion,
+                    bundle: sortedBundle,
+                    pinnedCardIDs: Array(pinnedIDs),
+                    previousSimilarityScore: cachedRecord.previousSimilarityScore,
+                    latestSimilarityScore: cachedRecord.latestSimilarityScore,
+                    similarityThreshold: cachedRecord.similarityThreshold,
+                    lastCheckedAt: Date()
+                )
+                try persistPageFlashcardCache(updatedRecord)
+                pageFlashcardStates[noteID] = PageFlashcardState(
+                    isLoading: false,
+                    bundle: sortedBundle,
+                    pinnedCardIDs: pinnedIDs,
+                    errorMessage: nil
+                )
+                status = pinnedIDs.contains(cardID) ? "Flashcard pinned" : "Flashcard unpinned"
+            }
+        } catch {
+            status = error.localizedDescription
         }
     }
 
@@ -1549,6 +1625,7 @@ final class BrainStore: ObservableObject {
 
             if let cachedRecord {
                 let similarity = homeSourceDiceSimilarity(cachedRecord.bundle.sourceDiceTokens, sourceTokens)
+                let pinnedIDs = pinnedPageFlashcardIDs(in: cachedRecord)
                 let refreshedRecord = refreshedPageFlashcardCache(
                     cachedRecord,
                     latestSimilarityScore: similarity
@@ -1562,6 +1639,7 @@ final class BrainStore: ObservableObject {
                     pageFlashcardStates[noteID] = PageFlashcardState(
                         isLoading: false,
                         bundle: refreshedRecord.bundle,
+                        pinnedCardIDs: pinnedIDs,
                         errorMessage: nil
                     )
                     status = force ? "Flashcards unchanged; skipped regeneration" : "Flashcards ready"
@@ -1572,6 +1650,7 @@ final class BrainStore: ObservableObject {
                     pageFlashcardStates[noteID] = PageFlashcardState(
                         isLoading: false,
                         bundle: refreshedRecord.bundle,
+                        pinnedCardIDs: pinnedIDs,
                         errorMessage: nil
                     )
                     status = "Flashcards ready from cache"
@@ -1581,30 +1660,34 @@ final class BrainStore: ObservableObject {
                 pageFlashcardStates[noteID] = PageFlashcardState(
                     isLoading: true,
                     bundle: refreshedRecord.bundle,
+                    pinnedCardIDs: pinnedIDs,
                     errorMessage: nil
                 )
             }
 
-            guard force else {
+            if !force {
                 pageFlashcardStates[noteID] = PageFlashcardState(
-                    isLoading: false,
+                    isLoading: true,
                     bundle: existingGeneratedPageFlashcardBundle(for: noteID),
+                    pinnedCardIDs: existingPinnedPageFlashcardIDs(for: noteID),
                     errorMessage: nil
                 )
-                status = "No generated flashcards cached"
-                return
+                status = "Generating flashcards"
             }
 
             let generated: PageFlashcardBundle
             do {
-                generated = try await generatePageFlashcards(note: note, sourceDiceTokens: sourceTokens)
+                let rawGenerated = try await generatePageFlashcards(note: note, sourceDiceTokens: sourceTokens)
+                generated = pageFlashcardBundle(rawGenerated, preservingPinnedCardsFrom: cachedRecord)
                 try withActiveBrainAccessThrowing {
                     let latestSimilarity = cachedRecord.flatMap {
                         homeSourceDiceSimilarity($0.bundle.sourceDiceTokens, sourceTokens)
                     }
+                    let pinnedIDs = cachedRecord.map { pinnedPageFlashcardIDs(in: $0) } ?? []
                     let cache = PageFlashcardCacheFile(
                         version: PageFlashcardCacheFile.currentVersion,
                         bundle: generated,
+                        pinnedCardIDs: Array(pinnedIDs),
                         previousSimilarityScore: cachedRecord?.latestSimilarityScore,
                         latestSimilarityScore: cachedRecord == nil ? 1 : latestSimilarity,
                         similarityThreshold: Self.pageFlashcardSimilarityRegenerateThreshold,
@@ -1617,6 +1700,7 @@ final class BrainStore: ObservableObject {
                 pageFlashcardStates[noteID] = PageFlashcardState(
                     isLoading: false,
                     bundle: existingGeneratedPageFlashcardBundle(for: noteID) ?? cachedRecord?.bundle,
+                    pinnedCardIDs: cachedRecord.map { pinnedPageFlashcardIDs(in: $0) } ?? existingPinnedPageFlashcardIDs(for: noteID),
                     errorMessage: message
                 )
                 status = message
@@ -1626,6 +1710,7 @@ final class BrainStore: ObservableObject {
             pageFlashcardStates[noteID] = PageFlashcardState(
                 isLoading: false,
                 bundle: generated,
+                pinnedCardIDs: cachedRecord.map { pinnedPageFlashcardIDs(in: $0) } ?? [],
                 errorMessage: nil
             )
             status = "Flashcards generated"
@@ -1633,6 +1718,7 @@ final class BrainStore: ObservableObject {
             pageFlashcardStates[noteID] = PageFlashcardState(
                 isLoading: false,
                 bundle: existingGeneratedPageFlashcardBundle(for: noteID),
+                pinnedCardIDs: existingPinnedPageFlashcardIDs(for: noteID),
                 errorMessage: flashcardErrorMessage(from: error)
             )
             status = flashcardErrorMessage(from: error)
@@ -2686,6 +2772,30 @@ final class BrainStore: ObservableObject {
         insertMarkdownImage(data: data, suggestedFileName: url.lastPathComponent)
     }
 
+    func generateFormulaLatex(from description: String) async -> String? {
+        let prompt = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return nil }
+
+        do {
+            let result = try await generateWithSelectedAssistantModel(
+                system: formulaLatexInstructions(),
+                user: prompt,
+                maxTokens: 512
+            )
+            recordUsage(
+                for: selectedAssistantModel,
+                result: result,
+                fallbackInputTokens: estimatedTokenCount(for: prompt),
+                fallbackOutputTokens: estimatedTokenCount(for: result.content)
+            )
+            let latex = cleanedFormulaLatex(result.content)
+            return latex.isEmpty ? nil : latex
+        } catch {
+            status = error.localizedDescription
+            return nil
+        }
+    }
+
     func insertMarkdownImage(data: Data, suggestedFileName: String? = nil) {
         guard let activeBrain else {
             status = "Open or create a brain first"
@@ -2761,7 +2871,7 @@ final class BrainStore: ObservableObject {
     func openRecentVault(_ recentVault: RecentVault) {
         if let folderURL = resolvedRecentFolderURL(for: recentVault) {
             withSecurityScopedAccess(to: folderURL) {
-                openBrain(fileURL: folderURL, showsInvalidVaultAlert: true)
+                openBrain(fileURL: folderURL, showsInvalidVaultAlert: true, restoring: recentVault)
             }
             return
         }
@@ -2776,7 +2886,7 @@ final class BrainStore: ObservableObject {
         else { return }
 
         withSecurityScopedAccess(to: folderURL) {
-            openBrain(fileURL: folderURL)
+            openBrain(fileURL: folderURL, restoring: recentVault)
         }
     }
 
@@ -4699,7 +4809,42 @@ final class BrainStore: ObservableObject {
         Preserve the user's existing edits. Make the smallest useful change unless the user asks for a larger rewrite.
         Output polished Markdown with clear headings, short paragraphs, and useful lists only when lists are natural.
         Use Obsidian-style wiki links like [[Page Title]] only when linking is genuinely useful.
+        For displayed equations, use inline /formula{} blocks instead of $$...$$:
+        /formula{E = mc^2}
+        Put valid LaTeX math inside the braces. Multi-line LaTeX can span multiple lines between /formula{ and }.
         """
+    }
+
+    private func formulaLatexInstructions() -> String {
+        """
+        You convert natural-language math descriptions into LaTeX only.
+        Return only valid LaTeX math content without delimiters, without code fences, and without explanation.
+        Do not wrap in $$, \\[ \\], or /formula{ } blocks.
+        Use standard LaTeX commands such as \\frac, \\sqrt, \\sum, \\int, Greek letters, subscripts, and superscripts.
+        """
+    }
+
+    private func cleanedFormulaLatex(_ markdown: String) -> String {
+        var text = cleanedAssistantMarkdown(markdown)
+        if text.hasPrefix("```"), let closing = text.range(of: "```", range: text.index(text.startIndex, offsetBy: 3)..<text.endIndex) {
+            text = String(text[text.index(text.startIndex, offsetBy: 3)..<closing.lowerBound])
+        }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("/formula{"), text.hasSuffix("}") {
+            text = String(text.dropFirst("/formula{".count).dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if text.hasPrefix("formula {"), text.hasSuffix("}") {
+            text = String(text.dropFirst("formula {".count).dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        while (text.hasPrefix("$") && text.hasSuffix("$")) || (text.hasPrefix("\\(") && text.hasSuffix("\\)")) {
+            if text.hasPrefix("$"), text.hasSuffix("$"), text.count >= 2 {
+                text = String(text.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+            } else if text.hasPrefix("\\("), text.hasSuffix("\\)"), text.count >= 4 {
+                text = String(text.dropFirst(2).dropLast(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                break
+            }
+        }
+        return text
     }
 
     private func assistantConversationInstructions() -> String {
@@ -4723,6 +4868,8 @@ final class BrainStore: ObservableObject {
         Preserve the user's existing edits, title, voice, structure, and Markdown style.
         Do not append a raw chat log. Do not add "User:", "Assistant:", "Question:", or "Answer:" labels unless the document already uses that format.
         Do not add conversational follow-up questions, offers, invitations, or meta commentary.
+        When inserting equations, use inline /formula{} blocks with LaTeX inside:
+        /formula{E = mc^2}
         """
     }
 
@@ -5716,7 +5863,10 @@ final class BrainStore: ObservableObject {
             }
 
             let legacyBundle = try decoder.decode(PageFlashcardBundle.self, from: data)
-            return isGeneratedPageFlashcardBundle(legacyBundle) ? initialPageFlashcardCache(for: legacyBundle) : nil
+            guard isGeneratedPageFlashcardBundle(legacyBundle) else { return nil }
+            let migrated = initialPageFlashcardCache(for: legacyBundle)
+            try persistPageFlashcardCache(migrated)
+            return migrated
         }
 
         let legacyURL = legacyPageFlashcardURL(noteID: noteID, in: brain)
@@ -5741,6 +5891,7 @@ final class BrainStore: ObservableObject {
         PageFlashcardCacheFile(
             version: PageFlashcardCacheFile.currentVersion,
             bundle: bundle,
+            pinnedCardIDs: [],
             previousSimilarityScore: nil,
             latestSimilarityScore: 1,
             similarityThreshold: Self.pageFlashcardSimilarityRegenerateThreshold,
@@ -5754,7 +5905,8 @@ final class BrainStore: ObservableObject {
     ) -> PageFlashcardCacheFile {
         PageFlashcardCacheFile(
             version: PageFlashcardCacheFile.currentVersion,
-            bundle: cache.bundle,
+            bundle: pageFlashcardBundle(cache.bundle, sortingPinnedCardIDs: pinnedPageFlashcardIDs(in: cache)),
+            pinnedCardIDs: cache.pinnedCardIDs ?? [],
             previousSimilarityScore: cache.latestSimilarityScore,
             latestSimilarityScore: latestSimilarityScore,
             similarityThreshold: Self.pageFlashcardSimilarityRegenerateThreshold,
@@ -5767,6 +5919,70 @@ final class BrainStore: ObservableObject {
               isGeneratedPageFlashcardBundle(bundle)
         else { return nil }
         return bundle
+    }
+
+    private func existingPinnedPageFlashcardIDs(for noteID: Note.ID) -> Set<String> {
+        pageFlashcardStates[noteID]?.pinnedCardIDs ?? []
+    }
+
+    private func pinnedPageFlashcardIDs(in cache: PageFlashcardCacheFile) -> Set<String> {
+        Set(cache.pinnedCardIDs ?? [])
+    }
+
+    private func pageFlashcardBundle(
+        _ bundle: PageFlashcardBundle,
+        sortingPinnedCardIDs pinnedIDs: Set<String>
+    ) -> PageFlashcardBundle {
+        guard !pinnedIDs.isEmpty else { return bundle }
+        let pinnedCards = bundle.cards.filter { pinnedIDs.contains($0.id) }
+        let unpinnedCards = bundle.cards.filter { !pinnedIDs.contains($0.id) }
+        return PageFlashcardBundle(
+            noteID: bundle.noteID,
+            noteTitle: bundle.noteTitle,
+            sourceFingerprint: bundle.sourceFingerprint,
+            sourceDiceTokens: bundle.sourceDiceTokens,
+            generatedAt: bundle.generatedAt,
+            modelTitle: bundle.modelTitle,
+            cards: pinnedCards + unpinnedCards
+        )
+    }
+
+    private func pageFlashcardBundle(
+        _ generated: PageFlashcardBundle,
+        preservingPinnedCardsFrom cache: PageFlashcardCacheFile?
+    ) -> PageFlashcardBundle {
+        guard let cache else { return generated }
+        let cachedCards = pageFlashcardBundle(
+            cache.bundle,
+            sortingPinnedCardIDs: pinnedPageFlashcardIDs(in: cache)
+        ).cards
+        guard !cachedCards.isEmpty else { return generated }
+
+        var seenKeys = Set(cachedCards.map { pageFlashcardQuestionKey($0.question) })
+        let regeneratedCards = generated.cards.filter { card in
+            let key = pageFlashcardQuestionKey(card.question)
+            guard !seenKeys.contains(key) else { return false }
+            seenKeys.insert(key)
+            return true
+        }
+
+        return PageFlashcardBundle(
+            noteID: generated.noteID,
+            noteTitle: generated.noteTitle,
+            sourceFingerprint: generated.sourceFingerprint,
+            sourceDiceTokens: generated.sourceDiceTokens,
+            generatedAt: generated.generatedAt,
+            modelTitle: generated.modelTitle,
+            cards: cachedCards + regeneratedCards
+        )
+    }
+
+    private func pageFlashcardQuestionKey(_ question: String) -> String {
+        question
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private func isGeneratedPageFlashcardBundle(_ bundle: PageFlashcardBundle) -> Bool {
@@ -8750,11 +8966,15 @@ final class BrainStore: ObservableObject {
         guard let activeBrain else { return }
 
         let updatedAt = note?.updatedAt ?? activeBrain.updatedAt
+        let noteFileName = note
+            .flatMap { noteURL(for: $0.id, in: activeBrain) }
+            .map { relativeNoteFileName(for: $0, in: activeBrain) }
+            ?? note.map { markdownDisplayFileName(for: $0.title) }
         let entry = RecentVault(
             folderPath: activeBrain.folderURL.path,
             brainPath: activeBrain.brainURL.path,
             brainFileName: activeBrain.brainURL.lastPathComponent,
-            noteFileName: note.map { markdownDisplayFileName(for: $0.title) },
+            noteFileName: noteFileName,
             updatedAt: updatedAt,
             bookmarkData: securityScopedBookmarkData(for: activeBrain.folderURL)
         )
@@ -8763,6 +8983,26 @@ final class BrainStore: ObservableObject {
         recentVaults.insert(entry, at: 0)
         recentVaults = Array(recentVaults.prefix(6))
         saveRecentVaults()
+    }
+
+    private func noteID(forRecentNoteFileName fileName: String, in brain: BrainSummary) -> Note.ID? {
+        if let indexedID = noteIdentityDatabase?.noteID(forFileName: fileName) {
+            return indexedID
+        }
+
+        let notesFolder = notesFolderURL(for: brain)
+        let directURL = notesFolder.appendingPathComponent(fileName)
+        if FileManager.default.fileExists(atPath: directURL.path),
+           let note = try? readNote(from: directURL) {
+            return note.id
+        }
+
+        guard let urls = try? noteFileURLs(in: brain) else { return nil }
+        return urls.compactMap { url -> Note.ID? in
+            let relativeName = relativeNoteFileName(for: url, in: brain)
+            guard relativeName == fileName || url.lastPathComponent == fileName else { return nil }
+            return (try? readNote(from: url))?.id
+        }.first
     }
 
     private func removeRecentVault(for brainURL: URL) {
@@ -9244,9 +9484,10 @@ private struct HomePreparedNoteCacheEntry {
 struct PageFlashcardState: Equatable {
     let isLoading: Bool
     let bundle: PageFlashcardBundle?
+    let pinnedCardIDs: Set<String>
     let errorMessage: String?
 
-    static let idle = PageFlashcardState(isLoading: false, bundle: nil, errorMessage: nil)
+    static let idle = PageFlashcardState(isLoading: false, bundle: nil, pinnedCardIDs: [], errorMessage: nil)
 }
 
 struct PageFlashcardBundle: Codable, Equatable {
@@ -9260,10 +9501,11 @@ struct PageFlashcardBundle: Codable, Equatable {
 }
 
 struct PageFlashcardCacheFile: Codable, Equatable {
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     let version: Int
     let bundle: PageFlashcardBundle
+    let pinnedCardIDs: [String]?
     let previousSimilarityScore: Double?
     let latestSimilarityScore: Double?
     let similarityThreshold: Double
@@ -9633,30 +9875,18 @@ private final class MarkdownPDFRenderer: NSObject, WKNavigationDelegate {
             webView.loadHTMLString(html, baseURL: nil)
         }
 
-        try await Task.sleep(nanoseconds: 180_000_000)
+        try await Task.sleep(nanoseconds: 220_000_000)
 
-        let printInfo = NSPrintInfo()
-        printInfo.paperSize = NSSize(width: 595.2, height: 841.8)
-        printInfo.leftMargin = 54
-        printInfo.rightMargin = 54
-        printInfo.topMargin = 54
-        printInfo.bottomMargin = 54
-        printInfo.horizontalPagination = .fit
-        printInfo.verticalPagination = .automatic
-        printInfo.jobDisposition = .save
-        printInfo.dictionary()[NSPrintInfo.AttributeKey.jobSavingURL] = url
+        let heightValue = try await webView.evaluateJavaScript(
+            "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
+        )
+        let contentHeight = max(1123, CGFloat((heightValue as? NSNumber)?.doubleValue ?? 1123))
+        webView.frame = CGRect(x: 0, y: 0, width: 794, height: contentHeight)
 
-        let operation = webView.printOperation(with: printInfo)
-        operation.showsPrintPanel = false
-        operation.showsProgressPanel = false
-
-        guard operation.run() else {
-            throw ExportError.printFailed
-        }
-
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw ExportError.pdfMissing
-        }
+        let configuration = WKPDFConfiguration()
+        configuration.rect = CGRect(x: 0, y: 0, width: 794, height: contentHeight)
+        let data = try await webView.pdf(configuration: configuration)
+        try data.write(to: url, options: .atomic)
     }
 
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

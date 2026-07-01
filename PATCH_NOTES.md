@@ -2,6 +2,9 @@
 
 ## v1.4.5
 
+- Added inline LaTeX formulas with `/formula{}` source syntax, KaTeX rendered preview, and a toolbar formula picker with AI assist and manual entry.
+- Fixed formula insertion crashes when adding equations from the rendered page or while already in edit mode.
+- Fixed the formula toolbar so it stays usable in source edit mode without accidentally exiting edit mode on click.
 - Fixed oversized or corrupt page files from blocking an entire vault load; readable pages continue loading and Zirn reports the skipped file clearly.
 - Fixed missing page files and broken wiki links so Zirn shows an in-app status instead of failing silently or handing custom note URLs to macOS.
 - Improved large-page editing stability by skipping full-document Markdown restyling once a document is large enough to risk UI stalls.
