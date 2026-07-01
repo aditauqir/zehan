@@ -255,17 +255,17 @@ struct ZirnReleaseNotesText: NSViewRepresentable {
                     result.append(NSAttributedString(string: "\n", attributes: [.font: bodyFont]))
                 }
 
-                let itemText = plainText(fromHTML: itemHTML)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let itemText = cleanListItemText(plainText(fromHTML: itemHTML))
                 guard !itemText.isEmpty else { continue }
 
                 let paragraphStyle = NSMutableParagraphStyle()
-                paragraphStyle.paragraphSpacing = index == items.count - 1 ? 0 : 10
-                paragraphStyle.lineSpacing = 2
-                paragraphStyle.headIndent = 17
+                paragraphStyle.paragraphSpacing = index == items.count - 1 ? 0 : 8
+                paragraphStyle.lineSpacing = 3
+                paragraphStyle.headIndent = 24
                 paragraphStyle.firstLineHeadIndent = 0
+                paragraphStyle.lineBreakMode = .byWordWrapping
                 paragraphStyle.tabStops = [
-                    NSTextTab(textAlignment: .left, location: 17, options: [:]),
+                    NSTextTab(textAlignment: .left, location: 24, options: [:]),
                 ]
 
                 let line = NSMutableAttributedString(string: "•\t\(itemText)")
@@ -281,6 +281,12 @@ struct ZirnReleaseNotesText: NSViewRepresentable {
             }
 
             return result.length > 0 ? result : nil
+        }
+
+        private static func cleanListItemText(_ text: String) -> String {
+            text
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
         private static func extractListItems(from html: String) -> [String] {

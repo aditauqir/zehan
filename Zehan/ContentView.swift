@@ -1046,6 +1046,7 @@ private struct MarkdownTypingStatus: Equatable {
     var isItalic = false
     var isUnderline = false
     var isHighlight = false
+    var isFormula = false
 }
 
 private struct MarkdownTypingStatusIcons: View {
@@ -1058,6 +1059,7 @@ private struct MarkdownTypingStatusIcons: View {
             statusIcon("italic", isActive: status.isItalic, help: "Italic")
             statusIcon("underline", isActive: status.isUnderline, help: "Underline")
             statusIcon("paintbrush.pointed", isActive: status.isHighlight, help: "Highlight")
+            statusIcon("function", isActive: status.isFormula, help: status.isFormula ? "Formula Mode On" : "Formula Mode Off")
         }
         .padding(.horizontal, 8)
         .frame(height: 22)
@@ -6184,7 +6186,7 @@ private struct FormulaAssistContext: Equatable {
 
 private struct FormulaEditorAssistBubble: View {
     static let width: CGFloat = 268
-    static let estimatedHeight: CGFloat = 96
+    static let estimatedHeight: CGFloat = 44
     static let gapBelowLine: CGFloat = 1.3
 
     @Binding var description: String
@@ -6193,15 +6195,50 @@ private struct FormulaEditorAssistBubble: View {
     let dismiss: () -> Void
 
     var body: some View {
-        FormulaInsertPanel(
-            title: "Assist with AI",
-            description: $description,
-            isGenerating: isGenerating,
-            showsManualInput: false,
-            generate: generate,
-            manualInput: {},
-            onDismiss: dismiss
-        )
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkle")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.secondary.opacity(0.82))
+                    .frame(width: 14, height: 14)
+
+                TextField("Describe formula", text: $description)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .onSubmit(generate)
+            }
+            .frame(maxWidth: .infinity, minHeight: 26, alignment: .leading)
+            .padding(.horizontal, 8)
+            .background(Color.primary.opacity(0.055))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(Color.primary.opacity(0.13), lineWidth: 1)
+            }
+
+            Button(action: generate) {
+                Group {
+                    if isGenerating {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 11, weight: .bold))
+                    }
+                }
+                .frame(width: 26, height: 26)
+            }
+            .buttonStyle(.plain)
+            .background(.regularMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+            }
+            .disabled(isGenerating || description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .help("Generate LaTeX")
+        }
+        .padding(8)
+        .frame(width: Self.width)
         .background(.regularMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
@@ -6982,12 +7019,14 @@ private struct InlineMarkdownEditor: NSViewRepresentable {
         private func typingStatus(in textView: NSTextView, selectedRange: NSRange) -> MarkdownTypingStatus {
             let rawText = textView.string as NSString
             let activeRange = Self.activeWordRange(around: selectedRange, in: rawText)
+            let formulaProbeLocation = min(selectedRange.location + selectedRange.length, rawText.length)
             return MarkdownTypingStatus(
                 isCapsLockOn: NSEvent.modifierFlags.contains(.capsLock),
                 isBold: activeInlineCommands.contains(.bold) || Self.isRange(activeRange, wrappedBy: "**", close: "**", in: rawText),
                 isItalic: activeInlineCommands.contains(.italic) || Self.isItalicRange(activeRange, in: rawText),
                 isUnderline: activeInlineCommands.contains(.underline) || Self.isRange(activeRange, wrappedBy: "<u>", close: "</u>", in: rawText),
-                isHighlight: activeInlineCommands.contains(.highlight) || Self.isRange(activeRange, wrappedBy: "==", close: "==", in: rawText)
+                isHighlight: activeInlineCommands.contains(.highlight) || Self.isRange(activeRange, wrappedBy: "==", close: "==", in: rawText),
+                isFormula: Self.formulaContext(at: formulaProbeLocation, in: textView.string) != nil
             )
         }
 
