@@ -3,6 +3,20 @@
     <channel>
         <title>Zirn</title>
         <item>
+            <title>1.4.6</title>
+            <pubDate>Wed, 01 Jul 2026 12:37:31 -0400</pubDate>
+            <link>https://github.com/aditauqir/zehan</link>
+            <sparkle:version>19</sparkle:version>
+            <sparkle:shortVersionString>1.4.6</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>Zirn v1.4.6</h2>
+<ul>
+  <li>Hotfix: Fixed the inline formula AI popup so it follows the live cursor inside <code>/formula{}</code> blocks, including after creating new lines.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.6/Zirn-1.4.6.zip" length="6747073" type="application/octet-stream" sparkle:edSignature="9wvpcylX+f6V8mf1kj6BpySrLnec+deQZfQdorivA1SxMKowEZY9h8eKH9Ajo1P5GvRrr2EpGlZ7yiQeuRPKAw=="/>
+        </item>
+        <item>
             <title>1.4.5</title>
             <pubDate>Wed, 01 Jul 2026 12:08:50 -0400</pubDate>
             <link>https://github.com/aditauqir/zehan</link>
@@ -41,21 +55,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.4/Zirn-1.4.4.zip" length="6239040" type="application/octet-stream" sparkle:edSignature="0Rq0CVCSy7oKZymrmY+tO7bBcSpcGLke2uUF+xK9K743oJ2XSoqBdcdUvUr135OWtFjzLCP5pZZrd3PdH6toAQ=="/>
-        </item>
-        <item>
-            <title>1.4.3</title>
-            <pubDate>Wed, 24 Jun 2026 11:24:15 -0400</pubDate>
-            <link>https://github.com/aditauqir/zehan</link>
-            <sparkle:version>15</sparkle:version>
-            <sparkle:shortVersionString>1.4.3</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <description><![CDATA[<h2>Zirn v1.4.3</h2>
-<ul>
-  <li>Fixed Zirn failing to open after v1.4.2 by restoring release re-signing entitlements that macOS 26 can launch. Keychain in shipped builds remains a follow-up once the Developer ID provisioning profile is wired up.</li>
-  <li>Kept the v1.4.2 fixes for Home summary saving, DeepSeek Home compilation, and brain AI preference sync.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.3/Zirn-1.4.3.zip" length="6236710" type="application/octet-stream" sparkle:edSignature="8A/54xT5riGoA2dRItbQqBNEpBUazh4rCgWTvogbPR0m7X3Dc8xuErYYh+xNtiivfFB6sOQDEZOcyfv/hfPABw=="/>
         </item>
         <item>
             <title>1.0.2</title>
