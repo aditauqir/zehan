@@ -3,6 +3,30 @@
     <channel>
         <title>Zirn</title>
         <item>
+            <title>1.4.5</title>
+            <pubDate>Wed, 01 Jul 2026 12:08:50 -0400</pubDate>
+            <link>https://github.com/aditauqir/zehan</link>
+            <sparkle:version>18</sparkle:version>
+            <sparkle:shortVersionString>1.4.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>Zirn v1.4.5</h2>
+<ul>
+  <li>Added inline LaTeX formulas with <code>/formula{}</code> source syntax, KaTeX rendered preview, and a toolbar formula picker with AI assist and manual entry.</li>
+  <li>Improved inline formula editing with a compact AI prompt inside <code>/formula{}</code> and a Formula Mode status indicator beside the editor formatting icons.</li>
+  <li>Fixed formula insertion crashes when adding equations from the rendered page or while already in edit mode.</li>
+  <li>Fixed the formula toolbar so it stays usable in source edit mode without accidentally exiting edit mode on click.</li>
+  <li>Fixed the Sparkle update window release notes so long bullet items wrap with a clean hanging indent instead of staggered text.</li>
+  <li>Fixed oversized or corrupt page files from blocking an entire vault load; readable pages continue loading and Zirn reports the skipped file clearly.</li>
+  <li>Fixed missing page files and broken wiki links so Zirn shows an in-app status instead of failing silently or handing custom note URLs to macOS.</li>
+  <li>Improved large-page editing stability by skipping full-document Markdown restyling once a document is large enough to risk UI stalls.</li>
+  <li>Added GitHub Actions Debug CI plus a signed, notarized manual Sparkle release workflow with Developer ID certificate/profile import.</li>
+  <li>Fixed Debug CI on GitHub Actions by making the compile check skip local Apple signing profiles.</li>
+  <li>Added a Codex runbook for branch preflight, Debug testing, wiki-link validation, and the GitHub Actions release checklist.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/aditauqir/zehan/releases/download/v1.4.5/Zirn-1.4.5.zip" length="6746537" type="application/octet-stream" sparkle:edSignature="U9vMW7NN8OvSJmwESoeG7x4rYlFiCluJaH7B+d5YZnVuxdRDPOriOPyvxuB8PdorQFmjtRAgoNjMnr78vYyrDg=="/>
+        </item>
+        <item>
             <title>1.4.4</title>
             <pubDate>Wed, 24 Jun 2026 12:32:51 -0400</pubDate>
             <link>https://github.com/aditauqir/zehan</link>
