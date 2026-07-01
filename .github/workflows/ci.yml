@@ -35,6 +35,14 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: macos-26
     timeout-minutes: 120
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -42,22 +50,45 @@ jobs:
       - name: Select Xcode 26.5
         run: sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
 
+      - name: Check public release signing secrets
+        run: |
+          missing=()
+          for name in \
+            MACOS_CERTIFICATE \
+            MACOS_CERTIFICATE_PASSWORD \
+            KEYCHAIN_PASSWORD \
+            PROVISIONING_PROFILE_BASE64 \
+            APP_STORE_CONNECT_KEY_ID \
+            APP_STORE_CONNECT_ISSUER_ID \
+            APP_STORE_CONNECT_PRIVATE_KEY
+          do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            echo "PUBLIC_RELEASE_SECRETS_AVAILABLE=false" >> "$GITHUB_ENV"
+            printf -v joined '%s, ' "${missing[@]}"
+            echo "::warning::Skipping signed/notarized public release check; missing secrets: ${joined%, }"
+          else
+            echo "PUBLIC_RELEASE_SECRETS_AVAILABLE=true" >> "$GITHUB_ENV"
+          fi
+
       - name: Import Developer ID certificate and profile
-        env:
-          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+        if: env.PUBLIC_RELEASE_SECRETS_AVAILABLE == 'true'
         run: |
           chmod +x scripts/import-signing-certificate.sh
           scripts/import-signing-certificate.sh
 
       - name: Build signed Release app
+        if: env.PUBLIC_RELEASE_SECRETS_AVAILABLE == 'true'
         run: |
           chmod +x scripts/build-release.sh
           scripts/build-release.sh
 
       - name: Verify Developer ID signature
+        if: env.PUBLIC_RELEASE_SECRETS_AVAILABLE == 'true'
         run: |
           codesign --verify --deep --strict --verbose=4 build/Zirn.app
           codesign -dv --verbose=4 build/Zirn.app 2>&1 | tee /tmp/zirn-codesign.txt
@@ -69,41 +100,41 @@ jobs:
           echo "Verified Zirn $VERSION ($BUILD_NUMBER)"
 
       - name: Notarize app
+        if: env.PUBLIC_RELEASE_SECRETS_AVAILABLE == 'true'
         env:
-          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
           NOTARYTOOL_PROFILE: ""
         run: |
           chmod +x scripts/notarize-release.sh
           scripts/notarize-release.sh build/Zirn.app
 
       - name: Verify notarized app
+        if: env.PUBLIC_RELEASE_SECRETS_AVAILABLE == 'true'
         run: |
           xcrun stapler validate build/Zirn.app
           spctl -a -vvv -t exec build/Zirn.app
 
       - name: Package signed DMG
+        if: env.PUBLIC_RELEASE_SECRETS_AVAILABLE == 'true'
         run: |
           chmod +x scripts/create-dmg.sh
           scripts/create-dmg.sh build/Zirn.app
 
       - name: Notarize DMG
+        if: env.PUBLIC_RELEASE_SECRETS_AVAILABLE == 'true'
         env:
-          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
           NOTARYTOOL_PROFILE: ""
         run: |
           chmod +x scripts/notarize-release.sh
           scripts/notarize-release.sh "dist/Zirn-${VERSION}.dmg"
 
       - name: Verify notarized DMG
+        if: env.PUBLIC_RELEASE_SECRETS_AVAILABLE == 'true'
         run: |
           xcrun stapler validate "dist/Zirn-${VERSION}.dmg"
           codesign --verify --verbose=2 "dist/Zirn-${VERSION}.dmg"
 
       - name: Upload checked public build
+        if: env.PUBLIC_RELEASE_SECRETS_AVAILABLE == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: Zirn-${{ env.VERSION }}-${{ env.BUILD_NUMBER }}-public-check
