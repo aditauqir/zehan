@@ -1,5 +1,9 @@
 # Patch Notes
 
+## v1.4.6
+
+- Hotfix: Fixed the inline formula AI popup so it follows the live cursor inside `/formula{}` blocks, including after creating new lines.
+
 ## v1.4.5
 
 - Added inline LaTeX formulas with `/formula{}` source syntax, KaTeX rendered preview, and a toolbar formula picker with AI assist and manual entry.
