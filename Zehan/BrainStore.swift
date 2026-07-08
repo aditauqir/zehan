@@ -89,8 +89,12 @@ final class BrainStore: ObservableObject {
     @Published var sidebarItems: [SidebarItem] = []
     @Published var selectedHomeGenerationModel: HighlightSummaryModel = .mistral
     @Published var selectedFlashcardGenerationModel: HighlightSummaryModel = .mistral
+    @Published var isAppleCalendarSyncEnabled = false
     @Published var isCompilingHighlightSummary = false
     @Published var isGeneratingHomePage = false
+    @Published private(set) var nextCalendarClass: NextCalendarClassOverview?
+    @Published private(set) var isFindingRecommendedPage = false
+    @Published private(set) var recommendedPageHintDismissed = false
     @Published var pageFlashcardStates: [Note.ID: PageFlashcardState] = [:]
     @Published var helpDeskConversations: [HelpDeskConversation] = []
     @Published var selectedHelpDeskConversationID: HelpDeskConversation.ID?
@@ -128,6 +132,9 @@ final class BrainStore: ObservableObject {
     private let selectedHighlightSummaryModelKey = "Assistant.HighlightSummaryModel"
     private let selectedHomeGenerationModelKey = "Assistant.HomeGenerationModel"
     private let selectedFlashcardGenerationModelKey = "Assistant.FlashcardGenerationModel"
+    private let appleCalendarSyncEnabledKey = "Assistant.AppleCalendarSyncEnabled"
+    private let recommendedPageHintDismissedKey = "Assistant.RecommendedPageHintDismissed"
+    private let nextClassNoteMapKey = "Assistant.NextClassNoteMap"
     private let ollamaModelKey = "Assistant.OllamaModel"
     private let ollamaURLKey = "Assistant.OllamaURL"
     private let userNameKey = "User.Name"
@@ -156,6 +163,8 @@ final class BrainStore: ObservableObject {
     private var needsForcedHomeRegenerationAfterCurrentCompile = false
     private var pendingAssistantInsertion: PendingAssistantInsertion?
     private var isApplyingAssistantOutput = false
+    private var lastOpenNoteID: Note.ID?
+    private var nextClassNoteIDsByEventKey: [String: Note.ID] = [:]
     private var noteIdentityDatabase: NoteIdentityDatabase?
     private var searchIndex: [NoteSearchIndexEntry] = []
     private var semanticSearchIndex: [SemanticSearchIndexEntry] = []
@@ -194,6 +203,7 @@ final class BrainStore: ObservableObject {
     private static let homeNoteCondenseCharacterLimit = 4_500
     private static let pageFlashcardSimilarityRegenerateThreshold = 0.92
     private static let pageFlashcardMaxOutputTokens = 900
+    private static let recommendedPageMaxOutputTokens = 700
     private static let helpDeskContextCharacterBudget = 16_000
     private static let helpDeskRelevantBlockLimit = 10
     private static let helpDeskHistoryMessageLimit = 8
@@ -333,6 +343,43 @@ final class BrainStore: ObservableObject {
 
     var canCompileCurrentHighlights: Bool {
         !highlightedTextFragments(in: content).isEmpty && currentNoteID != nil && !isCompilingHighlightSummary
+    }
+
+    var homeReturnPage: NoteSummary? {
+        if let lastOpenNoteID,
+           let note = notes.first(where: { $0.id == lastOpenNoteID }) {
+            return note
+        }
+
+        return notes.sorted { $0.updatedAt > $1.updatedAt }.first
+    }
+
+    var homeReturnPageTitle: String {
+        homeReturnPage?.title ?? "last page"
+    }
+
+    var canOpenHomeReturnPage: Bool {
+        homeReturnPage != nil
+    }
+
+    var canRecommendCalendarPage: Bool {
+        activeBrain != nil
+            && isAppleCalendarSyncEnabled
+            && !isFindingRecommendedPage
+            && !notes.isEmpty
+    }
+
+    var shouldShowCalendarRecommendationHint: Bool {
+        !isAppleCalendarSyncEnabled && !recommendedPageHintDismissed
+    }
+
+    var canCreateNextClassNote: Bool {
+        activeBrain != nil && nextCalendarClass != nil
+    }
+
+    var canContinueNextClassNote: Bool {
+        guard let noteID = nextCalendarClass?.continueNoteID else { return false }
+        return notes.contains { $0.id == noteID }
     }
 
     var homeMarkdown: String {
@@ -705,6 +752,7 @@ final class BrainStore: ObservableObject {
                 let note = try readNote(from: noteURL)
                 currentNoteID = note.id
                 selectedNoteID = note.id
+                lastOpenNoteID = note.id
                 pendingAssistantInsertion = nil
                 title = note.title
                 content = note.content
@@ -730,6 +778,440 @@ final class BrainStore: ObservableObject {
         }
 
         openNote(id: note.id)
+    }
+
+    func openHomeReturnPage() {
+        guard let note = homeReturnPage else {
+            status = "No previous page to open"
+            return
+        }
+
+        openNote(id: note.id)
+    }
+
+    func refreshNextCalendarClass() {
+        guard activeBrain != nil, isAppleCalendarSyncEnabled else {
+            nextCalendarClass = nil
+            return
+        }
+
+        Task {
+            do {
+                let classes = try await AppleCalendarEventProvider.upcomingClassEvents()
+                guard let event = classes.first else {
+                    nextCalendarClass = nil
+                    return
+                }
+
+                nextCalendarClass = classOverview(for: event)
+            } catch {
+                nextCalendarClass = nil
+            }
+        }
+    }
+
+    func createNoteForNextClass() {
+        guard let nextCalendarClass else {
+            status = "No upcoming class found"
+            return
+        }
+
+        if currentNoteID != nil, currentHighlightSummary == nil, !isShowingHomePage {
+            saveCurrentNote(statusText: "Autosaved")
+        }
+
+        pendingAssistantInsertion = nil
+        pendingAssistantPreview = nil
+        currentHighlightSummary = nil
+        isShowingHomePage = false
+        isShowingHelpDesk = false
+        currentNoteID = nil
+        selectedNoteID = nil
+        selectedSidebarGroupID = nil
+        title = uniqueTitle(for: nextCalendarClass.title)
+        content = classNoteMarkdown(for: nextCalendarClass)
+        saveCurrentNote(statusText: "Class page created")
+
+        if let currentNoteID {
+            rememberClassNote(noteID: currentNoteID, event: nextCalendarClass.event)
+            self.nextCalendarClass = classOverview(for: nextCalendarClass.event)
+        }
+    }
+
+    func continueNextClassNote() {
+        guard let nextCalendarClass else {
+            status = "No upcoming class found"
+            return
+        }
+        guard let noteID = nextCalendarClass.continueNoteID,
+              notes.contains(where: { $0.id == noteID })
+        else {
+            status = "Create a class page first"
+            return
+        }
+
+        openNote(id: noteID)
+    }
+
+    func dismissCalendarRecommendationHint() {
+        recommendedPageHintDismissed = true
+        UserDefaults.standard.set(true, forKey: recommendedPageHintDismissedKey)
+    }
+
+    func setAppleCalendarSyncEnabled(_ enabled: Bool) {
+        isAppleCalendarSyncEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: appleCalendarSyncEnabledKey)
+
+        if enabled {
+            recommendedPageHintDismissed = false
+            UserDefaults.standard.set(false, forKey: recommendedPageHintDismissedKey)
+            status = "Enabling Apple Calendar Sync"
+            Task {
+                do {
+                    try await AppleCalendarEventProvider.requestAccessIfNeeded()
+                    refreshNextCalendarClass()
+                    status = "Apple Calendar Sync enabled"
+                } catch {
+                    isAppleCalendarSyncEnabled = false
+                    nextCalendarClass = nil
+                    UserDefaults.standard.set(false, forKey: appleCalendarSyncEnabledKey)
+                    status = error.localizedDescription
+                }
+            }
+        } else {
+            nextCalendarClass = nil
+            status = "Apple Calendar Sync disabled"
+        }
+    }
+
+    func openRecommendedCalendarPage() {
+        guard canRecommendCalendarPage else {
+            if !isAppleCalendarSyncEnabled {
+                status = "Enable Apple Calendar Sync first"
+            } else if notes.isEmpty {
+                status = "Create a page before using recommendations"
+            }
+            return
+        }
+
+        isFindingRecommendedPage = true
+        status = "Finding recommended page"
+
+        Task {
+            defer { isFindingRecommendedPage = false }
+
+            do {
+                try await AppleCalendarEventProvider.requestAccessIfNeeded()
+                let events = try await AppleCalendarEventProvider.upcomingRecommendationEvents()
+                guard let event = events.first else {
+                    status = "No upcoming calendar event found"
+                    return
+                }
+
+                let candidates = try calendarRecommendationCandidates(limit: 24)
+                guard !candidates.isEmpty else {
+                    status = "No pages available to recommend"
+                    return
+                }
+
+                let memory = try loadSmartFeatureMemory()
+                let recommendation = try await recommendedPage(
+                    for: event,
+                    candidates: candidates,
+                    smartFeatureMemory: memory
+                )
+                let fallback = locallyRecommendedPage(for: event, candidates: candidates)
+                let selected = candidates.first { $0.noteID == recommendation?.noteID }
+                    ?? fallback
+
+                let reasoning = recommendation?.reasoning
+                    ?? "Local fallback matched calendar keywords against page titles and excerpts."
+                try persistSmartFeatureBlob(
+                    event: event,
+                    candidates: candidates,
+                    selected: selected,
+                    reasoning: reasoning,
+                    usedAI: recommendation != nil
+                )
+                if event.priority == .classSession {
+                    rememberClassNote(noteID: selected.noteID, event: event)
+                    refreshNextCalendarClass()
+                }
+
+                openNote(id: selected.noteID)
+                status = "Recommended \(selected.title) for \(event.priority.displayTitle.lowercased())"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    private func calendarRecommendationCandidates(limit: Int) throws -> [CalendarRecommendationCandidate] {
+        try withActiveBrainAccessThrowing {
+            let sortedNotes = notes.sorted { $0.updatedAt > $1.updatedAt }
+
+            return sortedNotes.prefix(limit).compactMap { summary in
+                guard let url = noteURL(for: summary.id),
+                      let note = try? readNote(from: url)
+                else {
+                    return nil
+                }
+
+                return CalendarRecommendationCandidate(
+                    noteID: note.id,
+                    title: note.title,
+                    excerpt: String(plainText(fromMarkdown: note.content).prefix(900)),
+                    updatedAt: note.updatedAt
+                )
+            }
+        }
+    }
+
+    private func recommendedPage(
+        for event: CalendarRecommendationEvent,
+        candidates: [CalendarRecommendationCandidate],
+        smartFeatureMemory: String
+    ) async throws -> CalendarPageRecommendationResponse? {
+        let model = selectedHomeGenerationModel
+        let system = """
+        You recommend one existing Zirn page for the user's next calendar priority.
+        Return only JSON with keys noteID and reasoning. noteID must exactly match one candidate ID.
+        Prefer the page that best helps the user prepare for the calendar item.
+        """
+        let user = calendarRecommendationPrompt(
+            event: event,
+            candidates: candidates,
+            smartFeatureMemory: smartFeatureMemory
+        )
+
+        let result: ChatCompletionResult
+        switch model {
+        case .mistral:
+            result = try await generateWithMistral(system: system, user: user, maxTokens: Self.recommendedPageMaxOutputTokens)
+        case .deepseek:
+            result = try await generateWithDeepSeek(system: system, user: user, maxTokens: Self.recommendedPageMaxOutputTokens)
+        case .ollama:
+            result = try await generateWithOllama(system: system, user: user)
+        }
+
+        recordUsage(
+            for: model,
+            result: result,
+            fallbackInputTokens: estimatedTokenCount(for: user),
+            fallbackOutputTokens: estimatedTokenCount(for: result.content)
+        )
+
+        guard let json = firstJSONObject(in: result.content),
+              let data = json.data(using: .utf8),
+              let response = try? decoder.decode(CalendarPageRecommendationResponse.self, from: data),
+              candidates.contains(where: { $0.noteID == response.noteID })
+        else {
+            return nil
+        }
+
+        return response
+    }
+
+    private func calendarRecommendationPrompt(
+        event: CalendarRecommendationEvent,
+        candidates: [CalendarRecommendationCandidate],
+        smartFeatureMemory: String
+    ) -> String {
+        let pageList = candidates.map { candidate in
+            """
+            - ID: \(candidate.noteID)
+              Title: \(candidate.title)
+              Updated: \(candidate.updatedAt.formatted(date: .abbreviated, time: .shortened))
+              Excerpt: \(candidate.excerpt)
+            """
+        }
+        .joined(separator: "\n")
+
+        return """
+        Calendar priority:
+        \(event.compactDescription)
+
+        Existing smart feature blobs:
+        \(smartFeatureMemory.isEmpty ? "None yet." : smartFeatureMemory)
+
+        Candidate pages:
+        \(pageList)
+        """
+    }
+
+    private func locallyRecommendedPage(
+        for event: CalendarRecommendationEvent,
+        candidates: [CalendarRecommendationCandidate]
+    ) -> CalendarRecommendationCandidate {
+        let queryTokens = searchTokens(
+            in: [event.title, event.location, event.notes, event.calendarTitle]
+                .compactMap { $0 }
+                .joined(separator: " ")
+        )
+        guard !queryTokens.isEmpty else {
+            return candidates.sorted { $0.updatedAt > $1.updatedAt }.first ?? candidates[0]
+        }
+
+        return candidates.max { lhs, rhs in
+            localCalendarRecommendationScore(for: lhs, tokens: queryTokens)
+                < localCalendarRecommendationScore(for: rhs, tokens: queryTokens)
+        } ?? candidates[0]
+    }
+
+    private func localCalendarRecommendationScore(
+        for candidate: CalendarRecommendationCandidate,
+        tokens: [String]
+    ) -> Int {
+        let titleText = normalizedSearchText(candidate.title)
+        let excerptText = normalizedSearchText(candidate.excerpt)
+
+        return tokens.reduce(0) { score, token in
+            var nextScore = score
+            if titleText.contains(token) {
+                nextScore += 4
+            }
+            if excerptText.contains(token) {
+                nextScore += 1
+            }
+            return nextScore
+        }
+    }
+
+    private func loadSmartFeatureMemory() throws -> String {
+        try withActiveBrainAccessThrowing {
+            guard let activeBrain else { return "" }
+            let url = smartFeatureURL(for: activeBrain)
+            guard FileManager.default.fileExists(atPath: url.path) else { return "" }
+            let text = try String(contentsOf: url, encoding: .utf8)
+            return String(text.suffix(6_000))
+        }
+    }
+
+    private func persistSmartFeatureBlob(
+        event: CalendarRecommendationEvent,
+        candidates: [CalendarRecommendationCandidate],
+        selected: CalendarRecommendationCandidate,
+        reasoning: String,
+        usedAI: Bool
+    ) throws {
+        try withActiveBrainAccessThrowing {
+            guard let activeBrain else { return }
+            let url = smartFeatureURL(for: activeBrain)
+            let blob = SmartFeatureBlob(
+                version: 1,
+                vaultID: activeBrain.id,
+                brainFileName: activeBrain.brainURL.lastPathComponent,
+                brainPath: activeBrain.brainURL.path,
+                feature: "calendar-page-recommendation",
+                createdAt: Date(),
+                event: event,
+                selectedNoteID: selected.noteID,
+                selectedTitle: selected.title,
+                reasoning: reasoning,
+                usedAI: usedAI,
+                candidateTitles: candidates.map(\.title)
+            )
+            let json = try String(data: encoder.encode(blob), encoding: .utf8) ?? "{}"
+            if !FileManager.default.fileExists(atPath: url.path) {
+                try """
+                # Zirn smart feature blobs
+                # Linked brain: \(activeBrain.brainURL.lastPathComponent)
+                # One JSON blob per line.
+
+                """.write(to: url, atomically: true, encoding: .utf8)
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            handle.write(Data((json + "\n").utf8))
+        }
+    }
+
+    private func smartFeatureURL(for brain: BrainSummary) -> URL {
+        brain.folderURL.appendingPathComponent("brain.smart.features")
+    }
+
+    private func classOverview(for event: CalendarRecommendationEvent) -> NextCalendarClassOverview {
+        let eventKey = classEventTrackingKey(for: event)
+        let trackedNoteID = nextClassNoteIDsByEventKey[eventKey]
+            .flatMap { noteID in notes.contains(where: { $0.id == noteID }) ? noteID : nil }
+
+        return NextCalendarClassOverview(
+            event: event,
+            title: event.title,
+            timingText: classTimingText(for: event),
+            locationText: event.location,
+            continueNoteID: trackedNoteID
+        )
+    }
+
+    private func classNoteMarkdown(for overview: NextCalendarClassOverview) -> String {
+        var lines = [
+            "# \(overview.title)",
+            ""
+        ]
+
+        if let timingText = overview.timingText {
+            lines.append("Time: \(timingText)")
+        }
+        if let locationText = overview.locationText {
+            lines.append("Location: \(locationText)")
+        }
+        if lines.count > 2 {
+            lines.append("")
+        }
+        lines.append("## Notes")
+        lines.append("")
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func classTimingText(for event: CalendarRecommendationEvent) -> String? {
+        let calendar = Calendar.current
+        let dayFormatter = DateFormatter()
+        dayFormatter.dateStyle = calendar.isDateInToday(event.startDate) ? .none : .medium
+        dayFormatter.timeStyle = .none
+
+        let timeFormatter = DateFormatter()
+        timeFormatter.dateStyle = .none
+        timeFormatter.timeStyle = .short
+
+        let timeRange = "\(timeFormatter.string(from: event.startDate)) - \(timeFormatter.string(from: event.endDate))"
+        if calendar.isDateInToday(event.startDate) {
+            return "Today, \(timeRange)"
+        }
+
+        let day = dayFormatter.string(from: event.startDate)
+        guard !day.isEmpty else { return timeRange }
+        return "\(day), \(timeRange)"
+    }
+
+    private func rememberClassNote(noteID: Note.ID, event: CalendarRecommendationEvent) {
+        nextClassNoteIDsByEventKey[classEventTrackingKey(for: event)] = noteID
+        saveNextClassNoteMap()
+    }
+
+    private func saveNextClassNoteMap() {
+        if let data = try? encoder.encode(nextClassNoteIDsByEventKey) {
+            UserDefaults.standard.set(data, forKey: nextClassNoteMapKey)
+        }
+    }
+
+    private func classEventTrackingKey(for event: CalendarRecommendationEvent) -> String {
+        let titleKey = normalizedSearchText(event.title)
+        let startMinute = Int(event.startDate.timeIntervalSince1970 / 60)
+        let endMinute = Int(event.endDate.timeIntervalSince1970 / 60)
+        return "\(activeBrain?.id ?? "no-vault")|\(titleKey)|\(startMinute)|\(endMinute)"
+    }
+
+    private func firstJSONObject(in text: String) -> String? {
+        guard let start = text.firstIndex(of: "{"),
+              let end = text.lastIndex(of: "}"),
+              start <= end
+        else {
+            return nil
+        }
+        return String(text[start...end])
     }
 
     func saveCurrentNote() {
@@ -977,6 +1459,7 @@ final class BrainStore: ObservableObject {
         title = "Home"
         content = homeMarkdown
         status = "Home opened"
+        refreshNextCalendarClass()
 
         guard latestHomeSummary == nil else {
             isGeneratingHomePage = false
@@ -1408,6 +1891,7 @@ final class BrainStore: ObservableObject {
         title = "Home"
         content = homeMarkdown
         status = "Home opened"
+        refreshNextCalendarClass()
 
         if regenerate {
             compileHomePageSummary(force: true)
@@ -1890,8 +2374,10 @@ final class BrainStore: ObservableObject {
         deepSeekModel: String,
         contentModel: AssistantModel,
         homeGenerationModel: HighlightSummaryModel,
-        flashcardGenerationModel: HighlightSummaryModel
+        flashcardGenerationModel: HighlightSummaryModel,
+        appleCalendarSyncEnabled: Bool
     ) {
+        let previousAppleCalendarSyncEnabled = isAppleCalendarSyncEnabled
         self.mistralAPIKey = mistralAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         self.mistralModel = mistralModel.trimmingCharacters(in: .whitespacesAndNewlines)
         self.deepSeekAPIKey = deepSeekAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1899,6 +2385,10 @@ final class BrainStore: ObservableObject {
         selectedAssistantModel = contentModel
         selectedHomeGenerationModel = homeGenerationModel
         selectedFlashcardGenerationModel = flashcardGenerationModel
+        isAppleCalendarSyncEnabled = appleCalendarSyncEnabled
+        if appleCalendarSyncEnabled {
+            recommendedPageHintDismissed = false
+        }
 
         if self.mistralModel.isEmpty { self.mistralModel = Self.defaultMistralModel }
         if self.deepSeekModel.isEmpty { self.deepSeekModel = Self.defaultDeepSeekModel }
@@ -1908,6 +2398,9 @@ final class BrainStore: ObservableObject {
             isShowingModelConfiguration = false
             refreshMistralAccountLimitsIfNeeded()
             status = "Model settings saved"
+            if appleCalendarSyncEnabled != previousAppleCalendarSyncEnabled {
+                setAppleCalendarSyncEnabled(appleCalendarSyncEnabled)
+            }
         } catch {
             status = error.localizedDescription
         }
@@ -7565,6 +8058,12 @@ final class BrainStore: ObservableObject {
             .flatMap { $0 == .ollama ? nil : $0 }
             ?? legacyGenerationModel
             ?? .mistral
+        isAppleCalendarSyncEnabled = defaults.bool(forKey: appleCalendarSyncEnabledKey)
+        recommendedPageHintDismissed = defaults.bool(forKey: recommendedPageHintDismissedKey)
+        if let data = defaults.data(forKey: nextClassNoteMapKey),
+           let decoded = try? decoder.decode([String: Note.ID].self, from: data) {
+            nextClassNoteIDsByEventKey = decoded
+        }
         mistralAPIKey = defaults.string(forKey: mistralAPIKeyKey) ?? ""
         mistralModel = defaults.string(forKey: mistralModelKey) ?? Self.defaultMistralModel
         deepSeekAPIKey = defaults.string(forKey: deepSeekAPIKeyKey) ?? ""
@@ -7599,6 +8098,11 @@ final class BrainStore: ObservableObject {
         defaults.set(selectedAssistantModel.rawValue, forKey: selectedAssistantModelKey)
         defaults.set(selectedHomeGenerationModel.rawValue, forKey: selectedHomeGenerationModelKey)
         defaults.set(selectedFlashcardGenerationModel.rawValue, forKey: selectedFlashcardGenerationModelKey)
+        defaults.set(isAppleCalendarSyncEnabled, forKey: appleCalendarSyncEnabledKey)
+        defaults.set(recommendedPageHintDismissed, forKey: recommendedPageHintDismissedKey)
+        if let data = try? encoder.encode(nextClassNoteIDsByEventKey) {
+            defaults.set(data, forKey: nextClassNoteMapKey)
+        }
         defaults.set(selectedFlashcardGenerationModel.rawValue, forKey: selectedHighlightSummaryModelKey)
         defaults.set(mistralAPIKey, forKey: mistralAPIKeyKey)
         defaults.set(mistralModel, forKey: mistralModelKey)
@@ -9479,6 +9983,41 @@ private struct HomePagePreparedNote {
 
 private struct HomePreparedNoteCacheEntry {
     let preparedMarkdown: String
+}
+
+private struct CalendarRecommendationCandidate {
+    let noteID: Note.ID
+    let title: String
+    let excerpt: String
+    let updatedAt: Date
+}
+
+private struct CalendarPageRecommendationResponse: Decodable {
+    let noteID: Note.ID
+    let reasoning: String
+}
+
+private struct SmartFeatureBlob: Codable {
+    let version: Int
+    let vaultID: String
+    let brainFileName: String
+    let brainPath: String
+    let feature: String
+    let createdAt: Date
+    let event: CalendarRecommendationEvent
+    let selectedNoteID: Note.ID
+    let selectedTitle: String
+    let reasoning: String
+    let usedAI: Bool
+    let candidateTitles: [String]
+}
+
+struct NextCalendarClassOverview: Equatable {
+    let event: CalendarRecommendationEvent
+    let title: String
+    let timingText: String?
+    let locationText: String?
+    let continueNoteID: Note.ID?
 }
 
 struct PageFlashcardState: Equatable {

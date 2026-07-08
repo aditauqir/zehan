@@ -1265,6 +1265,7 @@ private struct DocumentChromeControls: View {
                 systemImage: "trash.fill",
                 help: "Delete",
                 isDestructive: true,
+                confirmsDestructiveAction: true,
                 action: delete
             )
             .disabled(!canDelete)
@@ -1893,14 +1894,25 @@ private struct GlassChromeIconButton: View {
     let help: String
     var isActive = false
     var isDestructive = false
+    var confirmsDestructiveAction = false
     var activeIconColor: Color?
     let action: () -> Void
 
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovered = false
+    @State private var isConfirmingDelete = false
 
     var body: some View {
-        Button(action: action) {
+        Button {
+            guard confirmsDestructiveAction else {
+                action()
+                return
+            }
+
+            withAnimation(.easeOut(duration: 0.14)) {
+                isConfirmingDelete = true
+            }
+        } label: {
             Image(systemName: systemImage)
                 .font(.system(size: 14, weight: .semibold))
                 .symbolRenderingMode(isDestructive && isHovered ? .palette : .hierarchical)
@@ -1922,6 +1934,21 @@ private struct GlassChromeIconButton: View {
         .opacity(isEnabled ? 1 : 0.36)
         .onHover { hovering in
             isHovered = hovering && isEnabled
+        }
+        .popover(isPresented: $isConfirmingDelete, arrowEdge: .top) {
+            LiquidGlassDeleteConfirmation(
+                message: "Are you sure you want to delete the file?",
+                cancel: {
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        isConfirmingDelete = false
+                    }
+                },
+                confirm: {
+                    isConfirmingDelete = false
+                    action()
+                }
+            )
+            .presentationBackground(.clear)
         }
     }
 
@@ -1979,6 +2006,68 @@ private struct GlassChromeIconButton: View {
         }
 
         return .black.opacity(isHovered ? 0.18 : 0)
+    }
+}
+
+private struct LiquidGlassDeleteConfirmation: View {
+    let message: String
+    let cancel: () -> Void
+    let confirm: () -> Void
+    @State private var isDeleteHovered = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 15, weight: .regular))
+                    .foregroundStyle(.yellow.opacity(0.96))
+                    .frame(width: 26, height: 26)
+
+                Text(message)
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(.primary.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 8) {
+                Button("Cancel", action: cancel)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(.primary.opacity(0.74))
+                    .padding(.horizontal, 12)
+                    .frame(height: 28)
+                    .background {
+                        Capsule()
+                            .fill(.white.opacity(0.12))
+                    }
+
+                Button("Delete", role: .destructive, action: confirm)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(isDeleteHovered ? .white : .black.opacity(0.86))
+                    .padding(.horizontal, 12)
+                    .frame(height: 28)
+                    .background {
+                        Capsule()
+                            .fill(isDeleteHovered ? Color.red.opacity(0.96) : Color.white.opacity(0.94))
+                    }
+                    .shadow(color: .red.opacity(isDeleteHovered ? 0.34 : 0), radius: isDeleteHovered ? 10 : 0, x: 0, y: isDeleteHovered ? 5 : 0)
+                    .animation(.easeOut(duration: 0.16), value: isDeleteHovered)
+                    .onHover { hovering in
+                        isDeleteHovered = hovering
+                    }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .padding(14)
+        .frame(width: 246)
+        .background {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.ultraThinMaterial)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .shadow(color: .black.opacity(0.18), radius: 22, x: 0, y: 12)
+        .padding(4)
     }
 }
 
@@ -2409,6 +2498,7 @@ private struct NoteSidebarRow: View {
     let delete: () -> Void
 
     @State private var isHovered = false
+    @State private var isConfirmingDelete = false
 
     var body: some View {
         ZStack(alignment: .trailing) {
@@ -2436,7 +2526,9 @@ private struct NoteSidebarRow: View {
             }
 
             Button(role: .destructive) {
-                delete()
+                withAnimation(.easeOut(duration: 0.14)) {
+                    isConfirmingDelete = true
+                }
             } label: {
                 Image(systemName: "trash")
                     .font(.system(size: 11.5, weight: .semibold))
@@ -2450,10 +2542,26 @@ private struct NoteSidebarRow: View {
             }
             .buttonStyle(.plain)
             .help("Delete")
-            .opacity(isHovered ? 1 : 0)
+            .opacity(isHovered || isConfirmingDelete ? 1 : 0)
             .animation(.easeOut(duration: 0.12), value: isHovered)
-            .allowsHitTesting(isHovered)
+            .animation(.easeOut(duration: 0.12), value: isConfirmingDelete)
+            .allowsHitTesting(isHovered || isConfirmingDelete)
             .padding(.trailing, 5)
+            .popover(isPresented: $isConfirmingDelete, arrowEdge: .trailing) {
+                LiquidGlassDeleteConfirmation(
+                    message: "Are you sure you want to delete the file?",
+                    cancel: {
+                        withAnimation(.easeOut(duration: 0.14)) {
+                            isConfirmingDelete = false
+                        }
+                    },
+                    confirm: {
+                        isConfirmingDelete = false
+                        delete()
+                    }
+                )
+                .presentationBackground(.clear)
+            }
         }
         .contextMenu {
             Button {
@@ -4328,8 +4436,8 @@ private struct HomePageView: View {
                         HomeGenerationInlineBlocks()
                             .id(generationDate ?? Date.distantFuture)
                     } else {
-                        vaultSummarySection
                         vaultGraphSection
+                        homeActionSection
                         pageCardsSection
                     }
                 }
@@ -4361,31 +4469,22 @@ private struct HomePageView: View {
             }
         }
         .animation(.easeInOut(duration: 0.24), value: isGraphExpanded)
-    }
-
-    private var vaultSummarySection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Summary")
-                .font(.system(size: 22, weight: .bold))
-
-            if presentation.vaultSummary.isEmpty {
-                Text("No summary yet.")
-                    .font(.system(size: 15))
-                    .foregroundStyle(.primary.opacity(0.88))
-            } else {
-                MarkdownPreview(
-                    content: presentation.vaultSummary,
-                    searchHighlight: nil,
-                    openLinkedNote: { store.openLinkedNote(named: $0) }
-                )
-                .foregroundStyle(.primary.opacity(0.88))
-                .textSelection(.enabled)
-            }
+        .onAppear {
+            store.refreshNextCalendarClass()
         }
     }
 
     private var vaultGraphSection: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let nextCalendarClass = store.nextCalendarClass {
+                NextClassOverviewView(
+                    overview: nextCalendarClass,
+                    canContinue: store.canContinueNextClassNote,
+                    createNote: store.createNoteForNextClass,
+                    continueNote: store.continueNextClassNote
+                )
+            }
+
             Text("Vault Map")
                 .font(.system(size: 22, weight: .bold))
 
@@ -4403,6 +4502,48 @@ private struct HomePageView: View {
             )
             .frame(height: 240)
         }
+    }
+
+    private var homeActionSection: some View {
+        VStack(alignment: .center, spacing: 8) {
+            HStack(spacing: 12) {
+                HomeActionButton(
+                    title: "Go back to \(store.homeReturnPageTitle)",
+                    systemImage: "arrow.uturn.backward",
+                    iconPlacement: .leading,
+                    style: .light,
+                    isEnabled: store.canOpenHomeReturnPage,
+                    action: store.openHomeReturnPage
+                )
+
+                HomeActionButton(
+                    title: store.isFindingRecommendedPage ? "Finding recommended page" : "Go to recommended page",
+                    systemImage: "sparkles",
+                    iconPlacement: .trailing,
+                    style: .neutral,
+                    isEnabled: store.canRecommendCalendarPage,
+                    action: store.openRecommendedCalendarPage
+                )
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+
+            if store.shouldShowCalendarRecommendationHint {
+                HStack(spacing: 8) {
+                    Text("Enable Apple Calendar Sync")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+
+                    Button(action: store.dismissCalendarRecommendationHint) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary.opacity(0.82))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Dismiss")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     @ViewBuilder
@@ -4423,6 +4564,209 @@ private struct HomePageView: View {
                 }
             }
         }
+    }
+}
+
+private enum HomeActionButtonIconPlacement {
+    case leading
+    case trailing
+}
+
+private enum HomeActionButtonStyle {
+    case light
+    case neutral
+}
+
+private struct HomeActionButton: View {
+    let title: String
+    let systemImage: String
+    let iconPlacement: HomeActionButtonIconPlacement
+    let style: HomeActionButtonStyle
+    let isEnabled: Bool
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                if iconPlacement == .leading {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 13, weight: .semibold))
+                }
+
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                if iconPlacement == .trailing {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 13, weight: .semibold))
+                }
+            }
+            .foregroundStyle(foregroundStyle)
+            .padding(.horizontal, 15)
+            .frame(minHeight: 34)
+            .background {
+                Capsule(style: .continuous)
+                    .fill(backgroundStyle)
+            }
+            .overlay {
+                Capsule(style: .continuous)
+                    .stroke(strokeStyle, lineWidth: 1)
+            }
+            .shadow(color: shadowStyle, radius: isHovered && isEnabled ? 9 : 3, x: 0, y: isHovered && isEnabled ? 4 : 1)
+            .contentShape(Capsule(style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.14)) {
+                isHovered = hovering
+            }
+        }
+    }
+
+    private var foregroundStyle: Color {
+        guard isEnabled else {
+            return style == .neutral ? .primary.opacity(0.38) : .black.opacity(0.34)
+        }
+
+        switch style {
+        case .light:
+            return .black.opacity(0.86)
+        case .neutral:
+            return .primary.opacity(isHovered ? 0.9 : 0.78)
+        }
+    }
+
+    private var backgroundStyle: Color {
+        guard isEnabled else {
+            return style == .neutral ? .primary.opacity(0.045) : .white.opacity(0.48)
+        }
+
+        switch style {
+        case .light:
+            return .white.opacity(isHovered ? 0.98 : 0.9)
+        case .neutral:
+            return .primary.opacity(isHovered ? 0.13 : 0.075)
+        }
+    }
+
+    private var strokeStyle: Color {
+        guard isEnabled else {
+            return .primary.opacity(0.06)
+        }
+
+        switch style {
+        case .light:
+            return .black.opacity(isHovered ? 0.18 : 0.08)
+        case .neutral:
+            return .primary.opacity(isHovered ? 0.18 : 0.1)
+        }
+    }
+
+    private var shadowStyle: Color {
+        guard isEnabled else { return .clear }
+        return style == .neutral
+            ? .accentColor.opacity(isHovered ? 0.16 : 0.03)
+            : .black.opacity(isHovered ? 0.12 : 0.04)
+    }
+}
+
+private struct NextClassOverviewView: View {
+    let overview: NextCalendarClassOverview
+    let canContinue: Bool
+    let createNote: () -> Void
+    let continueNote: () -> Void
+    @State private var isCreateNoteHovered = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 11) {
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(Color.accentColor)
+                .frame(width: 3)
+
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(overview.title)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    if let timingText = overview.timingText {
+                        Text(timingText)
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundStyle(Color.accentColor.opacity(0.82))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+
+                    if let locationText = overview.locationText {
+                        Text(locationText)
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundStyle(Color.accentColor.opacity(0.72))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                Button(action: createNote) {
+                    Image(systemName: "square.and.pencil")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                        .background {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(Color.accentColor.opacity(isCreateNoteHovered ? 0.12 : 0))
+                        }
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor.opacity(0.9))
+                .onHover { hovering in
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        isCreateNoteHovered = hovering
+                    }
+                }
+                .help("New class page")
+
+                HomeClassContinueButton(isEnabled: canContinue, action: continueNote)
+            }
+        }
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct HomeClassContinueButton: View {
+    let isEnabled: Bool
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text("Continue")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(isEnabled ? Color.black.opacity(0.84) : Color.primary.opacity(0.32))
+                .padding(.horizontal, 12)
+                .frame(height: 28)
+                .background {
+                    Capsule(style: .continuous)
+                        .fill(isEnabled ? Color.white.opacity(isHovered ? 0.96 : 0.88) : Color.white.opacity(0.36))
+                }
+                .shadow(color: .black.opacity(isEnabled && isHovered ? 0.1 : 0.03), radius: isEnabled && isHovered ? 6 : 2, x: 0, y: isEnabled && isHovered ? 3 : 1)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.14)) {
+                isHovered = hovering
+            }
+        }
+        .help(isEnabled ? "Continue class page" : "Create a class page first")
     }
 }
 
@@ -11638,6 +11982,7 @@ private struct ModelConfigurationView: View {
     @State private var contentModel: AssistantModel
     @State private var homeGenerationModel: HighlightSummaryModel
     @State private var flashcardGenerationModel: HighlightSummaryModel
+    @State private var appleCalendarSyncEnabled: Bool
     @State private var mistralVerificationTask: Task<Void, Never>?
     @State private var deepSeekVerificationTask: Task<Void, Never>?
     @State private var mistralKeychainState: KeychainSaveState = .idle
@@ -11662,6 +12007,7 @@ private struct ModelConfigurationView: View {
         _contentModel = State(initialValue: store.selectedAssistantModel)
         _homeGenerationModel = State(initialValue: store.selectedHomeGenerationModel == .ollama ? .mistral : store.selectedHomeGenerationModel)
         _flashcardGenerationModel = State(initialValue: store.selectedFlashcardGenerationModel == .ollama ? .mistral : store.selectedFlashcardGenerationModel)
+        _appleCalendarSyncEnabled = State(initialValue: store.isAppleCalendarSyncEnabled)
     }
 
     var body: some View {
@@ -11723,6 +12069,16 @@ private struct ModelConfigurationView: View {
 
                     ModelRoutingRow(title: "Document Reading Service") {
                         StaticModelServiceLabel(title: documentReadingServiceTitle)
+                    }
+
+                    Divider()
+                        .padding(.leading, 14)
+
+                    ModelRoutingRow(title: "Apple Calendar Sync") {
+                        Toggle("", isOn: $appleCalendarSyncEnabled)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .help("Use Apple Calendar to recommend the next useful page from Home")
                     }
                 }
                 .background {
@@ -12096,7 +12452,8 @@ private struct ModelConfigurationView: View {
             deepSeekModel: BrainStore.defaultDeepSeekModel,
             contentModel: contentModel,
             homeGenerationModel: homeGenerationModel,
-            flashcardGenerationModel: flashcardGenerationModel
+            flashcardGenerationModel: flashcardGenerationModel,
+            appleCalendarSyncEnabled: appleCalendarSyncEnabled
         )
     }
 }

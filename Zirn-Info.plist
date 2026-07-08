@@ -4,6 +4,10 @@
 <dict>
 	<key>ATSApplicationFontsPath</key>
 	<string>Fonts</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Zirn uses your calendar to recommend the page most relevant to your next test, class, or event.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Zirn uses your calendar to recommend the page most relevant to your next test, class, or event.</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUScheduledCheckInterval</key>

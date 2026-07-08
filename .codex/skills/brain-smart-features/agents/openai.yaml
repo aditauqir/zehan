@@ -1,0 +1,4 @@
+interface:
+  display_name: "Brain Smart Features"
+  short_description: "Ask before adding Zirn smart feature memory."
+  default_prompt: "Use the brain-smart-features skill when adding Zirn features that persist smart feature blobs or recommendation memory."
