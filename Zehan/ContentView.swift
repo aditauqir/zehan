@@ -4444,6 +4444,7 @@ private struct HomePageView: View {
                 .padding(.vertical, 8)
             }
             .scrollContentBackground(.hidden)
+            .scrollIndicators(.hidden)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .animation(.easeInOut(duration: 0.24), value: isGenerating)
 
@@ -4704,11 +4705,23 @@ private struct NextClassOverviewView: View {
                     }
 
                     if let locationText = overview.locationText {
-                        Text(locationText)
-                            .font(.system(size: 12, weight: .regular))
-                            .foregroundStyle(Color.accentColor.opacity(0.72))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+                        if let locationURL = googleMapsURL(for: locationText) {
+                            Link(destination: locationURL) {
+                                Text(locationText)
+                                    .font(.system(size: 12, weight: .regular))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Open in Google Maps")
+                        } else {
+                            Text(locationText)
+                                .font(.system(size: 12, weight: .regular))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
                     }
                 }
 
@@ -4738,6 +4751,18 @@ private struct NextClassOverviewView: View {
         }
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func googleMapsURL(for location: String) -> URL? {
+        let trimmedLocation = location.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedLocation.isEmpty else { return nil }
+
+        var components = URLComponents(string: "https://www.google.com/maps/search/")
+        components?.queryItems = [
+            URLQueryItem(name: "api", value: "1"),
+            URLQueryItem(name: "query", value: trimmedLocation)
+        ]
+        return components?.url
     }
 }
 

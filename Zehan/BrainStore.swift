@@ -820,21 +820,42 @@ final class BrainStore: ObservableObject {
             saveCurrentNote(statusText: "Autosaved")
         }
 
-        pendingAssistantInsertion = nil
-        pendingAssistantPreview = nil
-        currentHighlightSummary = nil
-        isShowingHomePage = false
-        isShowingHelpDesk = false
-        currentNoteID = nil
-        selectedNoteID = nil
-        selectedSidebarGroupID = nil
-        title = uniqueTitle(for: nextCalendarClass.title)
-        content = classNoteMarkdown(for: nextCalendarClass)
-        saveCurrentNote(statusText: "Class page created")
+        withActiveBrainAccess {
+            do {
+                guard let brain = activeBrain else { return }
+                let now = Date()
+                let noteID = UUID().uuidString
+                let noteTitle = uniqueTitle(for: nextCalendarClass.title)
+                let note = Note(
+                    id: noteID,
+                    title: noteTitle,
+                    content: contentBySettingDocumentTitle(noteTitle, in: classNoteMarkdown(for: nextCalendarClass)),
+                    createdAt: now,
+                    updatedAt: now
+                )
 
-        if let currentNoteID {
-            rememberClassNote(noteID: currentNoteID, event: nextCalendarClass.event)
-            self.nextCalendarClass = classOverview(for: nextCalendarClass.event)
+                try FileManager.default.createDirectory(at: notesFolderURL(for: brain), withIntermediateDirectories: true)
+                let targetURL = markdownNoteURL(for: note, in: brain)
+                try FileManager.default.createDirectory(
+                    at: targetURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try writeMarkdownNote(note, to: targetURL)
+                try persistHighlightedText(from: note, in: brain)
+                try noteIdentityDatabase?.upsert(
+                    noteID: note.id,
+                    title: note.title,
+                    fileName: relativeNoteFileName(for: targetURL, in: brain),
+                    updatedAt: note.updatedAt
+                )
+                try loadNotes()
+                try syncBrainMetadata()
+                rememberClassNote(noteID: note.id, event: nextCalendarClass.event)
+                self.nextCalendarClass = classOverview(for: nextCalendarClass.event)
+                status = "Class page created"
+            } catch {
+                status = error.localizedDescription
+            }
         }
     }
 

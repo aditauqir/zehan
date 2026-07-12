@@ -2,6 +2,10 @@
 
 ## v1.4.6
 
+- Added Apple Calendar Sync on Home with next-class detection, class page creation, and recommended page navigation.
+- Added Google Maps links for calendar locations shown on Home.
+- Improved Home by hiding the vertical scroll indicator and keeping the calendar row visible after creating a class page.
+- Fixed file deletion actions so they ask for confirmation before deleting.
 - Hotfix: Fixed the inline formula AI popup so it follows the live cursor inside `/formula{}` blocks, including after creating new lines.
 
 ## v1.4.5
