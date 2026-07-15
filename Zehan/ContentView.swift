@@ -3525,23 +3525,45 @@ struct VoiceTranscriptPlusInsertButton: View {
 
     var style: Style = .dark
     var isDisabled = false
+    var showsConfirmation = false
     let action: () -> Void
 
     @State private var isHovered = false
     @State private var pulsePhase = false
+    @State private var isConfirmed = false
 
     var body: some View {
-        Button(action: action) {
-            Image(systemName: "plus")
+        Button {
+            action()
+            guard showsConfirmation else { return }
+            withAnimation(.easeInOut(duration: 0.16)) {
+                isConfirmed = true
+            }
+            Task {
+                try? await Task.sleep(for: .milliseconds(900))
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    isConfirmed = false
+                }
+            }
+        } label: {
+            ZStack {
+                if isConfirmed {
+                    Image(systemName: "checkmark")
+                        .transition(.scale(scale: 0.72).combined(with: .opacity))
+                } else {
+                    Image(systemName: "plus")
+                        .transition(.scale(scale: 0.72).combined(with: .opacity))
+                }
+            }
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(iconColor)
                 .frame(width: 28, height: 28)
                 .background {
                     Circle()
-                        .fill(isHovered && !isDisabled ? hoverFill : Color.clear)
+                        .fill((isHovered || isConfirmed) && !isDisabled ? hoverFill : Color.clear)
                 }
                 .overlay {
-                    if !isHovered && !isDisabled {
+                    if !isHovered && !isDisabled && !isConfirmed {
                         Circle()
                             .stroke(ringColor, lineWidth: 1.1)
                             .scaleEffect(pulsePhase ? 1.0 : 0.86)
@@ -3552,7 +3574,7 @@ struct VoiceTranscriptPlusInsertButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .disabled(isDisabled)
+        .disabled(isDisabled || isConfirmed)
         .opacity(isDisabled ? 0.45 : 1)
         .help("Insert transcript")
         .onAppear {
@@ -3561,7 +3583,7 @@ struct VoiceTranscriptPlusInsertButton: View {
             }
         }
         .onHover { hovering in
-            guard !isDisabled else {
+            guard !isDisabled && !isConfirmed else {
                 isHovered = false
                 return
             }
@@ -3574,9 +3596,9 @@ struct VoiceTranscriptPlusInsertButton: View {
     private var iconColor: Color {
         switch style {
         case .light:
-            return .primary.opacity(isHovered ? 0.88 : 0.62)
+            return .primary.opacity(isConfirmed ? 0.88 : (isHovered ? 0.88 : 0.62))
         case .dark:
-            return .white.opacity(isHovered ? 0.96 : 0.78)
+            return .white.opacity(isConfirmed ? 0.96 : (isHovered ? 0.96 : 0.78))
         }
     }
 
@@ -3689,14 +3711,19 @@ struct VoiceTranscriptReviewActionRow: View {
     @ObservedObject var store: BrainStore
     let draft: VoiceTranscriptDraft
     var style: Style = .light
+    var dismissAfterInsert = true
 
     private var isBusy: Bool { store.isEnhancingVoiceTranscript }
 
     var body: some View {
         HStack(spacing: 6) {
-            VoiceTranscriptPlusInsertButton(style: style.plusStyle, isDisabled: isBusy) {
+            VoiceTranscriptPlusInsertButton(
+                style: style.plusStyle,
+                isDisabled: isBusy,
+                showsConfirmation: !dismissAfterInsert
+            ) {
                 withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
-                    store.confirmPendingVoiceTranscript()
+                    store.confirmPendingVoiceTranscript(dismissAfterInsert: dismissAfterInsert)
                 }
             }
 
@@ -3750,6 +3777,61 @@ struct VoiceTranscriptReviewActionRow: View {
             return .primary.opacity(0.48)
         case .dark:
             return .white.opacity(0.55)
+        }
+    }
+}
+
+struct VoiceTranscriptDismissButton: View {
+    enum Style {
+        case light
+        case dark
+    }
+
+    var style: Style
+    var isDisabled = false
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(foregroundColor)
+                .frame(width: style == .dark ? 26 : 24, height: style == .dark ? 26 : 24)
+                .background(hoverFill)
+                .clipShape(Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .help("Discard transcript")
+        .onHover { hovering in
+            guard !isDisabled else {
+                isHovered = false
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isHovered = hovering
+            }
+        }
+    }
+
+    private var foregroundColor: Color {
+        switch style {
+        case .light:
+            return .primary.opacity(isHovered ? 0.82 : 0.68)
+        case .dark:
+            return .white.opacity(isHovered ? 0.94 : 0.78)
+        }
+    }
+
+    private var hoverFill: Color {
+        switch style {
+        case .light:
+            return .primary.opacity(isHovered ? 0.12 : 0.06)
+        case .dark:
+            return .white.opacity(isHovered ? 0.18 : 0.10)
         }
     }
 }
@@ -10948,22 +11030,14 @@ private struct AssistantFloatingPill: View {
 
                 Spacer(minLength: 4)
 
-                Button {
+                VoiceTranscriptDismissButton(
+                    style: .light,
+                    isDisabled: store.isEnhancingVoiceTranscript
+                ) {
                     withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
                         store.discardPendingVoiceTranscript()
                     }
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.primary.opacity(0.68))
-                        .frame(width: 24, height: 24)
-                        .background(Color.primary.opacity(0.06))
-                        .clipShape(Circle())
-                        .contentShape(Circle())
                 }
-                .buttonStyle(.plain)
-                .disabled(store.isEnhancingVoiceTranscript)
-                .help("Discard transcript")
             }
 
             Group {

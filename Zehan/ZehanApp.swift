@@ -831,21 +831,14 @@ private struct VoiceDynamicIslandView: View {
 
                 Spacer(minLength: 4)
 
-                Button {
+                VoiceTranscriptDismissButton(
+                    style: .dark,
+                    isDisabled: store.isEnhancingVoiceTranscript
+                ) {
                     withAnimation(.spring(response: 0.38, dampingFraction: 0.88)) {
                         store.discardPendingVoiceTranscript()
                     }
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.78))
-                        .frame(width: 26, height: 26)
-                        .background(Color.white.opacity(0.1))
-                        .clipShape(Circle())
-                        .contentShape(Circle())
                 }
-                .buttonStyle(.plain)
-                .disabled(store.isEnhancingVoiceTranscript)
             }
 
             Group {
@@ -860,7 +853,12 @@ private struct VoiceDynamicIslandView: View {
             }
             .padding(.top, 8)
 
-            VoiceTranscriptReviewActionRow(store: store, draft: draft, style: .dark)
+            VoiceTranscriptReviewActionRow(
+                store: store,
+                draft: draft,
+                style: .dark,
+                dismissAfterInsert: false
+            )
                 .padding(.top, 10)
                 .padding(.bottom, 10)
         }

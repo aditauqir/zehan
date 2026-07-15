@@ -2980,14 +2980,16 @@ final class BrainStore: ObservableObject {
         status = "Voice clipping discarded"
     }
 
-    func confirmPendingVoiceTranscript() {
+    func confirmPendingVoiceTranscript(dismissAfterInsert: Bool = true) {
         guard let draft = pendingVoiceTranscriptDraft, !isEnhancingVoiceTranscript else { return }
         voiceEnhanceTask?.cancel()
         voiceEnhanceTask = nil
         isEnhancingVoiceTranscript = false
-        // Clear draft first so island/panel layout settles before disk writes.
-        pendingVoiceTranscriptDraft = nil
-        voiceCaptureDestinationTitle = nil
+        if dismissAfterInsert {
+            // Clear editor drafts first so the composer layout settles before disk writes.
+            pendingVoiceTranscriptDraft = nil
+            voiceCaptureDestinationTitle = nil
+        }
         insertVoiceTranscript(draft)
     }
 

@@ -7,7 +7,7 @@ Read this first. This repo is currently on `feature` with local, uncommitted wor
 - **Branch:** `feature`
 - **Ready for:** local Debug testing from `/tmp/ZehanDerivedData/Build/Products/Debug/Zirn.app`
 - **Not ready for:** merge to `debug`, merge to `main`, Sparkle OTA, or release until user approves
-- **Last verified:** Debug build succeeded and fresh Debug app launched on 2026-07-15 after voice review action-row redesign (plus insert, undo/redo revision stack, Refine label).
+- **Last verified:** Debug build succeeded and fresh Debug app launched on 2026-07-15 after voice review action-row redesign (plus insert, undo/redo revision stack, Refine label). Pending verification: Island insert now keeps review open with plus → tick → plus feedback, while editor insert still dismisses.
 
 ## Voice Transcription Handoff
 
@@ -49,6 +49,8 @@ Current implementation facts:
   - Target labels use the **current note file name** (not generic "Markdown").
 - **Unread insert dots:** inserting into a non-current note adds that note ID to `unreadVoiceInsertNoteIDs`. Sidebar shows a yellow-ochre 7 pt filled circle next to the title; opening the note clears the dot. Inserting into the currently open note does not set a dot.
 - **Plus hover:** white/primary circular fill with `.easeInOut(duration: 0.18)`.
+- **Insert feedback and dismissal:** Island plus inserts without clearing the pending review, animates to a checkmark for 0.9s, then returns to plus; editor plus keeps the existing insert-and-dismiss behavior.
+- **Review dismiss hover:** transcript-review X buttons in both Island and editor increase circular background and icon opacity on hover with `.easeInOut(duration: 0.18)`.
 - **Refine** hover: no system-color fill gradient. Instead a `#a1e4ff` glow travels around the capsule border perimeter (~1.45s loop).
 - Mic button shows a compact liquid-glass hover tip: "Press Fn + Control to use".
 - Confirming a voice transcript (plus) targets the selected review destination and saves/writes immediately.
@@ -160,6 +162,8 @@ open -n /tmp/ZehanDerivedData/Build/Products/Debug/Zirn.app
 - [ ] Glass behind expanded box matches continuous corner radius (no sharp rectangular bleed).
 - [ ] Refine updates text in-place, greys the button, shows skeleton in island + input pill, uses selected writing model.
 - [ ] Plus inserts into selected note; idle pulse ring + hover fill highlight.
+- [ ] Island insert keeps the review open and animates plus → tick → plus; editor insert dismisses its review.
+- [ ] Island and editor transcript-review X buttons highlight smoothly on hover.
 - [ ] Changing voice destination via breadcrumb Menu does not resize/crash the review card or Island panel.
 - [ ] Destination Menu shows notes only (no folders).
 - [ ] Insert into a different note does not crash; text lands in that note.
