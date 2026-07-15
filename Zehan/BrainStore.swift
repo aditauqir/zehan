@@ -7,9 +7,13 @@
 
 import Combine
 import Foundation
+import AVFoundation
 import AppKit
+import CoreMedia
 import NaturalLanguage
 import PDFKit
+import ScreenCaptureKit
+import Speech
 import SwiftUI
 import UniformTypeIdentifiers
 import WebKit
@@ -47,6 +51,131 @@ enum AssistantGenerationPhase: Equatable {
     case streaming
     case timedOut
     case failed(String)
+}
+
+enum VoiceCaptureTarget: Equatable {
+    case editor
+    case helpDesk
+}
+
+enum VoiceAudioSource: String, Equatable, CaseIterable, Identifiable {
+    case systemAudio
+    case microphone
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .systemAudio:
+            return "On Screen"
+        case .microphone:
+            return "Voice"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .systemAudio:
+            return "Capture system audio"
+        case .microphone:
+            return "Capture microphone"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .systemAudio:
+            return "display"
+        case .microphone:
+            return "mic.fill"
+        }
+    }
+}
+
+enum WhisperSmallModelInstallState: Equatable {
+    case idle
+    case checking
+    case installing
+    case ready(String)
+    case failed(String)
+}
+
+enum VoiceTranscriptDestinationKind: Equatable {
+    case note
+    case folder
+}
+
+struct VoiceTranscriptDestination: Identifiable, Equatable {
+    let id: String
+    let kind: VoiceTranscriptDestinationKind
+    let noteID: Note.ID?
+    let groupID: SidebarItem.ID?
+    let title: String
+    let breadcrumb: String
+
+    var symbolName: String {
+        switch kind {
+        case .note:
+            return "doc.text"
+        case .folder:
+            return "folder"
+        }
+    }
+}
+
+struct VoiceTranscriptBreadcrumbSegment: Identifiable, Equatable {
+    let id: Int
+    let title: String
+    let isDestinationPicker: Bool
+}
+
+struct VoiceTranscriptDraft: Identifiable, Equatable {
+    let id = UUID()
+    let target: VoiceCaptureTarget
+    var text: String
+    var noteID: Note.ID?
+    var noteTitle: String
+    var destinationGroupID: SidebarItem.ID?
+    var destinationKind: VoiceTranscriptDestinationKind = .note
+    let createdAt = Date()
+    /// Full refine history; index 0 is the original transcript.
+    var revisionHistory: [String]
+    /// Current position in `revisionHistory` (0-based).
+    var revisionIndex: Int
+
+    init(
+        target: VoiceCaptureTarget,
+        text: String,
+        noteID: Note.ID? = nil,
+        noteTitle: String,
+        destinationGroupID: SidebarItem.ID? = nil,
+        destinationKind: VoiceTranscriptDestinationKind = .note
+    ) {
+        self.target = target
+        self.text = text
+        self.noteID = noteID
+        self.noteTitle = noteTitle
+        self.destinationGroupID = destinationGroupID
+        self.destinationKind = destinationKind
+        self.revisionHistory = [text]
+        self.revisionIndex = 0
+    }
+
+    var revisionCounterLabel: String {
+        let total = max(revisionHistory.count, 1)
+        let current = min(max(revisionIndex + 1, 1), total)
+        return "\(current)/\(total)"
+    }
+
+    var canUndoRevision: Bool { revisionIndex > 0 }
+    var canRedoRevision: Bool { revisionIndex < revisionHistory.count - 1 }
+}
+
+struct VoiceClippingConfirmation: Identifiable, Equatable {
+    let id = UUID()
+    let target: VoiceCaptureTarget
+    let destinationTitle: String
+    let transcript: String
 }
 
 @MainActor
@@ -103,6 +232,24 @@ final class BrainStore: ObservableObject {
     @Published var isGeneratingHelpDeskResponse = false
     @Published var isShowingHelpDeskConversationBrowser = false
     @Published var helpDeskMarkdownSuggestions: [HelpDeskMarkdownSuggestion] = []
+    @Published var activeVoiceCaptureTarget: VoiceCaptureTarget?
+    @Published var activeVoiceAudioSource: VoiceAudioSource?
+    @Published var pendingVoiceAudioSourceSelection: VoiceCaptureTarget?
+    @Published var isVoiceCapturePaused = false
+    @Published var isFinalizingVoiceTranscript = false
+    @Published var voiceTranscriptionProgress = 0.0
+    @Published var liveVoiceTranscript = ""
+    @Published var voiceTranscriptionNotice: String?
+    @Published var pendingVoiceTranscriptDraft: VoiceTranscriptDraft?
+    @Published var isEnhancingVoiceTranscript = false
+    @Published var unreadVoiceInsertNoteIDs: Set<Note.ID> = []
+    @Published var pendingVoiceClippingConfirmation: VoiceClippingConfirmation?
+    /// Note title the active editor capture will insert into (set when recording starts).
+    @Published private(set) var voiceCaptureDestinationTitle: String?
+    /// Wall-clock start of the current recording session (for Island timer).
+    @Published private(set) var voiceCaptureStartedAt: Date?
+    @Published private(set) var whisperSmallModelInstallState: WhisperSmallModelInstallState = .idle
+    @Published private(set) var isVoiceInputLikelyUserSpeech = false
     @Published private(set) var helpDeskSuggestionsDisabledConversationIDs: Set<HelpDeskConversation.ID> = []
     @Published private(set) var mistralBudgetSpentUSD = 0.0
     @Published private(set) var mistralOCRBudgetSpentUSD = 0.0
@@ -172,6 +319,15 @@ final class BrainStore: ObservableObject {
     private var helpDeskDatabase = HelpDeskDatabase(vaultID: nil, conversations: [])
     private var helpDeskSessionDatabase: HelpDeskSessionDatabase?
     private var didAttemptDeferredPreviousBrainOpen = false
+    private var whisperSmallModelInstallTask: Task<URL, Error>?
+    private var voiceTranscriptionController: VoiceTranscriptionController?
+    private var finalizingVoiceTranscriptionController: VoiceTranscriptionController?
+    private var voiceTranscriptionProgressTask: Task<Void, Never>?
+    private var voiceEnhanceTask: Task<Void, Never>?
+    private var activeVoiceEditorNoteID: Note.ID?
+    private var activeVoiceEditorNoteTitle: String?
+    private var voiceCapturePausedAccumulated: TimeInterval = 0
+    private var voiceCapturePauseStartedAt: Date?
 
     static let defaultMistralModel = "mistral-large-latest"
     static let defaultDeepSeekModel = "deepseek-v4-flash"
@@ -220,6 +376,9 @@ final class BrainStore: ObservableObject {
         decoder.dateDecodingStrategy = .iso8601
         loadRecentVaults()
         loadAssistantConfiguration()
+        Task {
+            await ensureWhisperSmallModelInstalledForCurrentUser(reportReadyStatus: false)
+        }
     }
 
     var documentStats: String {
@@ -625,6 +784,9 @@ final class BrainStore: ObservableObject {
         isShowingHelpDeskConversationBrowser = false
         helpDeskMarkdownSuggestions = []
         helpDeskSuggestionsDisabledConversationIDs = []
+        unreadVoiceInsertNoteIDs = []
+        pendingVoiceTranscriptDraft = nil
+        isEnhancingVoiceTranscript = false
         activeBrain = nil
         notes = []
         sidebarItems = []
@@ -756,6 +918,7 @@ final class BrainStore: ObservableObject {
                 pendingAssistantInsertion = nil
                 title = note.title
                 content = note.content
+                clearUnreadVoiceInsert(for: note.id)
                 recordRecentVault(
                     note: NoteSummary(
                         id: note.id,
@@ -2552,6 +2715,796 @@ final class BrainStore: ObservableObject {
         status = isAssistantWritingMode ? "Writing mode on" : "Question mode on"
     }
 
+    func toggleVoiceCapture(target: VoiceCaptureTarget) {
+        guard !isFinalizingVoiceTranscript else {
+            status = "Voice transcription is still processing"
+            return
+        }
+
+        if activeVoiceCaptureTarget == target {
+            stopVoiceCapture()
+            return
+        }
+
+        if pendingVoiceAudioSourceSelection == target {
+            dismissVoiceAudioSourceSelection()
+            return
+        }
+
+        pendingVoiceAudioSourceSelection = target
+        status = "Choose an audio source"
+    }
+
+    func selectVoiceAudioSource(_ source: VoiceAudioSource, for target: VoiceCaptureTarget? = nil) {
+        let resolvedTarget = target ?? pendingVoiceAudioSourceSelection
+        guard let resolvedTarget else { return }
+
+        pendingVoiceAudioSourceSelection = nil
+        Task {
+            await startVoiceCapture(target: resolvedTarget, source: source)
+        }
+    }
+
+    func dismissVoiceAudioSourceSelection() {
+        pendingVoiceAudioSourceSelection = nil
+        if activeVoiceCaptureTarget == nil, !isFinalizingVoiceTranscript {
+            status = "Ready"
+        }
+    }
+
+    func dismissVoiceTranscriptionNotice() {
+        voiceTranscriptionNotice = nil
+        if activeVoiceCaptureTarget == nil,
+           !isFinalizingVoiceTranscript,
+           pendingVoiceTranscriptDraft == nil,
+           pendingVoiceAudioSourceSelection == nil {
+            status = "Ready"
+        }
+    }
+
+    private func startVoiceCapture(target: VoiceCaptureTarget, source: VoiceAudioSource) async {
+        await ensureWhisperSmallModelInstalledForCurrentUser(reportReadyStatus: true)
+
+        do {
+            try await startNativeSpeechTranscription(target: target, source: source)
+        } catch {
+            status = "Voice transcription failed: \(error.localizedDescription)"
+            activeVoiceCaptureTarget = nil
+            activeVoiceAudioSource = nil
+            voiceCaptureDestinationTitle = nil
+            resetVoiceCaptureTimer()
+            isVoiceCapturePaused = false
+            isFinalizingVoiceTranscript = false
+            voiceTranscriptionProgress = 0
+            liveVoiceTranscript = ""
+            voiceTranscriptionNotice = nil
+            isVoiceInputLikelyUserSpeech = false
+        }
+    }
+
+    func stopVoiceCapture() {
+        guard let target = activeVoiceCaptureTarget,
+              let controller = voiceTranscriptionController
+        else { return }
+        voiceTranscriptionController = nil
+        finalizingVoiceTranscriptionController = controller
+        activeVoiceCaptureTarget = nil
+        activeVoiceAudioSource = nil
+        pendingVoiceAudioSourceSelection = nil
+        resetVoiceCaptureTimer()
+        isVoiceCapturePaused = false
+        isFinalizingVoiceTranscript = true
+        voiceTranscriptionProgress = 0.06
+        voiceTranscriptionNotice = nil
+        isVoiceInputLikelyUserSpeech = false
+        status = "Transcribing voice"
+        startVoiceTranscriptionProgress()
+
+        Task { @MainActor in
+            let transcript = await controller.finish()
+            let finalTranscript = Self.normalizedVoiceTranscript(
+                transcript.isEmpty ? liveVoiceTranscript : transcript
+            )
+            guard finalizingVoiceTranscriptionController === controller else { return }
+            finalizingVoiceTranscriptionController = nil
+            voiceTranscriptionProgressTask?.cancel()
+            voiceTranscriptionProgressTask = nil
+            voiceTranscriptionProgress = 1
+            liveVoiceTranscript = ""
+            isFinalizingVoiceTranscript = false
+            handleCompletedVoiceTranscript(finalTranscript, target: target, source: .manualStop)
+        }
+    }
+
+    func cancelVoiceCapture() {
+        guard !isFinalizingVoiceTranscript else {
+            cancelFinalizingVoiceTranscription()
+            return
+        }
+
+        if pendingVoiceAudioSourceSelection != nil {
+            dismissVoiceAudioSourceSelection()
+            return
+        }
+
+        guard activeVoiceCaptureTarget != nil else {
+            discardPendingVoiceTranscript()
+            return
+        }
+        voiceTranscriptionController?.cancel()
+        voiceTranscriptionController = nil
+        activeVoiceCaptureTarget = nil
+        activeVoiceAudioSource = nil
+        voiceCaptureDestinationTitle = nil
+        resetVoiceCaptureTimer()
+        isVoiceCapturePaused = false
+        isFinalizingVoiceTranscript = false
+        voiceTranscriptionProgress = 0
+        liveVoiceTranscript = ""
+        voiceTranscriptionNotice = nil
+        isVoiceInputLikelyUserSpeech = false
+        pendingVoiceTranscriptDraft = nil
+        status = "Voice capture cancelled"
+    }
+
+    func cancelFinalizingVoiceTranscription() {
+        finalizingVoiceTranscriptionController?.cancel()
+        finalizingVoiceTranscriptionController = nil
+        voiceTranscriptionProgressTask?.cancel()
+        voiceTranscriptionProgressTask = nil
+        isFinalizingVoiceTranscript = false
+        voiceTranscriptionProgress = 0
+        liveVoiceTranscript = ""
+        voiceTranscriptionNotice = nil
+        isVoiceInputLikelyUserSpeech = false
+        activeVoiceAudioSource = nil
+        voiceCaptureDestinationTitle = nil
+        resetVoiceCaptureTimer()
+        status = "Voice transcription cancelled"
+    }
+
+    func stopVoiceCaptureForNavigation(destinationTitle: String) {
+        guard let target = activeVoiceCaptureTarget,
+              let controller = voiceTranscriptionController
+        else { return }
+        voiceTranscriptionController = nil
+        finalizingVoiceTranscriptionController = controller
+        activeVoiceCaptureTarget = nil
+        activeVoiceAudioSource = nil
+        pendingVoiceAudioSourceSelection = nil
+        resetVoiceCaptureTimer()
+        isVoiceCapturePaused = false
+        isFinalizingVoiceTranscript = true
+        voiceTranscriptionProgress = 0.06
+        voiceTranscriptionNotice = nil
+        isVoiceInputLikelyUserSpeech = false
+        status = "Transcribing voice for page switch"
+        startVoiceTranscriptionProgress()
+
+        Task { @MainActor in
+            let transcript = await controller.finish()
+            let finalTranscript = Self.normalizedVoiceTranscript(
+                transcript.isEmpty ? liveVoiceTranscript : transcript
+            )
+            guard finalizingVoiceTranscriptionController === controller else { return }
+            finalizingVoiceTranscriptionController = nil
+            voiceTranscriptionProgressTask?.cancel()
+            voiceTranscriptionProgressTask = nil
+            voiceTranscriptionProgress = 1
+            liveVoiceTranscript = ""
+            isFinalizingVoiceTranscript = false
+            pendingVoiceClippingConfirmation = VoiceClippingConfirmation(
+                target: target,
+                destinationTitle: destinationTitle,
+                transcript: finalTranscript
+            )
+        }
+    }
+
+    func toggleVoiceCapturePaused() {
+        guard activeVoiceCaptureTarget != nil else { return }
+        isVoiceCapturePaused.toggle()
+        if isVoiceCapturePaused {
+            voiceTranscriptionController?.pause()
+            isVoiceInputLikelyUserSpeech = false
+            voiceCapturePauseStartedAt = Date()
+        } else {
+            if let pauseStarted = voiceCapturePauseStartedAt {
+                voiceCapturePausedAccumulated += Date().timeIntervalSince(pauseStarted)
+                voiceCapturePauseStartedAt = nil
+            }
+            Task {
+                do {
+                    try voiceTranscriptionController?.resume()
+                } catch {
+                    status = "Voice resume failed: \(error.localizedDescription)"
+                }
+            }
+        }
+        status = isVoiceCapturePaused ? "Voice capture paused" : "Voice capture resumed"
+    }
+
+    /// Elapsed recording time, freezing while paused.
+    func voiceCaptureElapsed(at date: Date = Date()) -> TimeInterval {
+        guard let started = voiceCaptureStartedAt else { return 0 }
+        var elapsed = date.timeIntervalSince(started) - voiceCapturePausedAccumulated
+        if let pauseStarted = voiceCapturePauseStartedAt {
+            elapsed -= date.timeIntervalSince(pauseStarted)
+        }
+        return max(0, elapsed)
+    }
+
+    static func formattedVoiceCaptureElapsed(_ elapsed: TimeInterval) -> String {
+        let total = Int(elapsed.rounded(.down))
+        let minutes = total / 60
+        let seconds = total % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    /// Writes transcript text to the general pasteboard. Safe to call from a nonactivating Island panel.
+    @discardableResult
+    func copyVoiceTranscriptToPasteboard(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        // Prefer writeObjects — more reliable from non-key / nonactivating panels than setString alone.
+        let wroteObjects = pasteboard.writeObjects([trimmed as NSString])
+        if !wroteObjects {
+            pasteboard.declareTypes([.string], owner: nil)
+            return pasteboard.setString(trimmed, forType: .string)
+        }
+        return true
+    }
+
+    private func resetVoiceCaptureTimer() {
+        voiceCaptureStartedAt = nil
+        voiceCapturePausedAccumulated = 0
+        voiceCapturePauseStartedAt = nil
+    }
+
+    private func beginVoiceCaptureTimer() {
+        voiceCaptureStartedAt = Date()
+        voiceCapturePausedAccumulated = 0
+        voiceCapturePauseStartedAt = nil
+    }
+
+    func confirmAddVoiceClipping() {
+        guard let confirmation = pendingVoiceClippingConfirmation else { return }
+        pendingVoiceClippingConfirmation = nil
+        handleCompletedVoiceTranscript(confirmation.transcript, target: confirmation.target, source: .navigationConfirmation)
+    }
+
+    func discardVoiceClipping() {
+        pendingVoiceClippingConfirmation = nil
+        status = "Voice clipping discarded"
+    }
+
+    func confirmPendingVoiceTranscript() {
+        guard let draft = pendingVoiceTranscriptDraft, !isEnhancingVoiceTranscript else { return }
+        voiceEnhanceTask?.cancel()
+        voiceEnhanceTask = nil
+        isEnhancingVoiceTranscript = false
+        // Clear draft first so island/panel layout settles before disk writes.
+        pendingVoiceTranscriptDraft = nil
+        voiceCaptureDestinationTitle = nil
+        insertVoiceTranscript(draft)
+    }
+
+    func discardPendingVoiceTranscript() {
+        voiceEnhanceTask?.cancel()
+        voiceEnhanceTask = nil
+        isEnhancingVoiceTranscript = false
+        pendingVoiceTranscriptDraft = nil
+        voiceCaptureDestinationTitle = nil
+        status = "Voice transcript discarded"
+    }
+
+    /// Compact path for voice review chrome: `Vault > Folder > Note` (folder omitted when none).
+    func voiceTranscriptBreadcrumb(noteID: Note.ID?, noteTitle: String) -> String {
+        voiceTranscriptBreadcrumb(
+            for: VoiceTranscriptDraft(
+                target: .editor,
+                text: "",
+                noteID: noteID,
+                noteTitle: noteTitle
+            )
+        )
+    }
+
+    func voiceTranscriptBreadcrumb(for draft: VoiceTranscriptDraft) -> String {
+        voiceTranscriptBreadcrumbSegments(for: draft)
+            .map(\.title)
+            .joined(separator: " > ")
+    }
+
+    func voiceTranscriptBreadcrumbSegments(for draft: VoiceTranscriptDraft) -> [VoiceTranscriptBreadcrumbSegment] {
+        var segments: [String] = [voiceTranscriptVaultLabel]
+        switch draft.destinationKind {
+        case .note:
+            if let folderLabel = voiceTranscriptFolderLabel(noteID: draft.noteID) {
+                segments.append(folderLabel)
+            }
+            let cleanedTitle = draft.noteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            segments.append(cleanedTitle.isEmpty ? displayTitle(for: title) : cleanedTitle)
+        case .folder:
+            let cleanedTitle = draft.noteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            segments.append(cleanedTitle.isEmpty ? "Notes" : cleanedTitle)
+        }
+        return segments.enumerated().map { index, title in
+            VoiceTranscriptBreadcrumbSegment(
+                id: index,
+                title: title,
+                isDestinationPicker: index > 0
+            )
+        }
+    }
+
+    func voiceTranscriptDestinations() -> [VoiceTranscriptDestination] {
+        let vaultLabel = voiceTranscriptVaultLabel
+        // Notes only — folders are not offered as insert destinations.
+        var destinations: [VoiceTranscriptDestination] = []
+        var seenNoteIDs = Set<Note.ID>()
+
+        for item in sidebarItems {
+            guard item.kind == .note,
+                  let noteID = item.noteID,
+                  !seenNoteIDs.contains(noteID)
+            else { continue }
+            seenNoteIDs.insert(noteID)
+            let noteTitle = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanTitle = noteTitle.isEmpty ? "Untitled" : noteTitle
+            let breadcrumb: String
+            if let folderLabel = voiceTranscriptFolderLabel(noteID: noteID) {
+                breadcrumb = "\(vaultLabel) > \(folderLabel) > \(cleanTitle)"
+            } else {
+                breadcrumb = "\(vaultLabel) > \(cleanTitle)"
+            }
+            destinations.append(
+                VoiceTranscriptDestination(
+                    id: "note-\(noteID)",
+                    kind: .note,
+                    noteID: noteID,
+                    groupID: nil,
+                    title: cleanTitle,
+                    breadcrumb: breadcrumb
+                )
+            )
+        }
+
+        for note in notes where !seenNoteIDs.contains(note.id) {
+            let noteTitle = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanTitle = noteTitle.isEmpty ? "Untitled" : noteTitle
+            destinations.append(
+                VoiceTranscriptDestination(
+                    id: "note-\(note.id)",
+                    kind: .note,
+                    noteID: note.id,
+                    groupID: nil,
+                    title: cleanTitle,
+                    breadcrumb: "\(vaultLabel) > \(cleanTitle)"
+                )
+            )
+        }
+
+        return destinations
+    }
+
+    func selectPendingVoiceTranscriptDestination(_ destination: VoiceTranscriptDestination) {
+        guard var draft = pendingVoiceTranscriptDraft, draft.target == .editor else { return }
+        guard destination.kind == .note else { return }
+        draft.destinationKind = .note
+        draft.noteID = destination.noteID
+        draft.noteTitle = destination.title
+        draft.destinationGroupID = nil
+        pendingVoiceTranscriptDraft = draft
+        status = "Voice destination set to \(destination.title)"
+    }
+
+    private var voiceTranscriptVaultLabel: String {
+        let vault = activeBrain?.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (vault?.isEmpty == false) ? vault! : "Brain"
+    }
+
+    private func voiceTranscriptFolderLabel(noteID: Note.ID?) -> String? {
+        guard let noteID,
+              let groupID = sidebarItems.first(where: { $0.kind == .note && $0.noteID == noteID })?.groupID,
+              let group = sidebarItems.first(where: { $0.kind == .group && $0.id == groupID })
+        else { return nil }
+        let title = group.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? nil : title
+    }
+
+    func enhancePendingVoiceTranscript() {
+        guard let draft = pendingVoiceTranscriptDraft, !isEnhancingVoiceTranscript else { return }
+        let sourceText = Self.normalizedVoiceTranscript(draft.text)
+        guard !sourceText.isEmpty else { return }
+
+        isEnhancingVoiceTranscript = true
+        status = "\(selectedAssistantModel.title) is refining transcript"
+
+        voiceEnhanceTask?.cancel()
+        voiceEnhanceTask = Task { @MainActor in
+            defer {
+                isEnhancingVoiceTranscript = false
+                voiceEnhanceTask = nil
+            }
+            do {
+                let result = try await generateWithSelectedAssistantModel(
+                    system: Self.voiceTranscriptRefineInstructions,
+                    user: sourceText,
+                    maxTokens: 4_096
+                )
+                guard !Task.isCancelled else { return }
+                let refined = Self.normalizedVoiceTranscript(cleanedAssistantMarkdown(result.content))
+                guard !refined.isEmpty else {
+                    status = "Refine produced no text"
+                    return
+                }
+                guard var updated = pendingVoiceTranscriptDraft else { return }
+                // Drop any redo branch, then push the refined text as a new revision.
+                if updated.revisionIndex < updated.revisionHistory.count - 1 {
+                    updated.revisionHistory = Array(updated.revisionHistory.prefix(updated.revisionIndex + 1))
+                }
+                updated.revisionHistory.append(refined)
+                updated.revisionIndex = updated.revisionHistory.count - 1
+                updated.text = refined
+                pendingVoiceTranscriptDraft = updated
+                status = "Voice transcript refined"
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                status = "Refine failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func undoPendingVoiceTranscriptRevision() {
+        guard var draft = pendingVoiceTranscriptDraft,
+              !isEnhancingVoiceTranscript,
+              draft.canUndoRevision
+        else { return }
+        draft.revisionIndex -= 1
+        draft.text = draft.revisionHistory[draft.revisionIndex]
+        pendingVoiceTranscriptDraft = draft
+        status = "Restored revision \(draft.revisionCounterLabel)"
+    }
+
+    func redoPendingVoiceTranscriptRevision() {
+        guard var draft = pendingVoiceTranscriptDraft,
+              !isEnhancingVoiceTranscript,
+              draft.canRedoRevision
+        else { return }
+        draft.revisionIndex += 1
+        draft.text = draft.revisionHistory[draft.revisionIndex]
+        pendingVoiceTranscriptDraft = draft
+        status = "Restored revision \(draft.revisionCounterLabel)"
+    }
+
+    private static let voiceTranscriptRefineInstructions = """
+    You refine voice transcriptions for a markdown notes app.
+    Clean up filler words, fix obvious ASR mistakes, and improve punctuation and readability.
+    Preserve the speaker's meaning, tone, and level of detail.
+    Do not add headings, bullet lists, markdown fencing, labels, or commentary.
+    Return only the refined transcript as plain prose.
+    """
+
+    private enum VoiceTranscriptCompletionSource {
+        case manualStop
+        case navigationConfirmation
+    }
+
+    private func startNativeSpeechTranscription(target: VoiceCaptureTarget, source: VoiceAudioSource) async throws {
+        let authorizationStatus = await VoiceTranscriptionController.requestSpeechAuthorization()
+        guard authorizationStatus == .authorized else {
+            throw VoiceTranscriptionError.speechRecognitionNotAuthorized
+        }
+
+        let controller = VoiceTranscriptionController(
+            source: source,
+            onTranscript: { [weak self] transcript in
+                Task { @MainActor in
+                    self?.liveVoiceTranscript = transcript
+                }
+            },
+            onUserSpeechActivityChanged: { [weak self] isLikelyUserSpeech in
+                Task { @MainActor in
+                    self?.isVoiceInputLikelyUserSpeech = isLikelyUserSpeech
+                }
+            },
+            onError: { [weak self] error in
+                Task { @MainActor in
+                    self?.status = "Voice transcription failed: \(error.localizedDescription)"
+                }
+            }
+        )
+        try await controller.start()
+        voiceTranscriptionController = controller
+        activeVoiceCaptureTarget = target
+        activeVoiceAudioSource = source
+        beginVoiceCaptureTimer()
+        if target == .editor {
+            activeVoiceEditorNoteID = currentNoteID
+            let noteTitle = displayTitle(for: title)
+            activeVoiceEditorNoteTitle = noteTitle
+            voiceCaptureDestinationTitle = noteTitle
+        } else {
+            activeVoiceEditorNoteID = nil
+            activeVoiceEditorNoteTitle = nil
+            voiceCaptureDestinationTitle = nil
+        }
+        pendingVoiceAudioSourceSelection = nil
+        isVoiceCapturePaused = false
+        isFinalizingVoiceTranscript = false
+        voiceTranscriptionProgress = 0
+        liveVoiceTranscript = ""
+        voiceTranscriptionNotice = nil
+        isVoiceInputLikelyUserSpeech = false
+        switch (target, source) {
+        case (.editor, .microphone):
+            status = "Listening to microphone in \(voiceCaptureDestinationTitle ?? "note")"
+        case (.editor, .systemAudio):
+            status = "Listening to on-screen audio in \(voiceCaptureDestinationTitle ?? "note")"
+        case (.helpDesk, .microphone):
+            status = "Listening to microphone in Zirn Chat"
+        case (.helpDesk, .systemAudio):
+            status = "Listening to on-screen audio in Zirn Chat"
+        }
+    }
+
+    private func startVoiceTranscriptionProgress() {
+        voiceTranscriptionProgressTask?.cancel()
+        voiceTranscriptionProgressTask = Task { @MainActor in
+            var tick = 0
+            while !Task.isCancelled, isFinalizingVoiceTranscript {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                tick += 1
+                let estimated = 0.06 + (1 - pow(0.94, Double(tick))) * 0.90
+                let stepped = (estimated * 20).rounded() / 20
+                voiceTranscriptionProgress = min(0.98, max(voiceTranscriptionProgress, stepped))
+            }
+        }
+    }
+
+    private func currentVoiceTranscript() -> String {
+        let controllerTranscript = voiceTranscriptionController?.transcript ?? ""
+        let liveTranscript = liveVoiceTranscript
+        return Self.normalizedVoiceTranscript(controllerTranscript.isEmpty ? liveTranscript : controllerTranscript)
+    }
+
+    private func handleCompletedVoiceTranscript(
+        _ transcript: String,
+        target: VoiceCaptureTarget,
+        source: VoiceTranscriptCompletionSource
+    ) {
+        let cleanTranscript = Self.normalizedVoiceTranscript(transcript)
+        guard !cleanTranscript.isEmpty else {
+            voiceTranscriptionNotice = "No audio"
+            status = "No audio"
+            return
+        }
+
+        voiceTranscriptionNotice = nil
+        switch target {
+        case .editor:
+            pendingVoiceTranscriptDraft = VoiceTranscriptDraft(
+                target: target,
+                text: cleanTranscript,
+                noteID: activeVoiceEditorNoteID ?? currentNoteID,
+                noteTitle: activeVoiceEditorNoteTitle ?? displayTitle(for: title)
+            )
+            activeVoiceEditorNoteID = nil
+            activeVoiceEditorNoteTitle = nil
+            status = source == .navigationConfirmation
+                ? "Voice clipping ready to add"
+                : "Voice transcript ready"
+        case .helpDesk:
+            helpDeskInput = cleanTranscript
+            status = "Sending voice message to Zirn Chat"
+            submitHelpDeskPrompt()
+        }
+    }
+
+    private func insertVoiceTranscript(_ draft: VoiceTranscriptDraft) {
+        let cleanTranscript = Self.normalizedVoiceTranscript(draft.text)
+        guard !cleanTranscript.isEmpty else {
+            status = "Voice transcript is empty"
+            return
+        }
+
+        switch draft.target {
+        case .editor:
+            switch draft.destinationKind {
+            case .note:
+                insertVoiceTranscript(cleanTranscript, noteID: draft.noteID, noteTitle: draft.noteTitle)
+            case .folder:
+                insertVoiceTranscript(cleanTranscript, groupID: draft.destinationGroupID, folderTitle: draft.noteTitle)
+            }
+        case .helpDesk:
+            helpDeskInput = cleanTranscript
+            submitHelpDeskPrompt()
+        }
+    }
+
+    private func insertVoiceTranscript(_ transcript: String, groupID: SidebarItem.ID?, folderTitle: String) {
+        withActiveBrainAccess {
+            do {
+                guard let brain = activeBrain else {
+                    updateContentFromEditor(Self.markdownByAppendingTranscript(transcript, to: content))
+                    saveCurrentNote(statusText: "Voice transcript added")
+                    return
+                }
+
+                let now = Date()
+                let noteTitle = uniqueTitle(for: "Voice Transcript")
+                let note = Note(
+                    id: UUID().uuidString,
+                    title: noteTitle,
+                    content: contentBySettingDocumentTitle(noteTitle, in: transcript),
+                    createdAt: now,
+                    updatedAt: now
+                )
+
+                let destinationFolder: URL
+                if let groupID, let group = sidebarGroup(for: groupID) {
+                    destinationFolder = sidebarGroupFolderURL(for: group, in: brain)
+                } else {
+                    destinationFolder = notesFolderURL(for: brain)
+                }
+                try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+                let targetURL = markdownNoteURL(for: note, inFolder: destinationFolder)
+                try writeMarkdownNote(note, to: targetURL)
+                try noteIdentityDatabase?.upsert(
+                    noteID: note.id,
+                    title: note.title,
+                    fileName: relativeNoteFileName(for: targetURL, in: brain),
+                    updatedAt: note.updatedAt
+                )
+
+                let summary = NoteSummary(id: note.id, title: note.title, updatedAt: note.updatedAt)
+                sidebarItems.append(SidebarItem(note: summary, groupID: groupID))
+                try persistSidebarLayoutNoAccess()
+                try loadNotes()
+                try syncBrainMetadata()
+                scheduleLiveHomePageCompilation(delay: Self.homeCompilationAfterAutosaveNanoseconds)
+                markUnreadVoiceInsert(for: note.id)
+
+                let cleanFolderTitle = folderTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                status = "Voice transcript added to \(cleanFolderTitle.isEmpty ? "Notes" : cleanFolderTitle)"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    private func insertVoiceTranscript(_ transcript: String, noteID: Note.ID?, noteTitle: String) {
+        guard let noteID, noteID != currentNoteID else {
+            updateContentFromEditor(Self.markdownByAppendingTranscript(transcript, to: content))
+            saveCurrentNote(statusText: "Voice transcript added")
+            return
+        }
+
+        withActiveBrainAccess {
+            do {
+                guard let brain = activeBrain,
+                      let url = noteURL(for: noteID, in: brain)
+                else {
+                    updateContentFromEditor(Self.markdownByAppendingTranscript(transcript, to: content))
+                    saveCurrentNote(statusText: "Voice transcript added")
+                    return
+                }
+
+                var note = try readNote(from: url)
+                note = Note(
+                    id: note.id,
+                    title: note.title,
+                    content: Self.markdownByAppendingTranscript(transcript, to: note.content),
+                    createdAt: note.createdAt,
+                    updatedAt: Date()
+                )
+                try writeMarkdownNote(note, to: url)
+                try noteIdentityDatabase?.upsert(
+                    noteID: note.id,
+                    title: note.title,
+                    fileName: relativeNoteFileName(for: url, in: brain),
+                    updatedAt: note.updatedAt
+                )
+                try loadNotes()
+                try syncBrainMetadata()
+                scheduleLiveHomePageCompilation(delay: Self.homeCompilationAfterAutosaveNanoseconds)
+                markUnreadVoiceInsert(for: note.id)
+                let cleanTitle = noteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                status = "Voice transcript added to \(cleanTitle.isEmpty ? note.title : cleanTitle)"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    private func markUnreadVoiceInsert(for noteID: Note.ID) {
+        guard noteID != currentNoteID else { return }
+        unreadVoiceInsertNoteIDs.insert(noteID)
+    }
+
+    private func clearUnreadVoiceInsert(for noteID: Note.ID) {
+        unreadVoiceInsertNoteIDs.remove(noteID)
+    }
+
+    private static func markdownByAppendingTranscript(_ transcript: String, to markdown: String) -> String {
+        let separator: String
+        if markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            separator = ""
+        } else if markdown.hasSuffix("\n\n") {
+            separator = ""
+        } else if markdown.hasSuffix("\n") {
+            separator = "\n"
+        } else {
+            separator = "\n\n"
+        }
+        return markdown + separator + transcript + "\n"
+    }
+
+    private static func normalizedVoiceTranscript(_ transcript: String) -> String {
+        transcript
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func ensureWhisperSmallModelInstalledForCurrentUser(reportReadyStatus: Bool = true) async {
+        if case .ready = whisperSmallModelInstallState {
+            return
+        }
+
+        if let installTask = whisperSmallModelInstallTask {
+            if reportReadyStatus {
+                status = "Installing local Whisper small model"
+            }
+            do {
+                let modelURL = try await installTask.value
+                whisperSmallModelInstallState = .ready(modelURL.path)
+                if reportReadyStatus {
+                    status = "Local Whisper small model ready"
+                }
+            } catch {
+                let message = error.localizedDescription
+                whisperSmallModelInstallState = .failed(message)
+                status = "Whisper small install failed: \(message)"
+            }
+            return
+        }
+
+        whisperSmallModelInstallState = .checking
+        if reportReadyStatus {
+            status = "Checking local Whisper small model"
+        }
+
+        do {
+            whisperSmallModelInstallState = .installing
+            if reportReadyStatus {
+                status = "Installing local Whisper small model"
+            }
+
+            let installTask = Task {
+                try await WhisperSmallModelInstaller.ensureInstalled()
+            }
+            whisperSmallModelInstallTask = installTask
+            let modelURL = try await installTask.value
+            whisperSmallModelInstallTask = nil
+            whisperSmallModelInstallState = .ready(modelURL.path)
+            if reportReadyStatus {
+                status = "Local Whisper small model ready"
+            }
+        } catch {
+            whisperSmallModelInstallTask = nil
+            let message = error.localizedDescription
+            whisperSmallModelInstallState = .failed(message)
+            status = "Whisper small install failed: \(message)"
+        }
+    }
+
     func exitAssistantConversation() {
         assistantConversationResponse = nil
         assistantConversationMemory.clear()
@@ -2623,6 +3576,7 @@ final class BrainStore: ObservableObject {
         withActiveBrainAccess {
             do {
                 let deletedCurrentNote = currentNoteID == id
+                clearUnreadVoiceInsert(for: id)
                 try learnFromDeletionIfNeeded(noteID: id)
                 if let noteURL = noteURL(for: id), FileManager.default.fileExists(atPath: noteURL.path) {
                     try FileManager.default.removeItem(at: noteURL)
@@ -10774,6 +11728,597 @@ private struct MarkdownExportHTMLBuilder {
 
     private func escapeAttribute(_ text: String) -> String {
         escapeHTML(text).replacingOccurrences(of: "'", with: "&#39;")
+    }
+}
+
+private enum WhisperSmallModelInstaller {
+    private static let fileName = "ggml-small.bin"
+    private static let minimumUsableByteCount: UInt64 = 450_000_000
+    private static let downloadURL = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin")!
+
+    static func ensureInstalled() async throws -> URL {
+        let targetURL = try modelFileURL()
+        if isUsableModel(at: targetURL) {
+            return targetURL
+        }
+
+        if let bundledURL = bundledModelURL() {
+            try installModel(from: bundledURL, to: targetURL)
+            if isUsableModel(at: targetURL) {
+                return targetURL
+            }
+        }
+
+        let (temporaryURL, response) = try await URLSession.shared.download(from: downloadURL)
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200..<300).contains(httpResponse.statusCode) {
+            throw WhisperModelInstallError.downloadFailed(statusCode: httpResponse.statusCode)
+        }
+
+        try installModel(from: temporaryURL, to: targetURL)
+        guard isUsableModel(at: targetURL) else {
+            throw WhisperModelInstallError.invalidModel
+        }
+        return targetURL
+    }
+
+    static func installedModelFileURL() throws -> URL {
+        let targetURL = try modelFileURL()
+        guard isUsableModel(at: targetURL) else {
+            throw WhisperModelInstallError.invalidModel
+        }
+        return targetURL
+    }
+
+    private static func modelFileURL() throws -> URL {
+        let fileManager = FileManager.default
+        guard let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            throw WhisperModelInstallError.missingApplicationSupportDirectory
+        }
+
+        let directoryURL = applicationSupportURL
+            .appendingPathComponent("Zirn", isDirectory: true)
+            .appendingPathComponent("Whisper", isDirectory: true)
+        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        return directoryURL.appendingPathComponent(fileName)
+    }
+
+    private static func bundledModelURL() -> URL? {
+        Bundle.main.url(forResource: "ggml-small", withExtension: "bin")
+            ?? Bundle.main.url(forResource: fileName, withExtension: nil)
+    }
+
+    private static func installModel(from sourceURL: URL, to targetURL: URL) throws {
+        let fileManager = FileManager.default
+        let directoryURL = targetURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+
+        let stagingURL = directoryURL.appendingPathComponent(".\(UUID().uuidString)-\(fileName)")
+        if fileManager.fileExists(atPath: stagingURL.path) {
+            try fileManager.removeItem(at: stagingURL)
+        }
+        try fileManager.copyItem(at: sourceURL, to: stagingURL)
+
+        guard isUsableModel(at: stagingURL) else {
+            try? fileManager.removeItem(at: stagingURL)
+            throw WhisperModelInstallError.invalidModel
+        }
+
+        if fileManager.fileExists(atPath: targetURL.path) {
+            try fileManager.removeItem(at: targetURL)
+        }
+        try fileManager.moveItem(at: stagingURL, to: targetURL)
+    }
+
+    private static func isUsableModel(at url: URL) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let byteCount = attributes[.size] as? NSNumber
+        else {
+            return false
+        }
+        return byteCount.uint64Value >= minimumUsableByteCount
+    }
+}
+
+private final class VoiceTranscriptionController: NSObject, SCStreamOutput, SCStreamDelegate {
+    private let audioEngine = AVAudioEngine()
+    private let source: VoiceAudioSource
+    private var recordingFile: AVAudioFile?
+    private var recordingURL: URL?
+    private var latestTranscript = ""
+    private var isPaused = false
+    private var consecutiveSpeechFrames = 0
+    private var consecutiveQuietFrames = 0
+    private var isGateOpen = false
+    private var finishTask: Task<String, Never>?
+    private var systemAudioStream: SCStream?
+    private let systemAudioQueue = DispatchQueue(label: "noortech.Zirn.system-audio")
+    private let processLock = NSLock()
+    private var activeProcess: Process?
+
+    private let onTranscript: (String) -> Void
+    private let onUserSpeechActivityChanged: (Bool) -> Void
+    private let onError: (Error) -> Void
+
+    var transcript: String {
+        latestTranscript
+    }
+
+    init(
+        source: VoiceAudioSource,
+        onTranscript: @escaping (String) -> Void,
+        onUserSpeechActivityChanged: @escaping (Bool) -> Void,
+        onError: @escaping (Error) -> Void
+    ) {
+        self.source = source
+        self.onTranscript = onTranscript
+        self.onUserSpeechActivityChanged = onUserSpeechActivityChanged
+        self.onError = onError
+        super.init()
+    }
+
+    static func requestSpeechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
+        .authorized
+    }
+
+    func start() async throws {
+        switch source {
+        case .microphone:
+            try startMicrophoneRecordingSession()
+        case .systemAudio:
+            try await startSystemAudioRecordingSession()
+        }
+    }
+
+    func pause() {
+        isPaused = true
+        onUserSpeechActivityChanged(false)
+    }
+
+    func resume() throws {
+        isPaused = false
+    }
+
+    func stop() {
+        cancel()
+    }
+
+    func cancel() {
+        isPaused = false
+        finishTask?.cancel()
+        finishTask = nil
+        terminateActiveProcess()
+        stopAudioCapture()
+        recordingFile = nil
+        resetSpeechActivity()
+        onUserSpeechActivityChanged(false)
+    }
+
+    func finish() async -> String {
+        isPaused = true
+        onUserSpeechActivityChanged(false)
+        stopAudioCapture()
+        recordingFile = nil
+
+        guard let recordingURL else { return latestTranscript }
+        let task = Task<String, Never> { [weak self] in
+            guard let self else { return "" }
+            do {
+                try Task.checkCancellation()
+                let wavURL = try await Self.convertRecordingToWhisperWAV(recordingURL)
+                try Task.checkCancellation()
+                let modelURL = try WhisperSmallModelInstaller.installedModelFileURL()
+                let transcript = try await self.runWhisperCLI(audioURL: wavURL, modelURL: modelURL)
+                return transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            } catch is CancellationError {
+                return ""
+            } catch {
+                await MainActor.run {
+                    self.onError(error)
+                }
+                return ""
+            }
+        }
+        finishTask = task
+        let transcript = await task.value
+        finishTask = nil
+        latestTranscript = transcript
+        if !transcript.isEmpty {
+            onTranscript(transcript)
+        }
+        try? FileManager.default.removeItem(at: recordingURL)
+        return transcript
+    }
+
+    private func startMicrophoneRecordingSession() throws {
+        cancel()
+
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            break
+        case .notDetermined:
+            let granted = requestMicrophoneAccessSynchronously()
+            guard granted else { throw VoiceTranscriptionError.microphoneNotAuthorized }
+        default:
+            throw VoiceTranscriptionError.microphoneNotAuthorized
+        }
+
+        let inputNode = audioEngine.inputNode
+        if #available(macOS 13.0, *) {
+            try? inputNode.setVoiceProcessingEnabled(false)
+        }
+
+        let format = inputNode.outputFormat(forBus: 0)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("zirn-voice-\(UUID().uuidString)")
+            .appendingPathExtension("caf")
+        recordingURL = url
+        recordingFile = try AVAudioFile(forWriting: url, settings: format.settings)
+
+        inputNode.removeTap(onBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+            self?.handleAudioBuffer(buffer)
+        }
+
+        audioEngine.prepare()
+        try audioEngine.start()
+    }
+
+    private func startSystemAudioRecordingSession() async throws {
+        cancel()
+
+        guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
+            throw VoiceTranscriptionError.screenCaptureNotAuthorized
+        }
+
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let display = content.displays.first else {
+            throw VoiceTranscriptionError.systemAudioUnavailable
+        }
+
+        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+        let configuration = SCStreamConfiguration()
+        configuration.capturesAudio = true
+        configuration.excludesCurrentProcessAudio = true
+        configuration.sampleRate = 48_000
+        configuration.channelCount = 1
+        configuration.width = 2
+        configuration.height = 2
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        configuration.showsCursor = false
+        configuration.queueDepth = 3
+
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        )
+        guard let format else {
+            throw VoiceTranscriptionError.systemAudioUnavailable
+        }
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("zirn-system-audio-\(UUID().uuidString)")
+            .appendingPathExtension("caf")
+        recordingURL = url
+        recordingFile = try AVAudioFile(forWriting: url, settings: format.settings)
+
+        let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
+        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: systemAudioQueue)
+        try await stream.startCapture()
+        systemAudioStream = stream
+    }
+
+    private func stopAudioCapture() {
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
+        audioEngine.inputNode.removeTap(onBus: 0)
+
+        if let systemAudioStream {
+            let stream = systemAudioStream
+            self.systemAudioStream = nil
+            Task {
+                try? await stream.stopCapture()
+            }
+        }
+    }
+
+    private func resetSpeechActivity() {
+        consecutiveSpeechFrames = 0
+        consecutiveQuietFrames = 0
+        isGateOpen = false
+    }
+
+    private func handleAudioBuffer(_ buffer: AVAudioPCMBuffer) {
+        guard !isPaused else { return }
+        do {
+            try recordingFile?.write(from: buffer)
+        } catch {
+            onError(error)
+        }
+
+        let decibels = averagePowerDecibels(buffer)
+        let likelyUserSpeech = decibels > -34
+
+        if likelyUserSpeech {
+            consecutiveSpeechFrames += 1
+            consecutiveQuietFrames = 0
+        } else {
+            consecutiveQuietFrames += 1
+            consecutiveSpeechFrames = 0
+        }
+
+        if consecutiveSpeechFrames >= 2 {
+            isGateOpen = true
+        } else if consecutiveQuietFrames >= 14 {
+            isGateOpen = false
+        }
+
+        onUserSpeechActivityChanged(isGateOpen)
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .audio, !isPaused else { return }
+        guard let buffer = pcmBuffer(from: sampleBuffer) else { return }
+        handleAudioBuffer(buffer)
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        onError(error)
+    }
+
+    private func pcmBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
+        guard let formatDescription = sampleBuffer.formatDescription else { return nil }
+        let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)?.pointee
+        guard let asbd else { return nil }
+
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: asbd.mSampleRate,
+            channels: AVAudioChannelCount(max(1, asbd.mChannelsPerFrame)),
+            interleaved: false
+        ) else {
+            return nil
+        }
+
+        let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frameCount > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount)
+        else {
+            return nil
+        }
+        buffer.frameLength = frameCount
+
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return nil }
+        var length = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        let status = CMBlockBufferGetDataPointer(
+            blockBuffer,
+            atOffset: 0,
+            lengthAtOffsetOut: nil,
+            totalLengthOut: &length,
+            dataPointerOut: &dataPointer
+        )
+        guard status == kCMBlockBufferNoErr, let dataPointer, length > 0 else { return nil }
+
+        if asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0 {
+            dataPointer.withMemoryRebound(to: Float.self, capacity: length / MemoryLayout<Float>.size) { floatPointer in
+                if format.channelCount == 1, let channel = buffer.floatChannelData?[0] {
+                    let sampleCount = Int(frameCount)
+                    for index in 0..<sampleCount {
+                        channel[index] = floatPointer[index]
+                    }
+                } else if let channels = buffer.floatChannelData {
+                    let channelCount = Int(format.channelCount)
+                    let sampleCount = Int(frameCount)
+                    for frame in 0..<sampleCount {
+                        for channel in 0..<channelCount {
+                            channels[channel][frame] = floatPointer[frame * channelCount + channel]
+                        }
+                    }
+                }
+            }
+            return buffer
+        }
+
+        return nil
+    }
+
+    private static func convertRecordingToWhisperWAV(_ recordingURL: URL) async throws -> URL {
+        let wavURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("zirn-whisper-\(UUID().uuidString)")
+            .appendingPathExtension("wav")
+        _ = try await runProcess(
+            executableURL: URL(fileURLWithPath: "/usr/bin/afconvert"),
+            arguments: [
+                "-f", "WAVE",
+                "-d", "LEI16@16000",
+                "-c", "1",
+                recordingURL.path,
+                wavURL.path
+            ],
+            processStore: nil
+        )
+        return wavURL
+    }
+
+    private func runWhisperCLI(audioURL: URL, modelURL: URL) async throws -> String {
+        let executableURL = try Self.whisperCLIURL()
+        let outputBaseURL = audioURL.deletingPathExtension()
+        let output = try await Self.runProcess(
+            executableURL: executableURL,
+            arguments: [
+                "-m", modelURL.path,
+                "-f", audioURL.path,
+                "--no-timestamps",
+                "--no-gpu",
+                "--output-txt",
+                "--output-file", outputBaseURL.path,
+                "--language", "en"
+            ],
+            processStore: { [weak self] process in
+                self?.setActiveProcess(process)
+            }
+        )
+
+        let transcriptURL = outputBaseURL.appendingPathExtension("txt")
+        if let transcript = try? String(contentsOf: transcriptURL, encoding: .utf8) {
+            try? FileManager.default.removeItem(at: transcriptURL)
+            try? FileManager.default.removeItem(at: audioURL)
+            return transcript
+        }
+
+        try? FileManager.default.removeItem(at: audioURL)
+        return output
+    }
+
+    private static func whisperCLIURL() throws -> URL {
+        let candidates = [
+            Bundle.main.url(forResource: "WhisperRuntime/bin/whisper-cli", withExtension: nil),
+            Bundle.main.url(forResource: "whisper-cli", withExtension: nil),
+            URL(fileURLWithPath: "/opt/homebrew/bin/whisper-cli"),
+            URL(fileURLWithPath: "/usr/local/bin/whisper-cli"),
+            URL(fileURLWithPath: "/tmp/zirn-whisper.cpp/build/bin/whisper-cli")
+        ].compactMap { $0 }
+
+        if let candidate = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) {
+            return candidate
+        }
+
+        throw VoiceTranscriptionError.whisperCLIMissing
+    }
+
+    private static func runProcess(
+        executableURL: URL,
+        arguments: [String],
+        processStore: ((Process) -> Void)?
+    ) async throws -> String {
+        try await withTaskCancellationHandler {
+            try await Task.detached(priority: .userInitiated) {
+                let process = Process()
+                process.executableURL = executableURL
+                process.arguments = arguments
+
+                let outputPipe = Pipe()
+                let errorPipe = Pipe()
+                process.standardOutput = outputPipe
+                process.standardError = errorPipe
+                processStore?(process)
+
+                try process.run()
+                process.waitUntilExit()
+
+                let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let errorOutput = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+                if Task.isCancelled {
+                    throw CancellationError()
+                }
+
+                guard process.terminationStatus == 0 else {
+                    if process.terminationReason == .uncaughtSignal {
+                        throw CancellationError()
+                    }
+                    throw VoiceTranscriptionError.processFailed(errorOutput.isEmpty ? output : errorOutput)
+                }
+                return output
+            }.value
+        } onCancel: {
+            // Termination is handled via processStore / activeProcess.
+        }
+    }
+
+    private func setActiveProcess(_ process: Process?) {
+        processLock.lock()
+        activeProcess = process
+        processLock.unlock()
+    }
+
+    private func terminateActiveProcess() {
+        processLock.lock()
+        let process = activeProcess
+        activeProcess = nil
+        processLock.unlock()
+        process?.terminate()
+    }
+
+    private func averagePowerDecibels(_ buffer: AVAudioPCMBuffer) -> Float {
+        guard let channelData = buffer.floatChannelData else { return -100 }
+        let channelCount = Int(buffer.format.channelCount)
+        let frameLength = Int(buffer.frameLength)
+        guard channelCount > 0, frameLength > 0 else { return -100 }
+
+        var sum: Float = 0
+        for channel in 0..<channelCount {
+            let samples = channelData[channel]
+            for frame in 0..<frameLength {
+                let sample = samples[frame]
+                sum += sample * sample
+            }
+        }
+
+        let mean = sum / Float(channelCount * frameLength)
+        guard mean > 0 else { return -100 }
+        return 10 * log10(mean)
+    }
+
+    private func requestMicrophoneAccessSynchronously() -> Bool {
+        let semaphore = DispatchSemaphore(value: 0)
+        var granted = false
+        AVCaptureDevice.requestAccess(for: .audio) { allowed in
+            granted = allowed
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return granted
+    }
+}
+
+private enum VoiceTranscriptionError: LocalizedError {
+    case speechRecognitionNotAuthorized
+    case microphoneNotAuthorized
+    case screenCaptureNotAuthorized
+    case systemAudioUnavailable
+    case speechRecognizerUnavailable
+    case whisperCLIMissing
+    case processFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .speechRecognitionNotAuthorized:
+            return "Speech recognition permission is required."
+        case .microphoneNotAuthorized:
+            return "Microphone permission is required."
+        case .screenCaptureNotAuthorized:
+            return "Screen Recording permission is required for on-screen audio."
+        case .systemAudioUnavailable:
+            return "On-screen audio capture is unavailable right now."
+        case .speechRecognizerUnavailable:
+            return "Speech recognition is not available right now."
+        case .whisperCLIMissing:
+            return "Whisper decoder is missing. Bundle whisper-cli or install whisper.cpp."
+        case .processFailed(let message):
+            return message.isEmpty ? "Whisper transcription failed." : message
+        }
+    }
+}
+
+private enum WhisperModelInstallError: LocalizedError {
+    case missingApplicationSupportDirectory
+    case downloadFailed(statusCode: Int)
+    case invalidModel
+
+    var errorDescription: String? {
+        switch self {
+        case .missingApplicationSupportDirectory:
+            return "Could not find Application Support."
+        case .downloadFailed(let statusCode):
+            return "Download failed with HTTP \(statusCode)."
+        case .invalidModel:
+            return "Downloaded model file is incomplete."
+        }
     }
 }
 

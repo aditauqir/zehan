@@ -8,6 +8,12 @@
 	<string>Zirn uses your calendar to recommend the page most relevant to your next test, class, or event.</string>
 	<key>NSCalendarsUsageDescription</key>
 	<string>Zirn uses your calendar to recommend the page most relevant to your next test, class, or event.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Zirn uses your microphone to turn your voice into Markdown and Zirn Chat messages.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Zirn captures on-screen audio so you can transcribe system playback into Markdown and Zirn Chat.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Zirn uses speech recognition to transcribe your voice locally while you dictate or talk to Zirn Chat.</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUScheduledCheckInterval</key>

@@ -60,6 +60,7 @@
 				B4CAC5C02FB773A9001D6EDD /* Sources */,
 				B4CAC5C12FB773A9001D6EDD /* Frameworks */,
 				B4CAC5C22FB773A9001D6EDD /* Resources */,
+				B4F00D012FDF000100000001 /* Sign Whisper Runtime */,
 			);
 			buildRules = (
 			);
@@ -122,6 +123,30 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		B4F00D012FDF000100000001 /* Sign Whisper Runtime */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Zehan/WhisperRuntime/bin/whisper-cli",
+			);
+			name = "Sign Whisper Runtime";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/WhisperRuntime",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nSRC_CLI=\"$SRCROOT/Zehan/WhisperRuntime/bin/whisper-cli\"\nRUNTIME_DIR=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/WhisperRuntime\"\nif [ -f \"$SRC_CLI\" ]; then\n  /bin/rm -rf \"$RUNTIME_DIR\"\n  /bin/mkdir -p \"$RUNTIME_DIR/bin\"\n  /usr/bin/ditto \"$SRC_CLI\" \"$RUNTIME_DIR/bin/whisper-cli\"\n  chmod 755 \"$RUNTIME_DIR/bin/whisper-cli\"\n  SIGN_IDENTITY=\"${EXPANDED_CODE_SIGN_IDENTITY:-}\"\n  if [ -z \"$SIGN_IDENTITY\" ]; then\n    SIGN_IDENTITY=\"-\"\n  fi\n  /usr/bin/codesign --force --sign \"$SIGN_IDENTITY\" --timestamp=none \"$RUNTIME_DIR/bin/whisper-cli\"\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		B4CAC5C02FB773A9001D6EDD /* Sources */ = {
@@ -275,7 +300,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.4.6;
+				MARKETING_VERSION = 1.5;
 				PRODUCT_BUNDLE_IDENTIFIER = noortech.Zirn;
 				PRODUCT_NAME = Zirn;
 				REGISTER_APP_GROUPS = YES;
@@ -311,7 +336,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.4.6;
+				MARKETING_VERSION = 1.5;
 				PRODUCT_BUNDLE_IDENTIFIER = noortech.Zirn;
 				PRODUCT_NAME = Zirn;
 				REGISTER_APP_GROUPS = YES;

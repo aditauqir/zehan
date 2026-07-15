@@ -6,6 +6,8 @@
 //
 
 import AppKit
+import AVFoundation
+import Speech
 import SwiftUI
 import UniformTypeIdentifiers
 import WebKit
@@ -53,6 +55,33 @@ struct ContentView: View {
                 .frame(width: 460)
                 .presentationBackground(.regularMaterial)
         }
+        .background(
+            VoiceShortcutMonitor {
+                handleVoiceShortcut()
+            }
+        )
+    }
+
+    private func handleVoiceShortcut() {
+        guard store.activeBrain != nil else {
+            store.status = "Open or create a brain before starting voice capture"
+            return
+        }
+
+        if store.isShowingHelpDesk {
+            store.toggleVoiceCapture(target: .helpDesk)
+            return
+        }
+
+        guard !store.isViewingGeneratedPage,
+              !store.isShowingHomePage,
+              store.currentHighlightSummary == nil
+        else {
+            store.status = "Voice capture is available in the editor and Zirn Chat"
+            return
+        }
+
+        store.toggleVoiceCapture(target: .editor)
     }
 }
 
@@ -313,6 +342,11 @@ private struct SplashActionButton: View {
     }
 }
 
+private struct VoiceNavigationRoute: Equatable {
+    let surface: String
+    let id: String
+}
+
 private struct WorkspaceView: View {
     @ObservedObject var store: BrainStore
     @State private var isEditingMarkdown = false
@@ -350,6 +384,46 @@ private struct WorkspaceView: View {
         else { return nil }
 
         return store.currentNoteID ?? store.selectedNoteID
+    }
+
+    private var voiceNavigationRoute: VoiceNavigationRoute {
+        if store.isShowingHelpDesk {
+            return VoiceNavigationRoute(surface: "helpDesk", id: store.selectedHelpDeskConversationID ?? "new")
+        }
+
+        if store.isShowingHomePage {
+            return VoiceNavigationRoute(surface: "home", id: store.latestHomeSummary?.id ?? "home")
+        }
+
+        if let summary = store.currentHighlightSummary {
+            return VoiceNavigationRoute(surface: "summary", id: summary.id)
+        }
+
+        if isEditorFlashcardOpen, let noteID = editorFlashcardNoteID {
+            return VoiceNavigationRoute(surface: "flashcards", id: noteID)
+        }
+
+        return VoiceNavigationRoute(surface: "editor", id: store.currentNoteID ?? store.selectedNoteID ?? "draft")
+    }
+
+    private var voiceNavigationTitle: String {
+        switch voiceNavigationRoute.surface {
+        case "helpDesk":
+            return "Zirn Chat"
+        case "home":
+            return "Home"
+        case "summary":
+            return "highlight summary"
+        case "flashcards":
+            return "Idea Flashcards"
+        default:
+            return titleForCurrentVoiceRoute
+        }
+    }
+
+    private var titleForCurrentVoiceRoute: String {
+        let cleanTitle = store.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleanTitle.isEmpty ? "page" : cleanTitle
     }
 
     var body: some View {
@@ -524,11 +598,37 @@ private struct WorkspaceView: View {
         .animation(.easeInOut(duration: 0.18), value: store.status)
         .animation(.easeInOut(duration: 0.2), value: store.isGeneratingAssistantResponse)
         .animation(.easeInOut(duration: 0.16), value: isSearchingSidebar)
+        .alert(
+            "Add voice clipping?",
+            isPresented: Binding(
+                get: { store.pendingVoiceClippingConfirmation != nil },
+                set: { isPresented in
+                    if !isPresented, store.pendingVoiceClippingConfirmation != nil {
+                        store.discardVoiceClipping()
+                    }
+                }
+            )
+        ) {
+            Button("Yes") {
+                store.confirmAddVoiceClipping()
+            }
+            Button("No", role: .cancel) {
+                store.discardVoiceClipping()
+            }
+        } message: {
+            Text("Recording stopped because you switched to \(store.pendingVoiceClippingConfirmation?.destinationTitle ?? "another page"). Add this voice clipping with local Whisper small?")
+        }
         .onChange(of: store.isShowingPageSearch) { _, shouldFocusSearch in
             guard shouldFocusSearch else { return }
             isSidebarSearchActive = true
             isSidebarSearchFocused = true
             store.isShowingPageSearch = false
+        }
+        .onChange(of: voiceNavigationRoute) { oldRoute, newRoute in
+            guard oldRoute != newRoute, store.activeVoiceCaptureTarget != nil else { return }
+            withAnimation(.easeInOut(duration: 0.18)) {
+                store.stopVoiceCaptureForNavigation(destinationTitle: voiceNavigationTitle)
+            }
         }
         .onChange(of: isReadingMode) { _, isReading in
             if isReading {
@@ -723,13 +823,65 @@ private struct WorkspaceView: View {
                 }
                 .background(Color(nsColor: .textBackgroundColor))
 
-                HStack(alignment: .bottom, spacing: 10) {
+                HStack(alignment: .center, spacing: 10) {
                     if !isReadingMode && !store.isViewingGeneratedPage && !isEditorFlashcardOpen && !store.isShowingHelpDesk {
-                        Color.clear
-                            .frame(width: readingToggleSize, height: readingToggleSize)
-                            .accessibilityHidden(true)
+                        VoiceCaptureButtonWithSourceChooser(
+                            isActive: store.activeVoiceCaptureTarget == .editor
+                                || store.pendingVoiceAudioSourceSelection == .editor
+                                || (!store.isShowingHelpDesk && store.isFinalizingVoiceTranscript)
+                                || (!store.isShowingHelpDesk && store.voiceTranscriptionNotice != nil
+                                    && store.pendingVoiceTranscriptDraft?.target != .editor),
+                            isChooserPresented: store.pendingVoiceAudioSourceSelection == .editor,
+                            liveDialogue: VoiceLiveDialogueContent(
+                                transcript: store.voiceTranscriptionNotice ?? store.liveVoiceTranscript,
+                                isReceivingAudio: store.isVoiceInputLikelyUserSpeech,
+                                isTranscribing: store.isFinalizingVoiceTranscript
+                                    && store.pendingVoiceTranscriptDraft?.target != .editor,
+                                isPaused: store.isVoiceCapturePaused,
+                                progress: store.voiceTranscriptionProgress,
+                                isNotice: store.voiceTranscriptionNotice != nil
+                                    && store.pendingVoiceTranscriptDraft?.target != .editor,
+                                audioSource: store.activeVoiceAudioSource,
+                                isListening: store.activeVoiceCaptureTarget == .editor,
+                                stopRecording: {
+                                    withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
+                                        store.stopVoiceCapture()
+                                    }
+                                },
+                                togglePaused: {
+                                    withAnimation(.easeInOut(duration: 0.18)) {
+                                        store.toggleVoiceCapturePaused()
+                                    }
+                                },
+                                cancelTranscription: {
+                                    withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
+                                        store.cancelVoiceCapture()
+                                    }
+                                },
+                                dismissNotice: {
+                                    withAnimation(.easeOut(duration: 0.16)) {
+                                        store.dismissVoiceTranscriptionNotice()
+                                    }
+                                }
+                            ),
+                            help: "Dictate into Markdown",
+                            action: {
+                                store.toggleVoiceCapture(target: .editor)
+                            },
+                            selectSource: { source in
+                                withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+                                    store.selectVoiceAudioSource(source, for: .editor)
+                                }
+                            },
+                            dismissSourceChooser: {
+                                withAnimation(.easeOut(duration: 0.16)) {
+                                    store.dismissVoiceAudioSourceSelection()
+                                }
+                            }
+                        )
 
                         AssistantFloatingPill(store: store)
+                            .zIndex(1)
                             .transition(.scale(scale: 0.96).combined(with: .opacity))
                             .onPreferenceChange(PillHeightPreferenceKey.self) { height in
                                 promptPillHeight = max(38, height)
@@ -744,13 +896,13 @@ private struct WorkspaceView: View {
                 .frame(maxWidth: .infinity, alignment: .center)
 
             }
-        .onChange(of: editorFlashcardNoteID) { _, newID in
-            if newID == nil {
-                isEditorFlashcardOpen = false
-            } else if let newID, isEditorFlashcardOpen {
-                store.requestPageFlashcards(noteID: newID)
+            .onChange(of: editorFlashcardNoteID) { _, newID in
+                if newID == nil {
+                    isEditorFlashcardOpen = false
+                } else if let newID, isEditorFlashcardOpen {
+                    store.requestPageFlashcards(noteID: newID)
+                }
             }
-        }
     }
 
     private var shouldShowNewPageHint: Bool {
@@ -769,6 +921,7 @@ private struct WorkspaceView: View {
                 NoteSidebarRow(
                     note: note,
                     isSelected: !store.isViewingGeneratedPage && (store.selectedNoteID == note.id || store.currentNoteID == note.id),
+                    hasUnreadVoiceInsert: store.unreadVoiceInsertNoteIDs.contains(note.id),
                     open: {
                         withAnimation(.easeInOut(duration: 0.18)) {
                             isEditingMarkdown = false
@@ -831,6 +984,25 @@ private struct WorkspaceView: View {
     private var renderedPageInputAvoidanceInset: CGFloat {
         guard !isReadingMode, !store.isViewingGeneratedPage else { return 0 }
         return promptPillHeight * 1.09
+    }
+
+    private func handleVoiceShortcut() {
+        if store.isShowingHelpDesk {
+            store.toggleVoiceCapture(target: .helpDesk)
+            return
+        }
+
+        guard !isReadingMode,
+              !store.isViewingGeneratedPage,
+              !isEditorFlashcardOpen,
+              !store.isShowingHomePage,
+              store.currentHighlightSummary == nil
+        else {
+            store.status = "Voice capture is available in the editor and Zirn Chat"
+            return
+        }
+
+        store.toggleVoiceCapture(target: .editor)
     }
 
     private func handleDocumentDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -2492,6 +2664,7 @@ private struct GraphNodeView: View {
 private struct NoteSidebarRow: View {
     let note: NoteSummary
     let isSelected: Bool
+    var hasUnreadVoiceInsert: Bool = false
     let open: () -> Void
     let rename: () -> Void
     let nutshell: () -> Void
@@ -2499,6 +2672,8 @@ private struct NoteSidebarRow: View {
 
     @State private var isHovered = false
     @State private var isConfirmingDelete = false
+
+    private static let unreadInsertDotColor = Color(red: 0.78, green: 0.52, blue: 0.18)
 
     var body: some View {
         ZStack(alignment: .trailing) {
@@ -2510,6 +2685,13 @@ private struct NoteSidebarRow: View {
                 Text(note.title)
                     .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
                     .lineLimit(1)
+
+                if hasUnreadVoiceInsert {
+                    Circle()
+                        .fill(Self.unreadInsertDotColor)
+                        .frame(width: 7, height: 7)
+                        .accessibilityLabel("Unread voice insert")
+                }
 
                 Spacer(minLength: 26)
             }
@@ -3081,6 +3263,1296 @@ private enum HelpDeskComposerMetrics {
     }
 }
 
+private struct VoiceShortcutMonitor: NSViewRepresentable {
+    let onShortcut: () -> Void
+
+    func makeNSView(context: Context) -> VoiceShortcutMonitorView {
+        let view = VoiceShortcutMonitorView()
+        view.onShortcut = onShortcut
+        return view
+    }
+
+    func updateNSView(_ nsView: VoiceShortcutMonitorView, context: Context) {
+        nsView.onShortcut = onShortcut
+    }
+}
+
+private final class VoiceShortcutMonitorView: NSView {
+    var onShortcut: (() -> Void)?
+    private var localMonitor: Any?
+    private var globalMonitor: Any?
+    private var isShortcutPressed = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            stopMonitoring()
+        } else {
+            startMonitoring()
+        }
+    }
+
+    deinit {
+        stopMonitoring()
+    }
+
+    private func startMonitoring() {
+        guard localMonitor == nil, globalMonitor == nil else { return }
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
+            self?.handle(event)
+            return event
+        }
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
+            self?.handle(event)
+        }
+    }
+
+    private func stopMonitoring() {
+        if let localMonitor {
+            NSEvent.removeMonitor(localMonitor)
+        }
+        if let globalMonitor {
+            NSEvent.removeMonitor(globalMonitor)
+        }
+        localMonitor = nil
+        globalMonitor = nil
+        isShortcutPressed = false
+    }
+
+    private func handle(_ event: NSEvent) {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let isPressed = flags.contains(.control) && flags.contains(.function)
+        if isPressed, !isShortcutPressed {
+            isShortcutPressed = true
+            onShortcut?()
+        } else if !isPressed {
+            isShortcutPressed = false
+        }
+    }
+}
+
+/// Caps transcript preview to ~10 lines; scrolls when content is longer so the card does not grow forever.
+struct VoiceTranscriptScrollableText: View {
+    let text: String
+    var foreground: Color = .primary.opacity(0.92)
+
+    private static let fontSize: CGFloat = 13
+    private static let maxLines: CGFloat = 10
+
+    private var maxHeight: CGFloat {
+        let font = NSFont.systemFont(ofSize: Self.fontSize)
+        let lineHeight = ceil(font.ascender - font.descender + max(0, font.leading))
+        return lineHeight * Self.maxLines
+    }
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            Text(text)
+                .font(.system(size: Self.fontSize, weight: .regular))
+                .foregroundStyle(foreground)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .frame(maxHeight: maxHeight, alignment: .topLeading)
+        // Shrink-wrap to content when under the cap; only lock height once scrolling is needed.
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+struct VoiceTranscriptRefineSkeleton: View {
+    enum Style {
+        case light
+        case dark
+    }
+
+    var style: Style = .light
+
+    private let barFractions: [CGFloat] = [0.92, 0.78, 0.86, 0.64, 0.74]
+    private let loopDuration: TimeInterval = 1.85
+    private let barHeight: CGFloat = 12
+    private let barSpacing: CGFloat = 10
+
+    private var baseFill: Color {
+        switch style {
+        case .light:
+            return Color.primary.opacity(0.10)
+        case .dark:
+            return Color.white.opacity(0.12)
+        }
+    }
+
+    private var highlight: Color {
+        switch style {
+        case .light:
+            return Color.primary.opacity(0.22)
+        case .dark:
+            return Color.white.opacity(0.28)
+        }
+    }
+
+    private var skeletonHeight: CGFloat {
+        CGFloat(barFractions.count) * barHeight
+            + CGFloat(max(0, barFractions.count - 1)) * barSpacing
+    }
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+            let raw = timeline.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: loopDuration) / loopDuration
+            // Slow ease-in loop traveling top → bottom.
+            let progress = 1 - pow(1 - raw, 2.4)
+
+            GeometryReader { proxy in
+                let bandHeight = max(44, proxy.size.height * 0.52)
+                let travel = proxy.size.height + bandHeight * 2
+                let offsetY = -bandHeight + travel * CGFloat(progress)
+
+                ZStack(alignment: .topLeading) {
+                    skeletonBars(width: proxy.size.width)
+                        .foregroundStyle(baseFill)
+
+                    LinearGradient(
+                        stops: [
+                            .init(color: highlight.opacity(0.04), location: 0),
+                            .init(color: highlight.opacity(0.22), location: 0.30),
+                            .init(color: highlight.opacity(0.92), location: 0.50),
+                            .init(color: highlight.opacity(0.22), location: 0.70),
+                            .init(color: highlight.opacity(0.04), location: 1)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(width: proxy.size.width, height: bandHeight)
+                    .offset(y: offsetY)
+                    .mask {
+                        skeletonBars(width: proxy.size.width)
+                    }
+                }
+                .frame(width: proxy.size.width, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: skeletonHeight, alignment: .topLeading)
+        .accessibilityLabel("Refining transcript")
+    }
+
+    private func skeletonBars(width: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: barSpacing) {
+            ForEach(Array(barFractions.enumerated()), id: \.offset) { _, fraction in
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .frame(width: max(24, width * fraction), height: barHeight, alignment: .leading)
+            }
+        }
+    }
+}
+
+struct VoiceTranscriptCopyButton: View {
+    enum Style {
+        case light
+        case dark
+    }
+
+    let text: String
+    var style: Style = .light
+    var store: BrainStore?
+
+    @State private var isHovered = false
+    @State private var didCopy = false
+
+    var body: some View {
+        Button {
+            performCopy()
+        } label: {
+            Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(foregroundColor)
+                .frame(width: 28, height: 28, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(didCopy ? "Copied" : "Copy transcript")
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.16)) {
+                isHovered = hovering
+            }
+        }
+    }
+
+    private func performCopy() {
+        // Avoid re-entrancy from rapid double-fires while the tick is showing.
+        guard !didCopy else { return }
+        let wrote: Bool
+        if let store {
+            wrote = store.copyVoiceTranscriptToPasteboard(text)
+        } else {
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            wrote = pasteboard.writeObjects([text as NSString])
+                || pasteboard.setString(text, forType: .string)
+        }
+        guard wrote else { return }
+        withAnimation(.easeInOut(duration: 0.16)) {
+            didCopy = true
+        }
+        Task {
+            try? await Task.sleep(nanoseconds: 1_050_000_000)
+            await MainActor.run {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    didCopy = false
+                }
+            }
+        }
+    }
+
+    private var foregroundColor: Color {
+        switch style {
+        case .light:
+            return .primary.opacity(didCopy ? 0.88 : (isHovered ? 0.78 : 0.54))
+        case .dark:
+            return .white.opacity(didCopy ? 0.94 : (isHovered ? 0.86 : 0.62))
+        }
+    }
+}
+
+/// Plus control that inserts the pending voice transcript (replaces the old Insert chip).
+struct VoiceTranscriptPlusInsertButton: View {
+    enum Style {
+        case light
+        case dark
+    }
+
+    var style: Style = .dark
+    var isDisabled = false
+    let action: () -> Void
+
+    @State private var isHovered = false
+    @State private var pulsePhase = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "plus")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(iconColor)
+                .frame(width: 28, height: 28)
+                .background {
+                    Circle()
+                        .fill(isHovered && !isDisabled ? hoverFill : Color.clear)
+                }
+                .overlay {
+                    if !isHovered && !isDisabled {
+                        Circle()
+                            .stroke(ringColor, lineWidth: 1.1)
+                            .scaleEffect(pulsePhase ? 1.0 : 0.86)
+                            .opacity(pulsePhase ? 0.18 : 0.78)
+                    }
+                }
+                .clipShape(Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.45 : 1)
+        .help("Insert transcript")
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.15).repeatForever(autoreverses: true)) {
+                pulsePhase = true
+            }
+        }
+        .onHover { hovering in
+            guard !isDisabled else {
+                isHovered = false
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isHovered = hovering
+            }
+        }
+    }
+
+    private var iconColor: Color {
+        switch style {
+        case .light:
+            return .primary.opacity(isHovered ? 0.88 : 0.62)
+        case .dark:
+            return .white.opacity(isHovered ? 0.96 : 0.78)
+        }
+    }
+
+    private var hoverFill: Color {
+        switch style {
+        case .light:
+            return .primary.opacity(0.10)
+        case .dark:
+            return .white.opacity(0.22)
+        }
+    }
+
+    private var ringColor: Color {
+        switch style {
+        case .light:
+            return .primary.opacity(0.42)
+        case .dark:
+            return .white.opacity(0.88)
+        }
+    }
+}
+
+struct VoiceTranscriptHistoryIconButton: View {
+    enum Style {
+        case light
+        case dark
+    }
+
+    let systemName: String
+    let help: String
+    var style: Style = .light
+    var isEnabled = true
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(foregroundColor)
+                .frame(width: 28, height: 28)
+                .background {
+                    Circle()
+                        .fill(isHovered && isEnabled ? hoverFill : Color.clear)
+                }
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .help(help)
+        .onHover { hovering in
+            guard isEnabled else {
+                isHovered = false
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.16)) {
+                isHovered = hovering
+            }
+        }
+    }
+
+    private var foregroundColor: Color {
+        switch style {
+        case .light:
+            return .primary.opacity(isEnabled ? (isHovered ? 0.78 : 0.54) : 0.28)
+        case .dark:
+            return .white.opacity(isEnabled ? (isHovered ? 0.86 : 0.62) : 0.28)
+        }
+    }
+
+    private var hoverFill: Color {
+        switch style {
+        case .light:
+            return .primary.opacity(0.08)
+        case .dark:
+            return .white.opacity(0.12)
+        }
+    }
+}
+
+/// Shared review action row: plus | copy | undo | n/total | redo … Refine (right)
+struct VoiceTranscriptReviewActionRow: View {
+    enum Style {
+        case light
+        case dark
+
+        var copyStyle: VoiceTranscriptCopyButton.Style {
+            switch self {
+            case .light: return .light
+            case .dark: return .dark
+            }
+        }
+
+        var plusStyle: VoiceTranscriptPlusInsertButton.Style {
+            switch self {
+            case .light: return .light
+            case .dark: return .dark
+            }
+        }
+
+        var historyStyle: VoiceTranscriptHistoryIconButton.Style {
+            switch self {
+            case .light: return .light
+            case .dark: return .dark
+            }
+        }
+    }
+
+    @ObservedObject var store: BrainStore
+    let draft: VoiceTranscriptDraft
+    var style: Style = .light
+
+    private var isBusy: Bool { store.isEnhancingVoiceTranscript }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            VoiceTranscriptPlusInsertButton(style: style.plusStyle, isDisabled: isBusy) {
+                withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
+                    store.confirmPendingVoiceTranscript()
+                }
+            }
+
+            // Extra gap after plus so it reads apart from the copy / history cluster.
+            HStack(spacing: 6) {
+                VoiceTranscriptCopyButton(text: draft.text, style: style.copyStyle, store: store)
+                    .disabled(isBusy)
+                    .opacity(isBusy ? 0.45 : 1)
+
+                VoiceTranscriptHistoryIconButton(
+                    systemName: "arrow.uturn.backward",
+                    help: "Undo refine",
+                    style: style.historyStyle,
+                    isEnabled: !isBusy && draft.canUndoRevision
+                ) {
+                    store.undoPendingVoiceTranscriptRevision()
+                }
+
+                Text(draft.revisionCounterLabel)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(counterColor)
+                    .frame(minWidth: 28, alignment: .center)
+                    .opacity(isBusy ? 0.45 : 1)
+
+                VoiceTranscriptHistoryIconButton(
+                    systemName: "arrow.uturn.forward",
+                    help: "Redo refine",
+                    style: style.historyStyle,
+                    isEnabled: !isBusy && draft.canRedoRevision
+                ) {
+                    store.redoPendingVoiceTranscriptRevision()
+                }
+            }
+            .padding(.leading, 6)
+
+            Spacer(minLength: 8)
+
+            VoiceRefineGradientButton(
+                prefersLightLabel: style == .dark,
+                isBusy: isBusy
+            ) {
+                store.enhancePendingVoiceTranscript()
+            }
+        }
+    }
+
+    private var counterColor: Color {
+        switch style {
+        case .light:
+            return .primary.opacity(0.48)
+        case .dark:
+            return .white.opacity(0.55)
+        }
+    }
+}
+
+struct VoiceTranscriptDestinationPicker: View {
+    enum Style: Equatable {
+        case light
+        case dark
+    }
+
+    @ObservedObject var store: BrainStore
+    let draft: VoiceTranscriptDraft
+    var style: Style = .light
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(store.voiceTranscriptBreadcrumbSegments(for: draft)) { segment in
+                if segment.id > 0 {
+                    Text(">")
+                        .foregroundStyle(secondaryColor)
+                }
+
+                if segment.isDestinationPicker {
+                    Menu {
+                        ForEach(store.voiceTranscriptDestinations()) { destination in
+                            Button {
+                                store.selectPendingVoiceTranscriptDestination(destination)
+                            } label: {
+                                if isSelected(destination) {
+                                    Label(destination.title, systemImage: "checkmark")
+                                } else {
+                                    Label(destination.title, systemImage: destination.symbolName)
+                                }
+                            }
+                        }
+                    } label: {
+                        Text(segment.title)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .foregroundStyle(primaryColor)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(hoverlessSegmentFill)
+                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .buttonStyle(.plain)
+                    .help("Change voice transcript destination")
+                } else {
+                    Text(segment.title)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(secondaryColor)
+                }
+            }
+        }
+        .font(.system(size: 10.5, weight: .medium, design: .rounded))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func isSelected(_ destination: VoiceTranscriptDestination) -> Bool {
+        draft.destinationKind == destination.kind
+            && draft.noteID == destination.noteID
+            && draft.destinationGroupID == destination.groupID
+    }
+
+    private var primaryColor: Color {
+        switch style {
+        case .light:
+            return .primary.opacity(0.78)
+        case .dark:
+            return .white.opacity(0.86)
+        }
+    }
+
+    private var secondaryColor: Color {
+        switch style {
+        case .light:
+            return .primary.opacity(0.48)
+        case .dark:
+            return .white.opacity(0.52)
+        }
+    }
+
+    private var hoverlessSegmentFill: Color {
+        switch style {
+        case .light:
+            return .primary.opacity(0.045)
+        case .dark:
+            return .white.opacity(0.08)
+        }
+    }
+}
+
+struct VoiceInsertGlowingButton: View {
+    let title: String
+    var foreground: Color = .white
+    var fill: Color = Color.accentColor
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: "checkmark")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(isHovered ? fill : foreground)
+                .padding(.horizontal, 12)
+                .frame(height: 28)
+                .background {
+                    Capsule()
+                        .fill(isHovered ? foreground : fill)
+                }
+                .clipShape(Capsule())
+                .overlay {
+                    AnimatedThinkingBorder(lineWidth: 0.75)
+                        .clipShape(Capsule())
+                }
+                .shadow(
+                    color: Color.accentColor.opacity(isHovered ? 0.28 : 0.34),
+                    radius: isHovered ? 9 : 8,
+                    y: 0
+                )
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+struct VoiceRefineGradientButton: View {
+    var prefersLightLabel = false
+    var isBusy = false
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Label("Refine", systemImage: "sparkles")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(labelColor)
+                .padding(.horizontal, 12)
+                .frame(height: 28)
+                .background {
+                    Capsule()
+                        .fill(backgroundFill)
+                }
+                .overlay {
+                    if isHovered && !isBusy {
+                        VoiceRefineBorderTravelGlow()
+                    } else {
+                        Capsule()
+                            .strokeBorder(Color.primary.opacity(prefersLightLabel ? 0.14 : 0.08), lineWidth: 0.8)
+                    }
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(isBusy)
+        .opacity(isBusy ? 0.42 : 1)
+        .onHover { hovering in
+            guard !isBusy else {
+                isHovered = false
+                return
+            }
+            withAnimation(.easeOut(duration: 0.14)) {
+                isHovered = hovering
+            }
+        }
+    }
+
+    private var labelColor: Color {
+        if isBusy {
+            return prefersLightLabel ? Color.white.opacity(0.38) : Color.primary.opacity(0.36)
+        }
+        return prefersLightLabel ? .white : .primary.opacity(0.82)
+    }
+
+    private var backgroundFill: Color {
+        if isBusy {
+            return prefersLightLabel ? Color.white.opacity(0.06) : Color.primary.opacity(0.05)
+        }
+        return prefersLightLabel ? Color.white.opacity(0.12) : Color.primary.opacity(0.08)
+    }
+}
+
+private struct VoiceRefineBorderTravelGlow: View {
+    private let glow = Color(red: 161 / 255, green: 228 / 255, blue: 255 / 255)
+    private let spinDuration: TimeInterval = 1.45
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+            let progress = timeline.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: spinDuration) / spinDuration
+            let angle = Angle.degrees(progress * 360)
+
+            Capsule()
+                .strokeBorder(
+                    AngularGradient(
+                        stops: [
+                            .init(color: glow.opacity(0.04), location: 0),
+                            .init(color: glow.opacity(0.18), location: 0.28),
+                            .init(color: glow.opacity(1.0), location: 0.48),
+                            .init(color: glow.opacity(0.55), location: 0.58),
+                            .init(color: glow.opacity(0.10), location: 0.78),
+                            .init(color: glow.opacity(0.04), location: 1)
+                        ],
+                        center: .center,
+                        angle: angle
+                    ),
+                    lineWidth: 1.7
+                )
+                .shadow(color: glow.opacity(0.62), radius: 5, y: 0)
+                .shadow(color: glow.opacity(0.34), radius: 10, y: 0)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+private struct VoiceShortcutHoverTip: View {
+    var body: some View {
+        Text("Press Fn + Control to use")
+            .font(.system(size: 11, weight: .regular, design: .rounded))
+            .foregroundStyle(.primary.opacity(0.88))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.ultraThinMaterial)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .fixedSize(horizontal: true, vertical: false)
+            .shadow(color: .black.opacity(0.16), radius: 12, x: 0, y: 6)
+    }
+}
+
+private struct VoiceCaptureFloatingButton: View {
+    let isActive: Bool
+    let help: String
+    var showsShortcutTip = true
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        Circle()
+                            .fill(isActive ? Color.white.opacity(0.18) : Color.primary.opacity(isHovered ? 0.11 : 0.045))
+                    }
+                    .overlay {
+                        Circle()
+                            .stroke(isActive || isHovered ? Color.white.opacity(0.34) : Color.primary.opacity(0.10), lineWidth: 0.9)
+                    }
+                    .shadow(color: .white.opacity(isActive ? 0.28 : (isHovered ? 0.16 : 0.08)), radius: isActive ? 15 : 9)
+                    .shadow(color: .black.opacity(0.18), radius: 10, y: 5)
+
+                if isActive {
+                    AnimatedAudioLinesIcon()
+                        .frame(width: 22, height: 22)
+                } else {
+                    Image(systemName: "mic")
+                        .font(.system(size: 18, weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+                }
+            }
+            .foregroundStyle(isActive || isHovered ? .white : .primary.opacity(0.68))
+            .frame(width: 44, height: 44)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .overlay(alignment: .top) {
+            if showsShortcutTip, isHovered, !isActive {
+                VoiceShortcutHoverTip()
+                    .fixedSize(horizontal: true, vertical: false)
+                    .offset(y: -34)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottom)))
+                    .allowsHitTesting(false)
+            }
+        }
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
+        .animation(.easeOut(duration: 0.14), value: isActive)
+    }
+}
+
+private struct VoiceLiveDialogueContent {
+    let transcript: String
+    let isReceivingAudio: Bool
+    let isTranscribing: Bool
+    let isPaused: Bool
+    let progress: Double
+    let isNotice: Bool
+    let audioSource: VoiceAudioSource?
+    let isListening: Bool
+    let stopRecording: () -> Void
+    let togglePaused: () -> Void
+    let cancelTranscription: () -> Void
+    let dismissNotice: () -> Void
+
+    var shouldShow: Bool {
+        isListening || isTranscribing || isNotice
+    }
+}
+
+private struct VoiceCaptureButtonWithSourceChooser: View {
+    let isActive: Bool
+    let isChooserPresented: Bool
+    var liveDialogue: VoiceLiveDialogueContent? = nil
+    let help: String
+    let action: () -> Void
+    let selectSource: (VoiceAudioSource) -> Void
+    let dismissSourceChooser: () -> Void
+
+    private let micButtonSize: CGFloat = 44
+    private let dialogueMicGap: CGFloat = 6
+
+    private var showsDialogue: Bool {
+        isChooserPresented || (liveDialogue?.shouldShow == true)
+    }
+
+    var body: some View {
+        VoiceCaptureFloatingButton(
+            isActive: isActive,
+            help: help,
+            showsShortcutTip: !showsDialogue,
+            action: action
+        )
+        .overlay(alignment: .bottom) {
+            if showsDialogue {
+                // Bottom-align then lift by mic height + gap so the bubble
+                // (including tail) sits fully above the mic / Ask pill row.
+                VoiceMarkdownDialoguePopover(
+                    isChooserPresented: isChooserPresented,
+                    liveDialogue: liveDialogue,
+                    selectSource: selectSource,
+                    dismissSourceChooser: dismissSourceChooser
+                )
+                .offset(y: -(micButtonSize + dialogueMicGap))
+                .transition(.scale(scale: 0.94, anchor: .bottom).combined(with: .opacity))
+                .zIndex(60)
+            }
+        }
+        // Elevate the whole control above AssistantFloatingPill siblings.
+        .zIndex(showsDialogue ? 50 : 0)
+        .animation(.spring(response: 0.34, dampingFraction: 0.88), value: isChooserPresented)
+        .animation(.spring(response: 0.34, dampingFraction: 0.88), value: liveDialogue?.isListening)
+        .animation(.spring(response: 0.34, dampingFraction: 0.88), value: liveDialogue?.isTranscribing)
+        .animation(.spring(response: 0.34, dampingFraction: 0.88), value: liveDialogue?.isNotice)
+        .animation(nil, value: liveDialogue?.transcript)
+        .animation(nil, value: liveDialogue?.isReceivingAudio)
+        .animation(nil, value: liveDialogue?.progress)
+    }
+}
+
+private struct VoiceMarkdownDialogueBubbleTail: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX - 8, y: 0))
+        path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.midX + 8, y: 0))
+        path.closeSubpath()
+        return path
+    }
+}
+
+private struct VoiceMarkdownDialoguePopover: View {
+    let isChooserPresented: Bool
+    let liveDialogue: VoiceLiveDialogueContent?
+    let selectSource: (VoiceAudioSource) -> Void
+    let dismissSourceChooser: () -> Void
+
+    var body: some View {
+        VStack(spacing: -1) {
+            Group {
+                if isChooserPresented {
+                    sourceChoiceContent
+                } else if let liveDialogue, liveDialogue.isNotice {
+                    noticeContent(liveDialogue)
+                } else if let liveDialogue, liveDialogue.isTranscribing {
+                    transcribingContent(liveDialogue)
+                } else if let liveDialogue, liveDialogue.isListening {
+                    listeningContent(liveDialogue)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 8)
+            .padding(.bottom, 12)
+            .frame(width: dialogueWidth)
+            .background {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.ultraThinMaterial)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+            VoiceMarkdownDialogueBubbleTail()
+                .fill(.ultraThinMaterial)
+                .frame(width: 16, height: 8)
+                .overlay {
+                    VoiceMarkdownDialogueBubbleTail()
+                        .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+                }
+        }
+        .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 8)
+        .padding(4)
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var dialogueWidth: CGFloat {
+        if isChooserPresented { return 246 }
+        if liveDialogue?.isTranscribing == true { return 268 }
+        if liveDialogue?.isNotice == true { return 230 }
+        return 278
+    }
+
+    private var sourceChoiceContent: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 15, weight: .regular))
+                    .foregroundStyle(.primary.opacity(0.82))
+                    .frame(width: 26, height: 26)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Transcribe from")
+                        .font(.system(size: 13, weight: .regular, design: .rounded))
+                        .foregroundStyle(.primary.opacity(0.9))
+                    Text("Choose an audio source")
+                        .font(.system(size: 11, weight: .regular, design: .rounded))
+                        .foregroundStyle(.secondary.opacity(0.86))
+                }
+
+                Spacer(minLength: 4)
+
+                Button(action: dismissSourceChooser) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.primary.opacity(0.58))
+                        .frame(width: 24, height: 24)
+                        .background(Color.white.opacity(0.12))
+                        .clipShape(Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Cancel")
+            }
+
+            HStack(spacing: 8) {
+                ForEach(VoiceAudioSource.allCases) { source in
+                    VoiceAudioSourceChooserButton(source: source) {
+                        selectSource(source)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    private func listeningContent(_ live: VoiceLiveDialogueContent) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(live.isPaused ? Color.orange : (live.isReceivingAudio ? Color.red : Color.orange.opacity(0.85)))
+                    .frame(width: 8, height: 8)
+                    .shadow(
+                        color: (live.isPaused ? Color.orange : Color.red).opacity(live.isReceivingAudio ? 0.42 : 0.22),
+                        radius: 5
+                    )
+                    .transaction { $0.animation = nil }
+
+                Text(live.isPaused ? "Paused" : "Listening")
+                    .font(.system(size: 13, weight: .regular, design: .rounded))
+                    .foregroundStyle(.primary.opacity(0.9))
+
+                Spacer(minLength: 4)
+
+                Button(action: live.cancelTranscription) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.primary.opacity(0.58))
+                        .frame(width: 24, height: 24)
+                        .background(Color.white.opacity(0.12))
+                        .clipShape(Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Cancel recording")
+            }
+
+            Text(listeningDisplayText(for: live))
+                .font(.system(size: 12.5, weight: .regular, design: .rounded))
+                .foregroundStyle(.primary.opacity(live.transcript.isEmpty ? 0.58 : 0.9))
+                .lineLimit(4)
+                .frame(maxWidth: .infinity, minHeight: 68, maxHeight: 68, alignment: .topLeading)
+                .clipped()
+                .transaction { $0.animation = nil }
+
+            HStack(spacing: 8) {
+                Button(action: live.stopRecording) {
+                    Text("Stop")
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundStyle(.black.opacity(0.86))
+                        .padding(.horizontal, 12)
+                        .frame(width: 64, height: 28)
+                        .background {
+                            Capsule().fill(Color.white.opacity(0.94))
+                        }
+                }
+                .buttonStyle(.plain)
+
+                Button(action: live.togglePaused) {
+                    Text(live.isPaused ? "Resume" : "Pause")
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .frame(width: 72, height: 28)
+                        .background {
+                            Capsule().fill(Color.red.opacity(live.isPaused ? 0.72 : 0.92))
+                        }
+                }
+                .buttonStyle(.plain)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    private func transcribingContent(_ live: VoiceLiveDialogueContent) -> some View {
+        let progressValue = min(1, max(0, live.progress))
+        let progressLabel = "\(Int((progressValue * 100).rounded()))%"
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+
+                Text("Transcribing")
+                    .font(.system(size: 13, weight: .regular, design: .rounded))
+                    .foregroundStyle(.primary.opacity(0.9))
+
+                Spacer(minLength: 4)
+
+                Text(progressLabel)
+                    .font(.system(size: 12, weight: .regular, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .transaction { $0.animation = nil }
+
+                Button {
+                    live.cancelTranscription()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 24, height: 24)
+                        .background(Color.red.opacity(0.92))
+                        .clipShape(Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Cancel transcription")
+            }
+
+            Text(live.transcript.isEmpty ? "Processing audio…" : live.transcript)
+                .font(.system(size: 12.5, weight: .regular, design: .rounded))
+                .foregroundStyle(.primary.opacity(live.transcript.isEmpty ? 0.58 : 0.9))
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func noticeContent(_ live: VoiceLiveDialogueContent) -> some View {
+        let label = compactNoticeLabel(for: live.transcript)
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: label == "Failed" ? "exclamationmark.triangle.fill" : "waveform.slash")
+                    .font(.system(size: 14, weight: .regular))
+                    .foregroundStyle(.yellow.opacity(0.96))
+
+                Text(label)
+                    .font(.system(size: 13, weight: .regular, design: .rounded))
+                    .foregroundStyle(.primary.opacity(0.9))
+
+                Spacer(minLength: 4)
+
+                Button(action: live.dismissNotice) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.primary.opacity(0.58))
+                        .frame(width: 24, height: 24)
+                        .background(Color.white.opacity(0.12))
+                        .clipShape(Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func listeningDisplayText(for live: VoiceLiveDialogueContent) -> String {
+        if !live.transcript.isEmpty { return live.transcript }
+        switch live.audioSource {
+        case .microphone:
+            return "Listening to microphone…"
+        case .systemAudio:
+            return "Listening to on-screen audio…"
+        case nil:
+            return "Listening…"
+        }
+    }
+
+    private func compactNoticeLabel(for notice: String) -> String {
+        let lowered = notice.lowercased()
+        if lowered.contains("fail") { return "Failed" }
+        if lowered.contains("nothing") || lowered.contains("no audio") || lowered.contains("empty") {
+            return "No audio"
+        }
+        return "Failed"
+    }
+}
+
+private struct VoiceAudioSourceChooserButton: View {
+    let source: VoiceAudioSource
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: source.symbolName)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(source.title)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .foregroundStyle(.primary.opacity(isHovered ? 1 : 0.9))
+            .padding(.horizontal, 11)
+            .frame(height: 30)
+            .background {
+                Capsule()
+                    .fill(.white.opacity(isHovered ? 0.18 : 0.12))
+            }
+            .shadow(color: .primary.opacity(isHovered ? 0.08 : 0), radius: 6, y: 0)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+private struct VoiceLiveTranscriptBubble: View {
+    let transcript: String
+    let isReceivingAudio: Bool
+    let isTranscribing: Bool
+    let progress: Double
+    let isNotice: Bool
+    var audioSource: VoiceAudioSource? = nil
+    let cancelTranscription: () -> Void
+
+    private var displayText: String {
+        if isNotice {
+            return transcript
+        }
+        if isTranscribing {
+            return transcript.isEmpty ? "Transcribing..." : transcript
+        }
+        if let audioSource, transcript.isEmpty {
+            switch audioSource {
+            case .microphone:
+                return "Listening to microphone..."
+            case .systemAudio:
+                return "Listening to on-screen audio..."
+            }
+        }
+        return transcript.isEmpty ? "Listening..." : transcript
+    }
+
+    private var progressValue: Double {
+        min(1, max(0, progress))
+    }
+
+    private var progressLabel: String {
+        "\(Int((progressValue * 100).rounded()))%"
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            if isTranscribing {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .controlSize(.small)
+                    .scaleEffect(0.58)
+                    .frame(width: 12, height: 12)
+                    .padding(.top, 3)
+            } else {
+                Circle()
+                    .fill(isReceivingAudio ? Color.red : Color.orange)
+                    .frame(width: 7, height: 7)
+                    .padding(.top, 6)
+                    .shadow(color: (isReceivingAudio ? Color.red : Color.orange).opacity(0.46), radius: 5)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(displayText)
+                        .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if isTranscribing {
+                        Text(progressLabel)
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.68))
+
+                        Button(action: cancelTranscription) {
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 20, height: 20)
+                                .background(Color.red.opacity(0.88))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Cancel transcription")
+                    }
+                }
+
+                if isTranscribing {
+                    GeometryReader { proxy in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(Color.white.opacity(0.12))
+                            Capsule()
+                                .fill(Color.white.opacity(0.72))
+                                .frame(width: max(6, proxy.size.width * progressValue))
+                        }
+                    }
+                    .frame(height: 4)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .frame(maxWidth: 760)
+        .background(.ultraThinMaterial)
+        .background(Color.gray.opacity(0.34))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.white.opacity(isTranscribing || isNotice ? 0.34 : 0.20), lineWidth: 0.9)
+        }
+        .shadow(color: .white.opacity(isTranscribing || isNotice ? 0.12 : 0.05), radius: 12, y: 0)
+        .shadow(color: .black.opacity(0.14), radius: 18, y: 8)
+        .animation(.easeInOut(duration: 0.16), value: isReceivingAudio)
+        .animation(.easeInOut(duration: 0.16), value: isTranscribing)
+    }
+}
+
+private struct AnimatedAudioLinesIcon: View {
+    private let baseHeights: [CGFloat] = [0.22, 0.50, 0.78, 0.35, 0.58, 0.22]
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let time = timeline.date.timeIntervalSinceReferenceDate
+            HStack(alignment: .center, spacing: 3) {
+                ForEach(baseHeights.indices, id: \.self) { index in
+                    Capsule(style: .continuous)
+                        .frame(width: 2, height: lineHeight(for: index, time: time))
+                        .animation(nil, value: lineHeight(for: index, time: time))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func lineHeight(for index: Int, time: TimeInterval) -> CGFloat {
+        let wave = (sin(time * 7.0 + Double(index) * 0.82) + 1) / 2
+        return 5 + (baseHeights[index] * 11) + CGFloat(wave) * 5
+    }
+}
+
 private struct HelpDeskPromptInputView: NSViewRepresentable {
     @Binding var text: String
     @Binding var selectionRange: NSRange
@@ -3483,9 +4955,47 @@ private struct HelpDeskView: View {
     }
 
     private var composerBlock: some View {
-        VStack(spacing: 0) {
-            composer
+        VStack(spacing: 8) {
+            if store.activeVoiceCaptureTarget == .helpDesk
+                || store.isFinalizingVoiceTranscript
+                || store.voiceTranscriptionNotice != nil {
+                VoiceLiveTranscriptBubble(
+                    transcript: store.voiceTranscriptionNotice ?? store.liveVoiceTranscript,
+                    isReceivingAudio: store.isVoiceInputLikelyUserSpeech,
+                    isTranscribing: store.isFinalizingVoiceTranscript,
+                    progress: store.voiceTranscriptionProgress,
+                    isNotice: store.voiceTranscriptionNotice != nil,
+                    audioSource: store.activeVoiceAudioSource,
+                    cancelTranscription: store.cancelFinalizingVoiceTranscription
+                )
                 .frame(maxWidth: hasActiveConversation ? .infinity : 760)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            HStack(alignment: .center, spacing: 10) {
+                VoiceCaptureButtonWithSourceChooser(
+                    isActive: store.activeVoiceCaptureTarget == .helpDesk
+                        || store.pendingVoiceAudioSourceSelection == .helpDesk,
+                    isChooserPresented: store.pendingVoiceAudioSourceSelection == .helpDesk,
+                    help: "Speak to Zirn Chat",
+                    action: {
+                        store.toggleVoiceCapture(target: .helpDesk)
+                    },
+                    selectSource: { source in
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+                            store.selectVoiceAudioSource(source, for: .helpDesk)
+                        }
+                    },
+                    dismissSourceChooser: {
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            store.dismissVoiceAudioSourceSelection()
+                        }
+                    }
+                )
+
+                composer
+                    .frame(maxWidth: hasActiveConversation ? .infinity : 760)
+            }
 
             if !hasActiveConversation, !recentHistoryConversations.isEmpty {
                 recentConversationsSection
@@ -9296,13 +10806,14 @@ private struct AssistantFloatingPill: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            VStack(spacing: isExpandedComposerPresented ? 10 : 0) {
-                if isExpandedComposerPresented {
+            VStack(spacing: isExpandedComposerPresented && !hasPendingEditorVoiceTranscript ? 10 : 0) {
+                if let draft = store.pendingVoiceTranscriptDraft, draft.target == .editor {
+                    voiceTranscriptReviewComposer(draft)
+                        .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .bottom)))
+                } else if isExpandedComposerPresented {
                     expandedPromptEditor
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
-                }
 
-                if isExpandedComposerPresented {
                     ZStack {
                         HStack {
                             modelMenu
@@ -9347,7 +10858,7 @@ private struct AssistantFloatingPill: View {
                     }
                 }
             }
-            .padding(isExpandedComposerPresented ? 5 : 0)
+            .padding((isExpandedComposerPresented && !hasPendingEditorVoiceTranscript) || hasPendingEditorVoiceTranscript ? 5 : 0)
             .background(.ultraThinMaterial)
             .background {
                 GeometryReader { proxy in
@@ -9357,7 +10868,9 @@ private struct AssistantFloatingPill: View {
             .clipShape(RoundedRectangle(cornerRadius: pillCornerRadius, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: pillCornerRadius, style: .continuous))
             .onTapGesture {
-                isPromptFocused = true
+                if !hasPendingEditorVoiceTranscript {
+                    isPromptFocused = true
+                }
             }
             .overlay {
                 RoundedRectangle(cornerRadius: pillCornerRadius, style: .continuous)
@@ -9370,7 +10883,11 @@ private struct AssistantFloatingPill: View {
             }
             .shadow(color: glowColor, radius: isAnyPromptFocused ? 7 : 13, y: isAnyPromptFocused ? 0 : 7)
             .onExitCommand {
-                if isExpandedComposerPresented {
+                if hasPendingEditorVoiceTranscript {
+                    withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
+                        store.discardPendingVoiceTranscript()
+                    }
+                } else if isExpandedComposerPresented {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         isExpandedComposerPresented = false
                     }
@@ -9385,6 +10902,7 @@ private struct AssistantFloatingPill: View {
         .animation(.easeInOut(duration: 0.18), value: store.assistantConversationResponse)
         .animation(.easeInOut(duration: 0.16), value: store.isAssistantWritingMode)
         .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isExpandedComposerPresented)
+        .animation(.spring(response: 0.42, dampingFraction: 0.86), value: store.pendingVoiceTranscriptDraft?.id)
         .animation(.smooth(duration: 0.28), value: promptLayoutText)
         .onAppear {
             promptLayoutText = store.assistantPrompt
@@ -9395,6 +10913,14 @@ private struct AssistantFloatingPill: View {
         .onChange(of: store.assistantPrompt) { _, newValue in
             schedulePromptLayoutRefresh(to: newValue)
             expandComposerIfPromptNeedsRoom()
+        }
+        .onChange(of: store.pendingVoiceTranscriptDraft?.id) { _, draftID in
+            if draftID != nil {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+                    isExpandedComposerPresented = false
+                }
+                isPromptFocused = false
+            }
         }
         .onChange(of: store.assistantConversationResponse) { _, response in
             if response != nil {
@@ -9409,6 +10935,59 @@ private struct AssistantFloatingPill: View {
         .onPasteCommand(of: [.image, .fileURL]) { providers in
             pastePromptImages(from: providers)
         }
+    }
+
+    private var hasPendingEditorVoiceTranscript: Bool {
+        store.pendingVoiceTranscriptDraft?.target == .editor
+    }
+
+    private func voiceTranscriptReviewComposer(_ draft: VoiceTranscriptDraft) -> some View {
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 8) {
+                VoiceTranscriptDestinationPicker(store: store, draft: draft, style: .light)
+
+                Spacer(minLength: 4)
+
+                Button {
+                    withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
+                        store.discardPendingVoiceTranscript()
+                    }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.primary.opacity(0.68))
+                        .frame(width: 24, height: 24)
+                        .background(Color.primary.opacity(0.06))
+                        .clipShape(Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(store.isEnhancingVoiceTranscript)
+                .help("Discard transcript")
+            }
+
+            Group {
+                if store.isEnhancingVoiceTranscript {
+                    VoiceTranscriptRefineSkeleton(style: .light)
+                } else {
+                    VoiceTranscriptScrollableText(
+                        text: draft.text,
+                        foreground: .primary.opacity(0.92)
+                    )
+                }
+            }
+            .padding(.top, 8)
+
+            VoiceTranscriptReviewActionRow(store: store, draft: draft, style: .light)
+                .padding(.top, 10)
+                .padding(.bottom, 10)
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 10)
+        .frame(width: pillWidth, alignment: .leading)
+        .animation(.easeInOut(duration: 0.2), value: store.isEnhancingVoiceTranscript)
+        .animation(.easeInOut(duration: 0.16), value: draft.revisionIndex)
+        .animation(.easeInOut(duration: 0.16), value: draft.revisionHistory.count)
     }
 
     private var writingModeButton: some View {
@@ -9666,7 +11245,10 @@ private struct AssistantFloatingPill: View {
     }
 
     private var pillWidth: CGFloat {
-        isExpandedComposerPresented ? expandedPillWidth : min(730, compactPillWidth)
+        if hasPendingEditorVoiceTranscript {
+            return min(730, max(compactPillWidth, 420))
+        }
+        return isExpandedComposerPresented ? expandedPillWidth : min(730, compactPillWidth)
     }
 
     private var textFieldWidth: CGFloat {
@@ -9688,7 +11270,10 @@ private struct AssistantFloatingPill: View {
     }
 
     private var pillCornerRadius: CGFloat {
-        isExpandedComposerPresented ? 20 : (measuredPromptText.count > 54 ? 18 : 17)
+        if hasPendingEditorVoiceTranscript {
+            return 18
+        }
+        return isExpandedComposerPresented ? 20 : (measuredPromptText.count > 54 ? 18 : 17)
     }
 
     private var measuredPromptText: String {
@@ -12016,6 +13601,8 @@ private struct ModelConfigurationView: View {
     @State private var deepSeekKeychainLoadNotFound = false
     @State private var isLoadingMistralFromKeychain = false
     @State private var isLoadingDeepSeekFromKeychain = false
+    @State private var microphonePermissionStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+    @State private var speechPermissionStatus = SFSpeechRecognizer.authorizationStatus()
 
     private let generationModels: [HighlightSummaryModel] = [.mistral, .deepseek]
     private let documentReadingServiceTitle = "Mistral OCR"
@@ -12104,6 +13691,17 @@ private struct ModelConfigurationView: View {
                             .toggleStyle(.switch)
                             .labelsHidden()
                             .help("Use Apple Calendar to recommend the next useful page from Home")
+                    }
+
+                    Divider()
+                        .padding(.leading, 14)
+
+                    ModelRoutingRow(title: "Voice Permissions") {
+                        VoicePermissionControl(
+                            microphoneStatus: microphonePermissionStatus,
+                            speechStatus: speechPermissionStatus,
+                            request: requestVoicePermissions
+                        )
                     }
                 }
                 .background {
@@ -12221,6 +13819,9 @@ private struct ModelConfigurationView: View {
             mistralVerificationTask?.cancel()
             deepSeekVerificationTask?.cancel()
         }
+        .onAppear {
+            refreshVoicePermissionStatuses()
+        }
     }
 
     private var cleanMistralAPIKey: String {
@@ -12254,6 +13855,10 @@ private struct ModelConfigurationView: View {
 
     private var requiresDeepSeek: Bool {
         contentModel == .deepseek || homeGenerationModel == .deepseek || flashcardGenerationModel == .deepseek
+    }
+
+    private var voicePermissionsGranted: Bool {
+        microphonePermissionStatus == .authorized && speechPermissionStatus == .authorized
     }
 
     private var mistralAPIKeyFieldWidth: CGFloat {
@@ -12323,6 +13928,39 @@ private struct ModelConfigurationView: View {
             .font(.system(size: 12))
             .foregroundStyle(.red.opacity(0.88))
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func refreshVoicePermissionStatuses() {
+        microphonePermissionStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        speechPermissionStatus = SFSpeechRecognizer.authorizationStatus()
+    }
+
+    private func requestVoicePermissions() {
+        if microphonePermissionStatus == .denied || speechPermissionStatus == .denied {
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
+            refreshVoicePermissionStatuses()
+            return
+        }
+
+        Task {
+            if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+                _ = await withCheckedContinuation { continuation in
+                    AVCaptureDevice.requestAccess(for: .audio) { granted in
+                        continuation.resume(returning: granted)
+                    }
+                }
+            }
+
+            if SFSpeechRecognizer.authorizationStatus() == .notDetermined {
+                _ = await withCheckedContinuation { continuation in
+                    SFSpeechRecognizer.requestAuthorization { status in
+                        continuation.resume(returning: status)
+                    }
+                }
+            }
+
+            refreshVoicePermissionStatuses()
+        }
     }
 
     private func loadMistralFromKeychain() {
@@ -12631,6 +14269,50 @@ private struct ProviderLogoSwitch<Option: Hashable>: View {
         }
 
         return .clear
+    }
+}
+
+private struct VoicePermissionControl: View {
+    let microphoneStatus: AVAuthorizationStatus
+    let speechStatus: SFSpeechRecognizerAuthorizationStatus
+    let request: () -> Void
+
+    private var isGranted: Bool {
+        microphoneStatus == .authorized && speechStatus == .authorized
+    }
+
+    private var label: String {
+        if isGranted { return "Allowed" }
+        if microphoneStatus == .denied || speechStatus == .denied { return "Open Settings" }
+        return "Allow"
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Label(permissionSummary, systemImage: isGranted ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(isGranted ? Color.green : Color.orange)
+
+            Toggle("", isOn: Binding(
+                get: { isGranted },
+                set: { shouldRequest in
+                    guard shouldRequest else { return }
+                    request()
+                }
+            ))
+            .toggleStyle(.switch)
+            .labelsHidden()
+            .help(label)
+        }
+        .fixedSize(horizontal: true, vertical: true)
+    }
+
+    private var permissionSummary: String {
+        if isGranted { return "Ready" }
+        var missing: [String] = []
+        if microphoneStatus != .authorized { missing.append("Mic") }
+        if speechStatus != .authorized { missing.append("Speech") }
+        return missing.joined(separator: " + ")
     }
 }
 
