@@ -19,7 +19,7 @@ struct ContentView: View {
         Group {
             if store.activeBrain == nil {
                 SplashView(
-                    greeting: WelcomeGreeting.message(
+                    greeting: WelcomeGreeting.parts(
                         userName: store.userProfile.firstName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                             ? store.userName
                             : store.userProfile.firstName
@@ -86,7 +86,7 @@ struct ContentView: View {
 }
 
 private struct SplashView: View {
-    let greeting: String
+    let greeting: WelcomeGreeting.Parts
     let recentVaults: [RecentVault]
     let isBusy: Bool
     let newBrain: () -> Void
@@ -97,9 +97,11 @@ private struct SplashView: View {
 
     var body: some View {
         VStack(spacing: 52) {
-            Text(greeting)
+            (Text(greeting.leadIn)
+                .foregroundStyle(WelcomeGreeting.leadInColor.opacity(0.92))
+             + Text(" \(greeting.welcome)")
+                .foregroundStyle(.white.opacity(0.74)))
                 .font(.custom(AppFont.ptSerifRegular, size: AppFont.welcomeGreetingSize))
-                .foregroundStyle(.white.opacity(0.74))
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 720)
 
@@ -3680,7 +3682,7 @@ struct VoiceTranscriptHistoryIconButton: View {
     }
 }
 
-/// Shared review action row: plus | copy | undo | n/total | redo … Refine (right)
+/// Shared review action row: plus | copy | undo | n/total | redo … Refine · mic (right)
 struct VoiceTranscriptReviewActionRow: View {
     enum Style {
         case light
@@ -3712,6 +3714,7 @@ struct VoiceTranscriptReviewActionRow: View {
     let draft: VoiceTranscriptDraft
     var style: Style = .light
     var dismissAfterInsert = true
+    var onAction: (() -> Void)? = nil
 
     private var isBusy: Bool { store.isEnhancingVoiceTranscript }
 
@@ -3722,7 +3725,8 @@ struct VoiceTranscriptReviewActionRow: View {
                 isDisabled: isBusy,
                 showsConfirmation: !dismissAfterInsert
             ) {
-                withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
+                onAction?()
+                withAnimation(.easeInOut(duration: 0.28)) {
                     store.confirmPendingVoiceTranscript(dismissAfterInsert: dismissAfterInsert)
                 }
             }
@@ -3739,6 +3743,7 @@ struct VoiceTranscriptReviewActionRow: View {
                     style: style.historyStyle,
                     isEnabled: !isBusy && draft.canUndoRevision
                 ) {
+                    onAction?()
                     store.undoPendingVoiceTranscriptRevision()
                 }
 
@@ -3755,6 +3760,7 @@ struct VoiceTranscriptReviewActionRow: View {
                     style: style.historyStyle,
                     isEnabled: !isBusy && draft.canRedoRevision
                 ) {
+                    onAction?()
                     store.redoPendingVoiceTranscriptRevision()
                 }
             }
@@ -3766,7 +3772,20 @@ struct VoiceTranscriptReviewActionRow: View {
                 prefersLightLabel: style == .dark,
                 isBusy: isBusy
             ) {
+                onAction?()
                 store.enhancePendingVoiceTranscript()
+            }
+
+            VoiceTranscriptHistoryIconButton(
+                systemName: "mic.fill",
+                help: "Continue dictation",
+                style: style.historyStyle,
+                isEnabled: !isBusy
+            ) {
+                onAction?()
+                withAnimation(.easeInOut(duration: 0.32)) {
+                    store.continueVoiceCaptureAppendingToPendingDraft()
+                }
             }
         }
     }
@@ -6009,6 +6028,10 @@ private struct HomePageView: View {
     let generationDate: Date?
     let openNote: (Note.ID) -> Void
     @State private var isGraphExpanded = false
+    @State private var isShowingAllVoiceHistory = false
+    @State private var isVoiceHistoryExpanded = true
+    @State private var isPageSummariesExpanded = true
+    @State private var isShowMoreVoiceHistoryHovered = false
 
     private let pageCardColumns = [
         GridItem(.flexible(minimum: 220), spacing: 14),
@@ -6030,6 +6053,7 @@ private struct HomePageView: View {
                     } else {
                         vaultGraphSection
                         homeActionSection
+                        voiceHistorySection
                         pageCardsSection
                     }
                 }
@@ -6060,8 +6084,28 @@ private struct HomePageView: View {
                 .transition(.scale(scale: 0.985).combined(with: .opacity))
                 .zIndex(2)
             }
+
+            if isShowingAllVoiceHistory {
+                VoiceHistoryOverlay(
+                    entries: store.voiceConversationHistory,
+                    openEntry: { entry in
+                        store.openVoiceConversationEntry(entry)
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            isShowingAllVoiceHistory = false
+                        }
+                    },
+                    close: {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            isShowingAllVoiceHistory = false
+                        }
+                    }
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                .zIndex(3)
+            }
         }
         .animation(.easeInOut(duration: 0.24), value: isGraphExpanded)
+        .animation(.easeInOut(duration: 0.18), value: isShowingAllVoiceHistory)
         .onAppear {
             store.refreshNextCalendarClass()
         }
@@ -6140,22 +6184,355 @@ private struct HomePageView: View {
     }
 
     @ViewBuilder
+    private var voiceHistorySection: some View {
+        let previewEntries = store.recentVoiceConversationEntries(limit: 2)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 8) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        isVoiceHistoryExpanded.toggle()
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isVoiceHistoryExpanded ? 0 : -90))
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isVoiceHistoryExpanded ? "Collapse Voice History" : "Expand Voice History")
+                .accessibilityLabel(isVoiceHistoryExpanded ? "Collapse Voice History" : "Expand Voice History")
+
+                Text("Voice History")
+                    .font(.system(size: 22, weight: .bold))
+
+                if !store.voiceConversationHistory.isEmpty {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            isShowingAllVoiceHistory = true
+                        }
+                    } label: {
+                        Text("Show more")
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundStyle(.primary.opacity(isShowMoreVoiceHistoryHovered ? 0.88 : 0.55))
+                            .underline(isShowMoreVoiceHistoryHovered, color: .primary.opacity(0.4))
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { hovering in
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            isShowMoreVoiceHistoryHovered = hovering
+                        }
+                    }
+                    .help("Show all voice conversations")
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            if isVoiceHistoryExpanded {
+                if previewEntries.isEmpty {
+                    Text("Voice inserts will appear here after you confirm a transcript into a note.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    VStack(alignment: .center, spacing: 10) {
+                        ForEach(previewEntries) { entry in
+                            VoiceHistoryBlock(
+                                entry: entry,
+                                style: .compactHome,
+                                action: { store.openVoiceConversationEntry(entry) }
+                            )
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
     private var pageCardsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Page Summaries")
-                .font(.system(size: 22, weight: .bold))
+            HStack(alignment: .center, spacing: 8) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        isPageSummariesExpanded.toggle()
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isPageSummariesExpanded ? 0 : -90))
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isPageSummariesExpanded ? "Collapse Page Summaries" : "Expand Page Summaries")
+                .accessibilityLabel(isPageSummariesExpanded ? "Collapse Page Summaries" : "Expand Page Summaries")
 
-            if presentation.pageCards.isEmpty {
-                Text("No pages yet. Press ⌘N to start a new page.")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
-            } else {
-                LazyVGrid(columns: pageCardColumns, alignment: .leading, spacing: 14) {
-                    ForEach(presentation.pageCards) { card in
-                        HomePageSummaryCard(card: card, store: store, openNote: openNote)
+                Text("Page Summaries")
+                    .font(.system(size: 22, weight: .bold))
+
+                Spacer(minLength: 0)
+            }
+
+            if isPageSummariesExpanded {
+                if presentation.pageCards.isEmpty {
+                    Text("No pages yet. Press ⌘N to start a new page.")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                } else {
+                    LazyVGrid(columns: pageCardColumns, alignment: .leading, spacing: 14) {
+                        ForEach(presentation.pageCards) { card in
+                            HomePageSummaryCard(card: card, store: store, openNote: openNote)
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+private enum VoiceHistoryBlockStyle {
+    /// Home preview: 3-word title + spectrogram → filename only.
+    case compactHome
+    /// Show-more menu: 3-line transcript, destination title, spectrogram diagram.
+    case overlayMenu
+}
+
+private struct VoiceHistoryBlock: View {
+    let entry: VoiceConversationEntry
+    var style: VoiceHistoryBlockStyle = .compactHome
+    let action: () -> Void
+    @State private var isHovered = false
+
+    private static let fullTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    var body: some View {
+        Button(action: action) {
+            Group {
+                switch style {
+                case .compactHome:
+                    compactHomeContent
+                case .overlayMenu:
+                    overlayMenuContent
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .contentShape(Rectangle())
+            .opacity(isHovered ? 0.92 : 1)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.14)) {
+                isHovered = hovering
+            }
+        }
+        .accessibilityLabel("Voice history \(entry.displayShortTitle) for \(entry.noteTitle)")
+        .accessibilityHint("Opens the note at the inserted transcript")
+        .help(Self.fullTimestampFormatter.string(from: entry.createdAt))
+    }
+
+    private var compactHomeContent: some View {
+        diagramRow()
+    }
+
+    private var overlayMenuContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            diagramRow()
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            Text(markdownFileTitle)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.primary.opacity(0.72))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(overlayPreviewText)
+                .font(.system(size: 12.5))
+                .foregroundStyle(.primary.opacity(0.82))
+                .lineLimit(3)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 4)
+    }
+
+    private func diagramRow() -> some View {
+        HStack(alignment: .center, spacing: 0) {
+            Text(entry.displayShortTitle)
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(.primary.opacity(0.78))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.trailing, 8)
+                .accessibilityLabel("Voice title \(entry.displayShortTitle)")
+
+            VoiceHistorySpectrogramConnector(seed: entry.id)
+                .frame(width: 56, height: 28)
+                .padding(.horizontal, 4)
+
+            HStack(spacing: 6) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(.primary.opacity(0.55))
+                Text(entry.displayFileName)
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(.primary.opacity(0.78))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+        }
+    }
+
+    private var markdownFileTitle: String {
+        let clean = entry.noteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !clean.isEmpty { return clean }
+        let file = entry.displayFileName
+        if file.lowercased().hasSuffix(".md") {
+            return String(file.dropLast(3))
+        }
+        return file
+    }
+
+    private var overlayPreviewText: String {
+        Array(entry.previewLines.prefix(3)).joined(separator: "\n")
+    }
+}
+
+/// Frequency-bar spectrogram linking the 3-word title to the destination filename.
+private struct VoiceHistorySpectrogramConnector: View {
+    let seed: String
+
+    private var barHeights: [CGFloat] {
+        var rng = SeededGenerator(seed: seed.unicodeScalars.reduce(UInt64(0)) { partial, scalar in
+            partial &* 1_664_525 &+ UInt64(scalar.value)
+        })
+        return (0..<14).map { _ in
+            CGFloat.random(in: 0.22...1.0, using: &rng)
+        }
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let heights = barHeights
+            let barCount = heights.count
+            let gap: CGFloat = 1.5
+            let barWidth = max(1.5, (proxy.size.width - gap * CGFloat(barCount - 1)) / CGFloat(barCount))
+            HStack(alignment: .center, spacing: gap) {
+                ForEach(Array(heights.enumerated()), id: \.offset) { _, relative in
+                    Capsule(style: .continuous)
+                        .fill(Color.primary.opacity(0.18 + Double(relative) * 0.28))
+                        .frame(width: barWidth, height: max(4, proxy.size.height * relative))
+                }
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+private struct SeededGenerator: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        state = seed == 0 ? 0xA5A5_5A5A_C3C3_3C3C : seed
+    }
+
+    mutating func next() -> UInt64 {
+        state &*= 6364136223846793005
+        state &+= 1
+        return state
+    }
+}
+
+private struct VoiceHistoryOverlay: View {
+    let entries: [VoiceConversationEntry]
+    let openEntry: (VoiceConversationEntry) -> Void
+    let close: () -> Void
+
+    var body: some View {
+        ZStack {
+            // Transparent dismiss hit target — no full-viewport black scrim.
+            Color.clear
+                .contentShape(Rectangle())
+                .ignoresSafeArea()
+                .onTapGesture(perform: close)
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Text("Voice History")
+                        .font(.system(size: 16, weight: .semibold))
+
+                    Spacer()
+
+                    Button(action: close) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.primary.opacity(0.7))
+                            .frame(width: 26, height: 26)
+                            .background {
+                                Circle()
+                                    .fill(.primary.opacity(0.08))
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close")
+                }
+                .padding(.horizontal, 4)
+
+                if entries.isEmpty {
+                    Text("No voice conversations yet.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 18)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(entries) { entry in
+                                VoiceHistoryBlock(
+                                    entry: entry,
+                                    style: .overlayMenu,
+                                    action: { openEntry(entry) }
+                                )
+                                // Hairline under each row (including last). No top rule on first item.
+                                Rectangle()
+                                    .fill(Color.primary.opacity(0.12))
+                                    .frame(height: 1)
+                                    .accessibilityHidden(true)
+                            }
+                        }
+                    }
+                    .scrollIndicators(.hidden)
+                    .frame(maxHeight: 420)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 14)
+            .frame(width: 560)
+            .background {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.ultraThinMaterial)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .shadow(color: .black.opacity(0.12), radius: 18, x: 0, y: 10)
         }
     }
 }

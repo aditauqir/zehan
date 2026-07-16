@@ -178,6 +178,147 @@ struct VoiceClippingConfirmation: Identifiable, Equatable {
     let transcript: String
 }
 
+/// One voice insert recorded in the vault-local `.convo` sidecar (not the main brain file).
+struct VoiceConversationEntry: Identifiable, Codable, Equatable {
+    let id: String
+    let createdAt: Date
+    /// Number of revisions on the refine undo/redo stack at insert time.
+    let revisionCount: Int
+    let transcript: String
+    let noteID: Note.ID
+    let noteTitle: String
+    /// Path relative to the vault Notes folder when known.
+    let notePath: String?
+    /// UTF-16 character offsets of the inserted transcript within the note body.
+    let characterStart: Int?
+    let characterEnd: Int?
+    /// Compact 3-word AI title for Home Voice History (persisted to avoid regenerating).
+    var shortTitle: String?
+
+    var previewLines: [String] {
+        let cleaned = transcript
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if cleaned.isEmpty {
+            let words = transcript
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+            guard !words.isEmpty else { return ["(empty transcript)"] }
+            var lines: [String] = []
+            var current = ""
+            for word in words {
+                let next = current.isEmpty ? word : "\(current) \(word)"
+                if next.count > 56, !current.isEmpty {
+                    lines.append(current)
+                    current = word
+                    if lines.count >= 5 { break }
+                } else {
+                    current = next
+                }
+            }
+            if !current.isEmpty, lines.count < 5 {
+                lines.append(current)
+            }
+            return Array(lines.prefix(5))
+        }
+        return Array(cleaned.prefix(5))
+    }
+
+    /// Prefer the real markdown filename; fall back to note title (never invent Untitled when we know better).
+    var displayFileName: String {
+        if let notePath, !notePath.isEmpty {
+            let fileName = (notePath as NSString).lastPathComponent
+            let base = (fileName as NSString).deletingPathExtension
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !base.isEmpty, base.caseInsensitiveCompare("Untitled") != .orderedSame {
+                return fileName.hasSuffix(".md") ? fileName : "\(fileName).md"
+            }
+            // Path is Untitled.md — prefer a better stored note title when available.
+            let cleanTitle = noteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cleanTitle.isEmpty, cleanTitle.caseInsensitiveCompare("Untitled") != .orderedSame {
+                return cleanTitle.hasSuffix(".md") ? cleanTitle : "\(cleanTitle).md"
+            }
+            return fileName.hasSuffix(".md") ? fileName : "\(fileName).md"
+        }
+        let clean = noteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.isEmpty { return "Untitled.md" }
+        return clean.hasSuffix(".md") ? clean : "\(clean).md"
+    }
+
+    var displayShortTitle: String {
+        if let shortTitle {
+            let cleaned = shortTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            if Self.isValidThreeWordTitle(cleaned) {
+                return cleaned
+            }
+            // Legacy 3-letter titles: show word fallback while background regen runs.
+        }
+        return Self.fallbackShortTitle(from: transcript)
+    }
+
+    /// Exactly three whitespace-separated words (new shortTitle format).
+    static func isValidThreeWordTitle(_ title: String) -> Bool {
+        let words = title
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isWhitespace)
+            .filter { !$0.isEmpty }
+        return words.count == 3
+    }
+
+    /// Old airport-code style mnemonic (exactly three ASCII letters, no spaces).
+    static func isLegacyLetterTitle(_ title: String) -> Bool {
+        let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.count == 3 else { return false }
+        return cleaned.allSatisfy { $0.isLetter && $0.isASCII }
+    }
+
+    static func needsShortTitleRefresh(_ title: String?) -> Bool {
+        guard let title else { return true }
+        let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.isEmpty { return true }
+        if isLegacyLetterTitle(cleaned) { return true }
+        return !isValidThreeWordTitle(cleaned)
+    }
+
+    static func fallbackShortTitle(from transcript: String) -> String {
+        let stopWords: Set<String> = [
+            "a", "an", "the", "and", "or", "to", "of", "in", "on", "for",
+            "is", "it", "my", "i", "we", "you", "this", "that", "with", "from"
+        ]
+        let words = transcript
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let meaningful = words.filter { !stopWords.contains($0.lowercased()) }
+        let source = meaningful.isEmpty ? words : meaningful
+        var picked = Array(source.prefix(3))
+        let fillers = ["Voice", "Note", "Clip"]
+        var fillerIndex = 0
+        while picked.count < 3 {
+            picked.append(fillers[fillerIndex % fillers.count])
+            fillerIndex += 1
+        }
+        return picked
+            .prefix(3)
+            .map { word in
+                let lower = word.lowercased()
+                guard let first = lower.first else { return word }
+                return String(first).uppercased() + lower.dropFirst()
+            }
+            .joined(separator: " ")
+    }
+}
+
+private struct VoiceConversationFile: Codable, Equatable {
+    static let currentVersion = 1
+
+    let version: Int
+    let vaultID: String
+    let brainFileName: String
+    var entries: [VoiceConversationEntry]
+}
+
 @MainActor
 final class BrainStore: ObservableObject {
     @Published var activeBrain: BrainSummary?
@@ -243,6 +384,8 @@ final class BrainStore: ObservableObject {
     @Published var pendingVoiceTranscriptDraft: VoiceTranscriptDraft?
     @Published var isEnhancingVoiceTranscript = false
     @Published var unreadVoiceInsertNoteIDs: Set<Note.ID> = []
+    /// Newest-first voice insert history from the vault `.convo` sidecar.
+    @Published private(set) var voiceConversationHistory: [VoiceConversationEntry] = []
     @Published var pendingVoiceClippingConfirmation: VoiceClippingConfirmation?
     /// Note title the active editor capture will insert into (set when recording starts).
     @Published private(set) var voiceCaptureDestinationTitle: String?
@@ -324,10 +467,13 @@ final class BrainStore: ObservableObject {
     private var finalizingVoiceTranscriptionController: VoiceTranscriptionController?
     private var voiceTranscriptionProgressTask: Task<Void, Never>?
     private var voiceEnhanceTask: Task<Void, Never>?
+    private var voiceHistoryShortTitleTask: Task<Void, Never>?
     private var activeVoiceEditorNoteID: Note.ID?
     private var activeVoiceEditorNoteTitle: String?
     private var voiceCapturePausedAccumulated: TimeInterval = 0
     private var voiceCapturePauseStartedAt: Date?
+    /// When set, the next completed transcript is appended onto this draft as a new revision.
+    private var pendingVoiceAppendContext: PendingVoiceAppendContext?
 
     static let defaultMistralModel = "mistral-large-latest"
     static let defaultDeepSeekModel = "deepseek-v4-flash"
@@ -740,6 +886,7 @@ final class BrainStore: ObservableObject {
                 try loadNotes()
                 try loadHighlightSummaries()
                 try loadHelpDeskDatabase()
+                try loadVoiceConversationHistory()
 
                 if let activeBrain,
                    let noteID = recentVault?.noteFileName.flatMap({ noteID(forRecentNoteFileName: $0, in: activeBrain) }) {
@@ -785,7 +932,9 @@ final class BrainStore: ObservableObject {
         helpDeskMarkdownSuggestions = []
         helpDeskSuggestionsDisabledConversationIDs = []
         unreadVoiceInsertNoteIDs = []
+        voiceConversationHistory = []
         pendingVoiceTranscriptDraft = nil
+        pendingVoiceAppendContext = nil
         isEnhancingVoiceTranscript = false
         activeBrain = nil
         notes = []
@@ -2739,14 +2888,21 @@ final class BrainStore: ObservableObject {
         let resolvedTarget = target ?? pendingVoiceAudioSourceSelection
         guard let resolvedTarget else { return }
 
-        pendingVoiceAudioSourceSelection = nil
+        withAnimation(.easeInOut(duration: 0.32)) {
+            pendingVoiceAudioSourceSelection = nil
+        }
         Task {
             await startVoiceCapture(target: resolvedTarget, source: source)
         }
     }
 
     func dismissVoiceAudioSourceSelection() {
-        pendingVoiceAudioSourceSelection = nil
+        withAnimation(.easeInOut(duration: 0.28)) {
+            pendingVoiceAudioSourceSelection = nil
+        }
+        if restorePendingVoiceAppendDraftIfNeeded(statusText: "Ready") {
+            return
+        }
         if activeVoiceCaptureTarget == nil, !isFinalizingVoiceTranscript {
             status = "Ready"
         }
@@ -2760,6 +2916,35 @@ final class BrainStore: ObservableObject {
            pendingVoiceAudioSourceSelection == nil {
             status = "Ready"
         }
+    }
+
+    /// Continues dictation from an existing review draft. New speech is appended and pushed as a revision.
+    func continueVoiceCaptureAppendingToPendingDraft() {
+        guard let draft = pendingVoiceTranscriptDraft, !isEnhancingVoiceTranscript else { return }
+        guard activeVoiceCaptureTarget == nil, !isFinalizingVoiceTranscript else { return }
+
+        voiceEnhanceTask?.cancel()
+        voiceEnhanceTask = nil
+        isEnhancingVoiceTranscript = false
+        voiceTranscriptionNotice = nil
+
+        // Callers should wrap in withAnimation(.easeInOut); keep transitions here too for shortcut paths.
+        withAnimation(.easeInOut(duration: 0.32)) {
+            pendingVoiceAppendContext = PendingVoiceAppendContext(draft: draft)
+            pendingVoiceTranscriptDraft = nil
+            pendingVoiceAudioSourceSelection = draft.target
+        }
+        status = "Choose an audio source to continue dictation"
+    }
+
+    private func restorePendingVoiceAppendDraftIfNeeded(statusText: String) -> Bool {
+        guard let appendContext = pendingVoiceAppendContext else { return false }
+        withAnimation(.easeInOut(duration: 0.32)) {
+            pendingVoiceAppendContext = nil
+            pendingVoiceTranscriptDraft = appendContext.draft
+        }
+        status = statusText
+        return true
     }
 
     private func startVoiceCapture(target: VoiceCaptureTarget, source: VoiceAudioSource) async {
@@ -2843,6 +3028,9 @@ final class BrainStore: ObservableObject {
         liveVoiceTranscript = ""
         voiceTranscriptionNotice = nil
         isVoiceInputLikelyUserSpeech = false
+        if restorePendingVoiceAppendDraftIfNeeded(statusText: "Voice append cancelled") {
+            return
+        }
         pendingVoiceTranscriptDraft = nil
         status = "Voice capture cancelled"
     }
@@ -2860,6 +3048,9 @@ final class BrainStore: ObservableObject {
         activeVoiceAudioSource = nil
         voiceCaptureDestinationTitle = nil
         resetVoiceCaptureTimer()
+        if restorePendingVoiceAppendDraftIfNeeded(statusText: "Voice append cancelled") {
+            return
+        }
         status = "Voice transcription cancelled"
     }
 
@@ -2977,6 +3168,9 @@ final class BrainStore: ObservableObject {
 
     func discardVoiceClipping() {
         pendingVoiceClippingConfirmation = nil
+        if restorePendingVoiceAppendDraftIfNeeded(statusText: "Voice clipping discarded — previous transcript kept") {
+            return
+        }
         status = "Voice clipping discarded"
     }
 
@@ -2985,6 +3179,7 @@ final class BrainStore: ObservableObject {
         voiceEnhanceTask?.cancel()
         voiceEnhanceTask = nil
         isEnhancingVoiceTranscript = false
+        pendingVoiceAppendContext = nil
         if dismissAfterInsert {
             // Clear editor drafts first so the composer layout settles before disk writes.
             pendingVoiceTranscriptDraft = nil
@@ -2997,6 +3192,7 @@ final class BrainStore: ObservableObject {
         voiceEnhanceTask?.cancel()
         voiceEnhanceTask = nil
         isEnhancingVoiceTranscript = false
+        pendingVoiceAppendContext = nil
         pendingVoiceTranscriptDraft = nil
         voiceCaptureDestinationTitle = nil
         status = "Voice transcript discarded"
@@ -3197,6 +3393,11 @@ final class BrainStore: ObservableObject {
         case navigationConfirmation
     }
 
+    private struct PendingVoiceAppendContext {
+        let draft: VoiceTranscriptDraft
+        var baseText: String { draft.text }
+    }
+
     private func startNativeSpeechTranscription(target: VoiceCaptureTarget, source: VoiceAudioSource) async throws {
         let authorizationStatus = await VoiceTranscriptionController.requestSpeechAuthorization()
         guard authorizationStatus == .authorized else {
@@ -3218,6 +3419,13 @@ final class BrainStore: ObservableObject {
             onError: { [weak self] error in
                 Task { @MainActor in
                     self?.status = "Voice transcription failed: \(error.localizedDescription)"
+                }
+            },
+            onProgress: { [weak self] value in
+                Task { @MainActor in
+                    guard let self, self.isFinalizingVoiceTranscript else { return }
+                    // Real decode progress dominates the warm-up crawl; stay monotonic.
+                    self.voiceTranscriptionProgress = min(1.0, max(self.voiceTranscriptionProgress, value))
                 }
             }
         )
@@ -3258,13 +3466,16 @@ final class BrainStore: ObservableObject {
     private func startVoiceTranscriptionProgress() {
         voiceTranscriptionProgressTask?.cancel()
         voiceTranscriptionProgressTask = Task { @MainActor in
+            // Gentle warm-up ONLY — never fake past ~12%. Real whisper-cli progress
+            // (routed through the controller's onProgress) takes over via max() the moment
+            // decoding starts, so the number reflects actual transcription instead of
+            // asymptoting to 95% and freezing.
             var tick = 0
             while !Task.isCancelled, isFinalizingVoiceTranscript {
-                try? await Task.sleep(nanoseconds: 300_000_000)
+                try? await Task.sleep(nanoseconds: 250_000_000)
                 tick += 1
-                let estimated = 0.06 + (1 - pow(0.94, Double(tick))) * 0.90
-                let stepped = (estimated * 20).rounded() / 20
-                voiceTranscriptionProgress = min(0.98, max(voiceTranscriptionProgress, stepped))
+                let warmup = min(0.12, 0.06 + Double(tick) * 0.012)
+                voiceTranscriptionProgress = max(voiceTranscriptionProgress, warmup)
             }
         }
     }
@@ -3282,12 +3493,37 @@ final class BrainStore: ObservableObject {
     ) {
         let cleanTranscript = Self.normalizedVoiceTranscript(transcript)
         guard !cleanTranscript.isEmpty else {
+            if restorePendingVoiceAppendDraftIfNeeded(statusText: "No audio — previous transcript kept") {
+                voiceTranscriptionNotice = "No audio"
+                return
+            }
             voiceTranscriptionNotice = "No audio"
             status = "No audio"
             return
         }
 
         voiceTranscriptionNotice = nil
+
+        if let appendContext = pendingVoiceAppendContext, appendContext.draft.target == target {
+            pendingVoiceAppendContext = nil
+            activeVoiceEditorNoteID = nil
+            activeVoiceEditorNoteTitle = nil
+            var draft = appendContext.draft
+            let combined = Self.concatenatedVoiceTranscript(
+                base: appendContext.baseText,
+                addition: cleanTranscript
+            )
+            if draft.revisionIndex < draft.revisionHistory.count - 1 {
+                draft.revisionHistory = Array(draft.revisionHistory.prefix(draft.revisionIndex + 1))
+            }
+            draft.revisionHistory.append(combined)
+            draft.revisionIndex = draft.revisionHistory.count - 1
+            draft.text = combined
+            pendingVoiceTranscriptDraft = draft
+            status = "Voice transcript appended"
+            return
+        }
+
         switch target {
         case .editor:
             pendingVoiceTranscriptDraft = VoiceTranscriptDraft(
@@ -3315,13 +3551,24 @@ final class BrainStore: ObservableObject {
             return
         }
 
+        let revisionCount = max(draft.revisionHistory.count, 1)
         switch draft.target {
         case .editor:
             switch draft.destinationKind {
             case .note:
-                insertVoiceTranscript(cleanTranscript, noteID: draft.noteID, noteTitle: draft.noteTitle)
+                insertVoiceTranscript(
+                    cleanTranscript,
+                    noteID: draft.noteID,
+                    noteTitle: draft.noteTitle,
+                    revisionCount: revisionCount
+                )
             case .folder:
-                insertVoiceTranscript(cleanTranscript, groupID: draft.destinationGroupID, folderTitle: draft.noteTitle)
+                insertVoiceTranscript(
+                    cleanTranscript,
+                    groupID: draft.destinationGroupID,
+                    folderTitle: draft.noteTitle,
+                    revisionCount: revisionCount
+                )
             }
         case .helpDesk:
             helpDeskInput = cleanTranscript
@@ -3329,21 +3576,39 @@ final class BrainStore: ObservableObject {
         }
     }
 
-    private func insertVoiceTranscript(_ transcript: String, groupID: SidebarItem.ID?, folderTitle: String) {
+    private func insertVoiceTranscript(
+        _ transcript: String,
+        groupID: SidebarItem.ID?,
+        folderTitle: String,
+        revisionCount: Int
+    ) {
         withActiveBrainAccess {
             do {
                 guard let brain = activeBrain else {
-                    updateContentFromEditor(Self.markdownByAppendingTranscript(transcript, to: content))
+                    let insertion = Self.markdownByAppendingTranscript(transcript, to: content)
+                    updateContentFromEditor(insertion.markdown)
                     saveCurrentNote(statusText: "Voice transcript added")
+                    if let noteID = currentNoteID {
+                        recordVoiceConversationEntry(
+                            transcript: transcript,
+                            revisionCount: revisionCount,
+                            noteID: noteID,
+                            noteTitle: title,
+                            notePath: nil,
+                            characterStart: insertion.characterStart,
+                            characterEnd: insertion.characterEnd
+                        )
+                    }
                     return
                 }
 
                 let now = Date()
                 let noteTitle = uniqueTitle(for: "Voice Transcript")
+                let noteBody = contentBySettingDocumentTitle(noteTitle, in: transcript)
                 let note = Note(
                     id: UUID().uuidString,
                     title: noteTitle,
-                    content: contentBySettingDocumentTitle(noteTitle, in: transcript),
+                    content: noteBody,
                     createdAt: now,
                     updatedAt: now
                 )
@@ -3357,10 +3622,11 @@ final class BrainStore: ObservableObject {
                 try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
                 let targetURL = markdownNoteURL(for: note, inFolder: destinationFolder)
                 try writeMarkdownNote(note, to: targetURL)
+                let relativePath = relativeNoteFileName(for: targetURL, in: brain)
                 try noteIdentityDatabase?.upsert(
                     noteID: note.id,
                     title: note.title,
-                    fileName: relativeNoteFileName(for: targetURL, in: brain),
+                    fileName: relativePath,
                     updatedAt: note.updatedAt
                 )
 
@@ -3372,6 +3638,17 @@ final class BrainStore: ObservableObject {
                 scheduleLiveHomePageCompilation(delay: Self.homeCompilationAfterAutosaveNanoseconds)
                 markUnreadVoiceInsert(for: note.id)
 
+                let transcriptStart = max(0, noteBody.utf16.count - transcript.utf16.count - 1)
+                recordVoiceConversationEntry(
+                    transcript: transcript,
+                    revisionCount: revisionCount,
+                    noteID: note.id,
+                    noteTitle: note.title,
+                    notePath: relativePath,
+                    characterStart: transcriptStart,
+                    characterEnd: transcriptStart + transcript.utf16.count
+                )
+
                 let cleanFolderTitle = folderTitle.trimmingCharacters(in: .whitespacesAndNewlines)
                 status = "Voice transcript added to \(cleanFolderTitle.isEmpty ? "Notes" : cleanFolderTitle)"
             } catch {
@@ -3380,10 +3657,31 @@ final class BrainStore: ObservableObject {
         }
     }
 
-    private func insertVoiceTranscript(_ transcript: String, noteID: Note.ID?, noteTitle: String) {
+    private func insertVoiceTranscript(
+        _ transcript: String,
+        noteID: Note.ID?,
+        noteTitle: String,
+        revisionCount: Int
+    ) {
         guard let noteID, noteID != currentNoteID else {
-            updateContentFromEditor(Self.markdownByAppendingTranscript(transcript, to: content))
+            let insertion = Self.markdownByAppendingTranscript(transcript, to: content)
+            updateContentFromEditor(insertion.markdown)
             saveCurrentNote(statusText: "Voice transcript added")
+            let resolvedNoteID = noteID ?? currentNoteID
+            if let resolvedNoteID {
+                let path = activeBrain.flatMap { brain in
+                    noteURL(for: resolvedNoteID, in: brain).map { relativeNoteFileName(for: $0, in: brain) }
+                }
+                recordVoiceConversationEntry(
+                    transcript: transcript,
+                    revisionCount: revisionCount,
+                    noteID: resolvedNoteID,
+                    noteTitle: noteTitle.isEmpty ? title : noteTitle,
+                    notePath: path,
+                    characterStart: insertion.characterStart,
+                    characterEnd: insertion.characterEnd
+                )
+            }
             return
         }
 
@@ -3392,30 +3690,53 @@ final class BrainStore: ObservableObject {
                 guard let brain = activeBrain,
                       let url = noteURL(for: noteID, in: brain)
                 else {
-                    updateContentFromEditor(Self.markdownByAppendingTranscript(transcript, to: content))
+                    let insertion = Self.markdownByAppendingTranscript(transcript, to: content)
+                    updateContentFromEditor(insertion.markdown)
                     saveCurrentNote(statusText: "Voice transcript added")
+                    if let currentNoteID {
+                        recordVoiceConversationEntry(
+                            transcript: transcript,
+                            revisionCount: revisionCount,
+                            noteID: currentNoteID,
+                            noteTitle: title,
+                            notePath: nil,
+                            characterStart: insertion.characterStart,
+                            characterEnd: insertion.characterEnd
+                        )
+                    }
                     return
                 }
 
                 var note = try readNote(from: url)
+                let insertion = Self.markdownByAppendingTranscript(transcript, to: note.content)
                 note = Note(
                     id: note.id,
                     title: note.title,
-                    content: Self.markdownByAppendingTranscript(transcript, to: note.content),
+                    content: insertion.markdown,
                     createdAt: note.createdAt,
                     updatedAt: Date()
                 )
                 try writeMarkdownNote(note, to: url)
+                let relativePath = relativeNoteFileName(for: url, in: brain)
                 try noteIdentityDatabase?.upsert(
                     noteID: note.id,
                     title: note.title,
-                    fileName: relativeNoteFileName(for: url, in: brain),
+                    fileName: relativePath,
                     updatedAt: note.updatedAt
                 )
                 try loadNotes()
                 try syncBrainMetadata()
                 scheduleLiveHomePageCompilation(delay: Self.homeCompilationAfterAutosaveNanoseconds)
                 markUnreadVoiceInsert(for: note.id)
+                recordVoiceConversationEntry(
+                    transcript: transcript,
+                    revisionCount: revisionCount,
+                    noteID: note.id,
+                    noteTitle: noteTitle.isEmpty ? note.title : noteTitle,
+                    notePath: relativePath,
+                    characterStart: insertion.characterStart,
+                    characterEnd: insertion.characterEnd
+                )
                 let cleanTitle = noteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
                 status = "Voice transcript added to \(cleanTitle.isEmpty ? note.title : cleanTitle)"
             } catch {
@@ -3433,7 +3754,262 @@ final class BrainStore: ObservableObject {
         unreadVoiceInsertNoteIDs.remove(noteID)
     }
 
-    private static func markdownByAppendingTranscript(_ transcript: String, to markdown: String) -> String {
+    /// Compact recent voice history for writing assistant / Zirn chat context. Callers opt in; not injected by default.
+    func loadVoiceHistoryContext(limit: Int = 6, maxCharacters: Int = 2_400) -> String {
+        let entries = recentVoiceConversationEntries(limit: limit)
+        guard !entries.isEmpty else { return "" }
+
+        var remaining = max(400, maxCharacters)
+        var lines: [String] = ["Recent voice inserts (from .convo):"]
+        for entry in entries {
+            let stamp = Self.voiceHistoryTimestampFormatter.string(from: entry.createdAt)
+            let snippet = String(entry.transcript.prefix(280))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let line = "- \(stamp) · \(entry.revisionCount) rev · \(entry.noteTitle): \(snippet)"
+            if line.count > remaining { break }
+            lines.append(line)
+            remaining -= line.count + 1
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    func recentVoiceConversationEntries(limit: Int = 2) -> [VoiceConversationEntry] {
+        Array(voiceConversationHistory.prefix(max(0, limit)))
+    }
+
+    func openVoiceConversationEntry(_ entry: VoiceConversationEntry) {
+        openNote(id: entry.noteID)
+        let query = Self.voiceHistorySearchQuery(from: entry.transcript)
+        guard !query.isEmpty else { return }
+        let normalizedQuery = normalizedSearchText(query)
+        let blockIndex = markdownSearchBlocks(from: content)
+            .first { block in
+                normalizedSearchText(block.text).contains(normalizedQuery)
+            }?
+            .index ?? 0
+        activeSearchHighlight = SearchHighlight(
+            noteID: entry.noteID,
+            query: query,
+            blockIndex: blockIndex
+        )
+    }
+
+    private func recordVoiceConversationEntry(
+        transcript: String,
+        revisionCount: Int,
+        noteID: Note.ID,
+        noteTitle: String,
+        notePath: String?,
+        characterStart: Int?,
+        characterEnd: Int?
+    ) {
+        let resolved = resolveVoiceDestinationPresentation(
+            noteID: noteID,
+            fallbackTitle: noteTitle,
+            notePath: notePath
+        )
+        let entry = VoiceConversationEntry(
+            id: UUID().uuidString,
+            createdAt: Date(),
+            revisionCount: max(revisionCount, 1),
+            transcript: transcript,
+            noteID: noteID,
+            noteTitle: resolved.title,
+            notePath: resolved.path,
+            characterStart: characterStart,
+            characterEnd: characterEnd,
+            shortTitle: VoiceConversationEntry.fallbackShortTitle(from: transcript)
+        )
+        voiceConversationHistory.insert(entry, at: 0)
+        persistVoiceConversationHistory()
+        scheduleVoiceHistoryShortTitleGeneration(for: entry.id)
+    }
+
+    /// Resolve a human note title + relative path from live vault state (avoids Untitled.md chips).
+    private func resolveVoiceDestinationPresentation(
+        noteID: Note.ID,
+        fallbackTitle: String,
+        notePath: String?
+    ) -> (title: String, path: String?) {
+        let liveTitle = notes.first(where: { $0.id == noteID })?.title
+            ?? sidebarItems.first(where: { $0.noteID == noteID })?.title
+            ?? (noteID == currentNoteID ? title : nil)
+
+        let resolvedPath: String? = {
+            if let notePath, !notePath.isEmpty { return notePath }
+            guard let brain = activeBrain,
+                  let url = noteURL(for: noteID, in: brain)
+            else { return nil }
+            return relativeNoteFileName(for: url, in: brain)
+        }()
+
+        let pathBaseTitle: String? = {
+            guard let resolvedPath, !resolvedPath.isEmpty else { return nil }
+            let fileName = (resolvedPath as NSString).lastPathComponent
+            let base = (fileName as NSString).deletingPathExtension
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !base.isEmpty, base.caseInsensitiveCompare("Untitled") != .orderedSame else {
+                return nil
+            }
+            return base
+                .replacingOccurrences(of: "-", with: " ")
+                .replacingOccurrences(of: "_", with: " ")
+        }()
+
+        let candidates = [liveTitle, pathBaseTitle, fallbackTitle]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let preferred = candidates.first {
+            $0.caseInsensitiveCompare("Untitled") != .orderedSame
+        } ?? candidates.first ?? "Untitled"
+
+        return (preferred, resolvedPath)
+    }
+
+    private func scheduleVoiceHistoryShortTitleGeneration(for entryID: String) {
+        voiceHistoryShortTitleTask?.cancel()
+        voiceHistoryShortTitleTask = Task { @MainActor [weak self] in
+            // Small delay so insert UI settles before the network call.
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            await self?.ensureVoiceHistoryShortTitles(preferring: entryID)
+        }
+    }
+
+    /// Fills missing / legacy 3-letter titles with 3-word titles (AI when possible, word fallback). Persists into `.convo`.
+    func ensureVoiceHistoryShortTitles(preferring preferredID: String? = nil) async {
+        var didChange = false
+        let targets: [VoiceConversationEntry] = {
+            let missing = voiceConversationHistory.filter {
+                VoiceConversationEntry.needsShortTitleRefresh($0.shortTitle)
+            }
+            if let preferredID,
+               let preferred = voiceConversationHistory.first(where: { $0.id == preferredID }) {
+                return [preferred] + missing.filter { $0.id != preferredID }
+            }
+            return missing
+        }()
+
+        for entry in targets.prefix(8) {
+            guard !Task.isCancelled else { return }
+            let generated = await generateVoiceHistoryShortTitle(from: entry.transcript)
+                ?? VoiceConversationEntry.fallbackShortTitle(from: entry.transcript)
+            guard let index = voiceConversationHistory.firstIndex(where: { $0.id == entry.id }) else {
+                continue
+            }
+            if voiceConversationHistory[index].shortTitle == generated { continue }
+            voiceConversationHistory[index].shortTitle = generated
+            didChange = true
+        }
+
+        if didChange {
+            persistVoiceConversationHistory()
+        }
+    }
+
+    private func generateVoiceHistoryShortTitle(from transcript: String) async -> String? {
+        let snippet = String(transcript.prefix(480))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !snippet.isEmpty else { return nil }
+
+        do {
+            let result = try await generateWithSelectedAssistantModel(
+                system: """
+                You invent compact 3-word titles for voice notes.
+                Reply with EXACTLY three English words separated by single spaces and nothing else.
+                Use Title Case. No punctuation, digits, quotes, or explanation.
+                The three words should summarize the transcript topic (example style: Debt Service Plan).
+                """,
+                user: snippet,
+                maxTokens: 24
+            )
+            let words = result.content
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\n", with: " ")
+                .components(separatedBy: .whitespaces)
+                .map { word in
+                    word.filter { $0.isLetter || $0.isNumber }
+                }
+                .filter { !$0.isEmpty }
+            guard words.count >= 3 else { return nil }
+            let titled = words.prefix(3).map { word -> String in
+                let lower = word.lowercased()
+                guard let first = lower.first else { return word }
+                return String(first).uppercased() + lower.dropFirst()
+            }
+            return titled.joined(separator: " ")
+        } catch {
+            return nil
+        }
+    }
+
+    private func loadVoiceConversationHistory() throws {
+        guard let activeBrain else {
+            voiceConversationHistory = []
+            return
+        }
+        let url = voiceConversationURL(for: activeBrain)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            voiceConversationHistory = []
+            return
+        }
+        let data = try Data(contentsOf: url)
+        let file = try decoder.decode(VoiceConversationFile.self, from: data)
+        voiceConversationHistory = file.entries.sorted { $0.createdAt > $1.createdAt }
+
+        // Backfill missing / legacy letter titles once per vault open (persisted after generation).
+        if voiceConversationHistory.contains(where: {
+            VoiceConversationEntry.needsShortTitleRefresh($0.shortTitle)
+        }) {
+            Task { @MainActor [weak self] in
+                await self?.ensureVoiceHistoryShortTitles()
+            }
+        }
+    }
+
+    private func persistVoiceConversationHistory() {
+        withActiveBrainAccess {
+            do {
+                guard let activeBrain else { return }
+                let url = voiceConversationURL(for: activeBrain)
+                let file = VoiceConversationFile(
+                    version: VoiceConversationFile.currentVersion,
+                    vaultID: activeBrain.id,
+                    brainFileName: activeBrain.brainURL.lastPathComponent,
+                    entries: voiceConversationHistory
+                )
+                let data = try encoder.encode(file)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                status = "Could not save voice history: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func voiceConversationURL(for brain: BrainSummary) -> URL {
+        brain.folderURL.appendingPathComponent(".convo")
+    }
+
+    private static func voiceHistorySearchQuery(from transcript: String) -> String {
+        let words = transcript
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+        guard !words.isEmpty else { return "" }
+        return words.prefix(12).joined(separator: " ")
+    }
+
+    private static let voiceHistoryTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    private static func markdownByAppendingTranscript(
+        _ transcript: String,
+        to markdown: String
+    ) -> (markdown: String, characterStart: Int, characterEnd: Int) {
         let separator: String
         if markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             separator = ""
@@ -3444,7 +4020,10 @@ final class BrainStore: ObservableObject {
         } else {
             separator = "\n\n"
         }
-        return markdown + separator + transcript + "\n"
+        let prefix = markdown + separator
+        let characterStart = prefix.utf16.count
+        let characterEnd = characterStart + transcript.utf16.count
+        return (prefix + transcript + "\n", characterStart, characterEnd)
     }
 
     private static func normalizedVoiceTranscript(_ transcript: String) -> String {
@@ -3453,6 +4032,14 @@ final class BrainStore: ObservableObject {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func concatenatedVoiceTranscript(base: String, addition: String) -> String {
+        let baseClean = normalizedVoiceTranscript(base)
+        let additionClean = normalizedVoiceTranscript(addition)
+        if baseClean.isEmpty { return additionClean }
+        if additionClean.isEmpty { return baseClean }
+        return baseClean + " " + additionClean
     }
 
     func ensureWhisperSmallModelInstalledForCurrentUser(reportReadyStatus: Bool = true) async {
@@ -11841,6 +12428,7 @@ private final class VoiceTranscriptionController: NSObject, SCStreamOutput, SCSt
     private let onTranscript: (String) -> Void
     private let onUserSpeechActivityChanged: (Bool) -> Void
     private let onError: (Error) -> Void
+    private let onProgress: @Sendable (Double) -> Void
 
     var transcript: String {
         latestTranscript
@@ -11850,12 +12438,14 @@ private final class VoiceTranscriptionController: NSObject, SCStreamOutput, SCSt
         source: VoiceAudioSource,
         onTranscript: @escaping (String) -> Void,
         onUserSpeechActivityChanged: @escaping (Bool) -> Void,
-        onError: @escaping (Error) -> Void
+        onError: @escaping (Error) -> Void,
+        onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) {
         self.source = source
         self.onTranscript = onTranscript
         self.onUserSpeechActivityChanged = onUserSpeechActivityChanged
         self.onError = onError
+        self.onProgress = onProgress
         super.init()
     }
 
@@ -12149,6 +12739,7 @@ private final class VoiceTranscriptionController: NSObject, SCStreamOutput, SCSt
     private func runWhisperCLI(audioURL: URL, modelURL: URL) async throws -> String {
         let executableURL = try Self.whisperCLIURL()
         let outputBaseURL = audioURL.deletingPathExtension()
+        let progressCallback = onProgress
         let output = try await Self.runProcess(
             executableURL: executableURL,
             arguments: [
@@ -12156,12 +12747,16 @@ private final class VoiceTranscriptionController: NSObject, SCStreamOutput, SCSt
                 "-f", audioURL.path,
                 "--no-timestamps",
                 "--no-gpu",
+                "--print-progress",
                 "--output-txt",
                 "--output-file", outputBaseURL.path,
                 "--language", "en"
             ],
             processStore: { [weak self] process in
                 self?.setActiveProcess(process)
+            },
+            progressHandler: { value in
+                progressCallback(value)
             }
         )
 
@@ -12195,7 +12790,8 @@ private final class VoiceTranscriptionController: NSObject, SCStreamOutput, SCSt
     private static func runProcess(
         executableURL: URL,
         arguments: [String],
-        processStore: ((Process) -> Void)?
+        processStore: ((Process) -> Void)?,
+        progressHandler: (@Sendable (Double) -> Void)? = nil
     ) async throws -> String {
         try await withTaskCancellationHandler {
             try await Task.detached(priority: .userInitiated) {
@@ -12209,11 +12805,45 @@ private final class VoiceTranscriptionController: NSObject, SCStreamOutput, SCSt
                 process.standardError = errorPipe
                 processStore?(process)
 
-                try process.run()
-                process.waitUntilExit()
+                let output: String
+                let errorOutput: String
 
-                let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                let errorOutput = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                if let progressHandler {
+                    // Stream both pipes so real whisper-cli progress (printed to stderr as
+                    // "progress =  NN%") can drive an honest indicator. Draining both pipes
+                    // concurrently also prevents a full-pipe deadlock during long decodes.
+                    let outCollector = ProcessOutputCollector(onProgress: nil)
+                    let errCollector = ProcessOutputCollector(onProgress: progressHandler)
+                    outputPipe.fileHandleForReading.readabilityHandler = { handle in
+                        let data = handle.availableData
+                        guard !data.isEmpty else { return }
+                        outCollector.append(data, scanProgress: false)
+                    }
+                    errorPipe.fileHandleForReading.readabilityHandler = { handle in
+                        let data = handle.availableData
+                        guard !data.isEmpty else { return }
+                        errCollector.append(data, scanProgress: true)
+                    }
+
+                    try process.run()
+                    process.waitUntilExit()
+
+                    outputPipe.fileHandleForReading.readabilityHandler = nil
+                    errorPipe.fileHandleForReading.readabilityHandler = nil
+                    let remainingOut = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                    if !remainingOut.isEmpty { outCollector.append(remainingOut, scanProgress: false) }
+                    let remainingErr = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                    if !remainingErr.isEmpty { errCollector.append(remainingErr, scanProgress: false) }
+
+                    output = outCollector.string
+                    errorOutput = errCollector.string
+                } else {
+                    try process.run()
+                    process.waitUntilExit()
+
+                    output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    errorOutput = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                }
 
                 if Task.isCancelled {
                     throw CancellationError()
@@ -12275,6 +12905,57 @@ private final class VoiceTranscriptionController: NSObject, SCStreamOutput, SCSt
         }
         semaphore.wait()
         return granted
+    }
+}
+
+/// Thread-safe accumulator for a child process pipe. Optionally scans streamed text for
+/// whisper-cli progress notifications ("progress =  NN%") and reports monotonic 0...1 values.
+private final class ProcessOutputCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var progressScan = Data()
+    private var lastPercent = -1
+    private let onProgress: (@Sendable (Double) -> Void)?
+    private static let progressRegex = try! NSRegularExpression(
+        pattern: #"progress\s*=\s*(\d{1,3})\s*%"#,
+        options: [.caseInsensitive]
+    )
+
+    init(onProgress: (@Sendable (Double) -> Void)?) {
+        self.onProgress = onProgress
+    }
+
+    func append(_ data: Data, scanProgress: Bool) {
+        lock.lock()
+        buffer.append(data)
+        var emit: Double?
+        if scanProgress, onProgress != nil {
+            progressScan.append(data)
+            if let text = String(data: progressScan, encoding: .utf8) {
+                let ns = text as NSString
+                let matches = Self.progressRegex.matches(
+                    in: text,
+                    range: NSRange(location: 0, length: ns.length)
+                )
+                if let last = matches.last,
+                   let percent = Int(ns.substring(with: last.range(at: 1))),
+                   percent > lastPercent {
+                    lastPercent = percent
+                    emit = min(1.0, Double(percent) / 100.0)
+                }
+                if progressScan.count > 8192 {
+                    progressScan = Data(progressScan.suffix(2048))
+                }
+            }
+        }
+        lock.unlock()
+        if let emit { onProgress?(emit) }
+    }
+
+    var string: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return String(data: buffer, encoding: .utf8) ?? ""
     }
 }
 

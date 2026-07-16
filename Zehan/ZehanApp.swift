@@ -225,7 +225,8 @@ private struct VoiceDynamicIslandPresenter: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.hostingAnchor = nsView
         context.coordinator.store = store
-        context.coordinator.updatePanel(animated: true)
+        // Defer so SwiftUI/AppKit layout cycles never nest with panel frame updates.
+        context.coordinator.scheduleUpdatePanel(animated: true)
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
@@ -237,9 +238,20 @@ private struct VoiceDynamicIslandPresenter: NSViewRepresentable {
         weak var hostingAnchor: NSView?
         var store: BrainStore
         private var panel: VoiceIslandPanel?
-        private var hostingView: NSHostingView<VoiceDynamicIslandView>?
+        private var hostingView: VoiceIslandHostingView<VoiceDynamicIslandView>?
         private var activationObservers: [NSObjectProtocol] = []
         private var lastAppliedPanelSize: NSSize = .zero
+        /// Measured expanded card size (content-hugging). Drives panel frame so leftover chrome can't show.
+        private var measuredExpandedCardSize: NSSize = .zero
+        /// True after hidePanel orderOut while retaining hostingView — re-show without slam entrance.
+        private var isSoftHidden = false
+        /// Prevents nested Auto Layout crashes when preference-driven resizes collide with window layout.
+        private var isApplyingPanelFrame = false
+        private var pendingPanelSize: NSSize?
+        private var pendingPanelAnimated = false
+        private var deferredPanelUpdateTask: Task<Void, Never>?
+        /// Invalidates stale activation-hide completions after the Island should be visible again.
+        private var visibilityTransitionRevision = 0
 
         init(store: BrainStore) {
             self.store = store
@@ -249,57 +261,97 @@ private struct VoiceDynamicIslandPresenter: NSViewRepresentable {
                     object: nil,
                     queue: .main
                 ) { [weak self] _ in
-                    self?.updatePanel(animated: true)
+                    // Hide immediately on activate — do not defer (avoids one-frame black pill over the app).
+                    // Pending draft / review must live in AssistantFloatingPill while Zirn is foreground.
+                    Task { @MainActor [weak self] in
+                        self?.updatePanel(animated: true)
+                    }
                 },
                 NotificationCenter.default.addObserver(
                     forName: NSApplication.didResignActiveNotification,
                     object: nil,
                     queue: .main
                 ) { [weak self] _ in
-                    self?.updatePanel(animated: true)
+                    // Inactive again: Island may reappear for pending draft / capture.
+                    Task { @MainActor [weak self] in
+                        self?.scheduleUpdatePanel(animated: true)
+                    }
                 }
             ]
         }
 
         deinit {
             activationObservers.forEach(NotificationCenter.default.removeObserver)
+            deferredPanelUpdateTask?.cancel()
+        }
+
+        /// Defers panel work off the current layout/display cycle (crash-safe).
+        func scheduleUpdatePanel(animated: Bool) {
+            deferredPanelUpdateTask?.cancel()
+            deferredPanelUpdateTask = Task { @MainActor [weak self] in
+                await Task.yield()
+                guard !Task.isCancelled else { return }
+                self?.updatePanel(animated: animated)
+            }
         }
 
         func updatePanel(animated: Bool) {
             guard shouldShowPanel else {
                 hidePanel(animated: animated)
-                lastAppliedPanelSize = .zero
                 return
+            }
+
+            // A previous fade-out may still have a completion queued. Invalidate it before
+            // restoring the Island so it cannot order the panel out after Zirn resigns active.
+            visibilityTransitionRevision += 1
+
+            if store.pendingVoiceTranscriptDraft == nil, !store.isEnhancingVoiceTranscript {
+                measuredExpandedCardSize = .zero
             }
 
             let panel = panel ?? makePanel()
             self.panel = panel
+            panel.alphaValue = 1
             let size = panelSize
             let sizeChanged = size != lastAppliedPanelSize
 
-            let rootView = VoiceDynamicIslandView(store: store)
+            let rootView = VoiceDynamicIslandView(
+                store: store,
+                onExpandedCardSizeChange: { [weak self] cardSize in
+                    self?.handleExpandedCardSizeChange(cardSize)
+                }
+            )
             if let hostingView {
                 hostingView.rootView = rootView
                 if panel.isVisible {
-                    hostingView.frame = NSRect(origin: .zero, size: size)
+                    applyHostingFrame(size)
+                    ensureClearChrome(on: hostingView)
                 }
             } else {
-                let created = NSHostingView(rootView: rootView)
+                let created = VoiceIslandHostingView(rootView: rootView)
                 created.sizingOptions = []
                 created.frame = NSRect(origin: .zero, size: size)
                 created.autoresizingMask = [.width, .height]
                 created.wantsLayer = true
-                created.layer?.backgroundColor = NSColor.clear.cgColor
-                panel.contentView = created
+                ensureClearChrome(on: created)
+                // Container isolates NSHostingView from owning window constraint cycles.
+                let container = NSView(frame: NSRect(origin: .zero, size: size))
+                container.wantsLayer = true
+                container.layer?.backgroundColor = NSColor.clear.cgColor
+                container.autoresizingMask = [.width, .height]
+                created.autoresizingMask = [.width, .height]
+                container.addSubview(created)
+                panel.contentView = container
                 hostingView = created
             }
+
+            ensureClearChrome(on: panel)
 
             if panel.isVisible {
                 // Only animate frame when the shell size actually changes.
                 // Live transcript / speech-level ticks must not re-slam the panel.
                 if sizeChanged {
-                    position(panel, size: size, animated: animated)
-                    lastAppliedPanelSize = size
+                    schedulePanelFrame(size, animated: animated)
                 }
             } else {
                 showPanelWithEntrance(panel, finalSize: size, animated: animated)
@@ -308,49 +360,191 @@ private struct VoiceDynamicIslandPresenter: NSViewRepresentable {
         }
 
         func closePanel() {
+            deferredPanelUpdateTask?.cancel()
+            measuredExpandedCardSize = .zero
+            isSoftHidden = false
+            pendingPanelSize = nil
+            isApplyingPanelFrame = false
             panel?.close()
             panel = nil
             hostingView = nil
             lastAppliedPanelSize = .zero
         }
 
-        private var shouldShowPanel: Bool {
-            if store.pendingVoiceTranscriptDraft != nil || store.isEnhancingVoiceTranscript {
-                return true
-            }
-            return !NSApp.isActive && (store.pendingVoiceAudioSourceSelection != nil
+        private var hasVoiceIslandContent: Bool {
+            store.pendingVoiceTranscriptDraft != nil
+                || store.isEnhancingVoiceTranscript
+                || store.pendingVoiceAudioSourceSelection != nil
                 || store.activeVoiceCaptureTarget != nil
                 || store.isFinalizingVoiceTranscript
-                || store.voiceTranscriptionNotice != nil)
+                || store.voiceTranscriptionNotice != nil
+        }
+
+        /// Island is an **inactive-app only** surface *unless the user is interacting with the
+        /// Island itself*. While Zirn is genuinely foreground (a real document window is key),
+        /// pending draft / refine / capture belong in the editor pill / mic popup.
+        ///
+        /// The subtlety that broke Refine: the Island is a nonactivating panel, but clicking a
+        /// SwiftUI button on it (`makeKey`) can flip `NSApp.isActive` to true for the duration
+        /// of the interaction — *without the user ever leaving their other app*. Gating purely on
+        /// `NSApp.isActive` then tore the Island down mid/after-refine and dumped the result into
+        /// the hidden editor pill. So: while the Island panel is the key window, treat the app as
+        /// "not really foreground over the editor" and keep the Island. A genuine switch back to
+        /// Zirn makes a document window key instead, which correctly hides the Island (no
+        /// black-pill-over-app regression).
+        private var shouldShowPanel: Bool {
+            guard hasVoiceIslandContent else { return false }
+            // In-flight refine always renders in place.
+            if store.isEnhancingVoiceTranscript { return true }
+            // App inactive → Island is the sole surface.
+            if !NSApp.isActive { return true }
+            // App active but the user is interacting with the Island itself (its panel is key).
+            if let panel, panel.isKeyWindow { return true }
+            // App genuinely foreground on a real Zirn window → editor pill owns the review.
+            return false
         }
 
         private var panelSize: NSSize {
             if store.pendingVoiceTranscriptDraft != nil || store.isEnhancingVoiceTranscript {
-                // Header + ~10-line scrollable transcript + single action row.
-                return NSSize(width: 520, height: 292)
+                let bleed = VoiceIslandLayout.expandedShadowBleed
+                let cardHeight: CGFloat
+                if measuredExpandedCardSize.height > 1 {
+                    cardHeight = measuredExpandedCardSize.height
+                } else {
+                    cardHeight = VoiceIslandLayout.estimatedExpandedCardHeight(
+                        text: store.pendingVoiceTranscriptDraft?.text ?? ""
+                    )
+                }
+                let cappedCardHeight = min(cardHeight, VoiceIslandLayout.expandedCardMaxHeight)
+                return VoiceIslandLayout.panelSize(
+                    cardWidth: VoiceIslandLayout.expandedCardWidth,
+                    cardHeight: cappedCardHeight,
+                    bleed: bleed
+                )
             }
             if store.isFinalizingVoiceTranscript {
-                return NSSize(width: 448, height: 82)
+                return VoiceIslandLayout.panelSize(cardWidth: 448, cardHeight: 82, bleed: VoiceIslandLayout.compactShadowBleed)
             }
             if store.voiceTranscriptionNotice != nil {
-                return NSSize(width: 320, height: 48)
+                return VoiceIslandLayout.panelSize(cardWidth: 320, cardHeight: 48, bleed: VoiceIslandLayout.compactShadowBleed)
             }
             if store.pendingVoiceAudioSourceSelection != nil {
-                return NSSize(width: 408, height: 48)
+                return VoiceIslandLayout.panelSize(cardWidth: 408, cardHeight: 48, bleed: VoiceIslandLayout.compactShadowBleed)
             }
-            return NSSize(width: 420, height: 48)
+            return VoiceIslandLayout.panelSize(cardWidth: 420, cardHeight: 48, bleed: VoiceIslandLayout.compactShadowBleed)
+        }
+
+        private func handleExpandedCardSizeChange(_ cardSize: NSSize) {
+            guard abs(cardSize.width - VoiceIslandLayout.expandedCardWidth) < 4,
+                  cardSize.height > 40,
+                  cardSize.height <= VoiceIslandLayout.expandedCardMaxHeight + 8
+            else { return }
+            let capped = NSSize(
+                width: VoiceIslandLayout.expandedCardWidth,
+                height: min(cardSize.height, VoiceIslandLayout.expandedCardMaxHeight)
+            )
+            if abs(capped.height - measuredExpandedCardSize.height) < 0.5 {
+                return
+            }
+            measuredExpandedCardSize = capped
+            guard panel?.isVisible == true else { return }
+            let size = panelSize
+            guard size != lastAppliedPanelSize else { return }
+            // Preference callbacks fire mid-layout — always defer the window resize.
+            schedulePanelFrame(size, animated: true)
+        }
+
+        private func schedulePanelFrame(_ size: NSSize, animated: Bool) {
+            pendingPanelSize = size
+            pendingPanelAnimated = animated || pendingPanelAnimated
+            guard !isApplyingPanelFrame else { return }
+            isApplyingPanelFrame = true
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                self?.flushPendingPanelFrame()
+            }
+        }
+
+        private func flushPendingPanelFrame() {
+            guard let panel else {
+                pendingPanelSize = nil
+                pendingPanelAnimated = false
+                isApplyingPanelFrame = false
+                return
+            }
+            guard let size = pendingPanelSize else {
+                isApplyingPanelFrame = false
+                return
+            }
+            let animated = pendingPanelAnimated
+            pendingPanelSize = nil
+            pendingPanelAnimated = false
+
+            if size != lastAppliedPanelSize || abs(panel.frame.size.width - size.width) > 0.5
+                || abs(panel.frame.size.height - size.height) > 0.5 {
+                position(panel, size: size, animated: animated)
+                lastAppliedPanelSize = size
+            }
+
+            if pendingPanelSize != nil {
+                Task { @MainActor [weak self] in
+                    await Task.yield()
+                    self?.flushPendingPanelFrame()
+                }
+            } else {
+                isApplyingPanelFrame = false
+            }
+        }
+
+        private func applyHostingFrame(_ size: NSSize) {
+            let frame = NSRect(origin: .zero, size: size)
+            if let contentView = panel?.contentView {
+                contentView.frame = frame
+            }
+            hostingView?.frame = frame
         }
 
         private func hidePanel(animated: Bool) {
-            guard let panel, panel.isVisible else { return }
+            guard let panel, panel.isVisible else {
+                lastAppliedPanelSize = .zero
+                return
+            }
+            pendingPanelSize = nil
+            pendingPanelAnimated = false
+            visibilityTransitionRevision += 1
+            let transitionRevision = visibilityTransitionRevision
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = animated ? 0.22 : 0
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 panel.animator().alphaValue = 0
-            } completionHandler: { [weak self] in
-                panel.orderOut(nil)
-                self?.hostingView = nil
+            } completionHandler: { [weak self, weak panel] in
+                Task { @MainActor [weak self, weak panel] in
+                    guard let self, let panel else { return }
+                    self.completePanelHide(panel, transitionRevision: transitionRevision)
+                }
             }
+        }
+
+        private func completePanelHide(_ panel: VoiceIslandPanel, transitionRevision: Int) {
+            guard visibilityTransitionRevision == transitionRevision else {
+                if shouldShowPanel {
+                    panel.alphaValue = 1
+                    panel.orderFrontRegardless()
+                }
+                return
+            }
+            guard !shouldShowPanel else {
+                // Zirn became inactive again before the hide completed. Keep the
+                // Dynamic Island persistent rather than letting a stale completion win.
+                panel.alphaValue = 1
+                panel.orderFrontRegardless()
+                return
+            }
+            // Keep hostingView so a quick re-show doesn't rebuild / re-slam.
+            panel.orderOut(nil)
+            panel.alphaValue = 1
+            isSoftHidden = true
+            lastAppliedPanelSize = .zero
         }
 
         private func makePanel() -> VoiceIslandPanel {
@@ -366,8 +560,14 @@ private struct VoiceDynamicIslandPresenter: NSViewRepresentable {
             panel.contentView?.wantsLayer = true
             panel.contentView?.layer?.backgroundColor = NSColor.clear.cgColor
             panel.level = .statusBar
-            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+            // Do NOT use `.transient` — macOS auto-dismisses transient panels when the user
+            // switches tabs/spaces/focuses another window, even while Zirn stays inactive.
+            // Stationary + canJoinAllSpaces keeps the Island persistent until Zirn activates.
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
             panel.isReleasedWhenClosed = false
+            // Voice dictation is a cross-app surface. Cmd-H / hiding Zirn must not hide it;
+            // activation state is the sole visibility authority while voice content exists.
+            panel.canHide = false
             panel.hidesOnDeactivate = false
             panel.becomesKeyOnlyIfNeeded = true
             panel.isFloatingPanel = true
@@ -376,17 +576,42 @@ private struct VoiceDynamicIslandPresenter: NSViewRepresentable {
             return panel
         }
 
+        private func ensureClearChrome(on panel: NSPanel) {
+            panel.backgroundColor = .clear
+            panel.isOpaque = false
+            panel.hasShadow = false
+            panel.contentView?.wantsLayer = true
+            panel.contentView?.layer?.backgroundColor = NSColor.clear.cgColor
+            panel.contentView?.layer?.isOpaque = false
+            // Must stay false so SwiftUI card shadows can fade into transparent bleed.
+            panel.contentView?.layer?.masksToBounds = false
+        }
+
+        private func ensureClearChrome(on view: NSView) {
+            view.wantsLayer = true
+            view.layer?.backgroundColor = NSColor.clear.cgColor
+            view.layer?.isOpaque = false
+            view.layer?.masksToBounds = false
+        }
+
         private func position(_ panel: NSPanel, size: NSSize, animated: Bool) {
             guard let newFrame = panelFrame(for: size) else { return }
+            applyHostingFrame(size)
             if animated {
+                // Avoid allowsImplicitAnimation — it lets NSHostingView.updateAnimatedWindowSize
+                // nest constraint updates inside the display cycle (SIGABRT).
                 NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.42
+                    context.duration = 0.32
                     context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                    context.allowsImplicitAnimation = true
-                    panel.animator().setFrame(newFrame, display: true)
+                    context.allowsImplicitAnimation = false
+                    panel.animator().setFrame(newFrame, display: false)
+                } completionHandler: { [weak self] in
+                    panel.displayIfNeeded()
+                    self?.applyHostingFrame(size)
                 }
             } else {
-                panel.setFrame(newFrame, display: true)
+                panel.setFrame(newFrame, display: false)
+                panel.displayIfNeeded()
             }
         }
 
@@ -394,11 +619,23 @@ private struct VoiceDynamicIslandPresenter: NSViewRepresentable {
             guard let finalFrame = panelFrame(for: finalSize) else { return }
             guard animated else {
                 panel.alphaValue = 1
-                panel.setFrame(finalFrame, display: true)
-                hostingView?.frame = NSRect(origin: .zero, size: finalSize)
+                panel.setFrame(finalFrame, display: false)
+                applyHostingFrame(finalSize)
+                panel.orderFrontRegardless()
+                panel.displayIfNeeded()
+                return
+            }
+
+            // Soft restore when we only orderOut'd — skip slam so insert/activation doesn't look like a crash.
+            if isSoftHidden, hostingView != nil {
+                isSoftHidden = false
+                panel.alphaValue = 1
+                applyHostingFrame(finalSize)
+                position(panel, size: finalSize, animated: true)
                 panel.orderFrontRegardless()
                 return
             }
+            isSoftHidden = false
 
             let startSize = NSSize(width: finalSize.width + 76, height: finalSize.height + 28)
             let startFrame = NSRect(
@@ -408,18 +645,19 @@ private struct VoiceDynamicIslandPresenter: NSViewRepresentable {
                 height: startSize.height
             )
             panel.alphaValue = 0.04
-            panel.setFrame(startFrame, display: true)
-            hostingView?.frame = NSRect(origin: .zero, size: startSize)
+            panel.setFrame(startFrame, display: false)
+            applyHostingFrame(startSize)
             panel.orderFrontRegardless()
 
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.24
                 context.timingFunction = CAMediaTimingFunction(controlPoints: 0.18, 0.82, 0.26, 1)
-                context.allowsImplicitAnimation = true
+                context.allowsImplicitAnimation = false
                 panel.animator().alphaValue = 1
-                panel.animator().setFrame(finalFrame, display: true)
+                panel.animator().setFrame(finalFrame, display: false)
             } completionHandler: { [weak self] in
-                self?.hostingView?.frame = NSRect(origin: .zero, size: finalSize)
+                self?.applyHostingFrame(finalSize)
+                panel.displayIfNeeded()
             }
         }
 
@@ -442,13 +680,76 @@ private final class VoiceIslandPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
+    // Do NOT call makeKey()/activate here. Forcing key on a background status panel was
+    // nudging Zirn active, which flipped `shouldShowPanel` false and tore the Island down
+    // the instant a refine finished. `acceptsFirstMouse` on the hosting view already
+    // delivers clicks to SwiftUI buttons while the app stays inactive.
     override func mouseDown(with event: NSEvent) {
-        // Become key so SwiftUI button actions (esp. copy → pasteboard) fire reliably
-        // on a nonactivating status panel.
-        if !isKeyWindow {
-            makeKeyAndOrderFront(nil)
-        }
+        orderFrontRegardless()
         super.mouseDown(with: event)
+    }
+}
+
+/// NSHostingView that never auto-resizes its window — `updateAnimatedWindowSize` during
+/// panel frame animation causes nested Auto Layout / SIGABRT on macOS.
+private final class VoiceIslandHostingView<Content: View>: NSHostingView<Content> {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        sizingOptions = []
+    }
+
+    override func layout() {
+        // Keep local layout only; never propagate content size to the panel window.
+        sizingOptions = []
+        super.layout()
+    }
+
+    // Deliver the very first click straight to the SwiftUI content even though the panel
+    // belongs to an inactive app. This lets Refine / copy / insert fire on the first click
+    // WITHOUT keying+activating Zirn (activation was tearing the Island down mid-refine).
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+/// Compact pills keep a little transparent shadow bleed; expanded transcript hugs content + modest bleed.
+private enum VoiceIslandLayout {
+    static let expandedCardWidth: CGFloat = 520
+    /// Max content height for the expanded card itself (not the panel chrome).
+    static let expandedCardMaxHeight: CGFloat = 248
+    static let compactShadowBleed = NSEdgeInsets(top: 12, left: 22, bottom: 24, right: 22)
+    /// Enough transparent padding for soft drop shadow to fade — not a tall empty glass shelf.
+    /// Shadow is radius 14 / y 6; keep bottom bleed modestly above that (no huge empty padding).
+    static let expandedShadowBleed = NSEdgeInsets(top: 10, left: 18, bottom: 22, right: 18)
+
+    static func panelSize(cardWidth: CGFloat, cardHeight: CGFloat, bleed: NSEdgeInsets) -> NSSize {
+        NSSize(
+            width: cardWidth + bleed.left + bleed.right,
+            height: cardHeight + bleed.top + bleed.bottom
+        )
+    }
+
+    static func estimatedExpandedCardHeight(text: String) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: 13)
+        let lineHeight = ceil(font.ascender - font.descender + max(0, font.leading))
+        let maxTextHeight = lineHeight * 10
+        let textWidth = expandedCardWidth - 28
+        let bounds = (text as NSString).boundingRect(
+            with: NSSize(width: max(120, textWidth), height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font]
+        )
+        let textHeight = min(maxTextHeight, max(lineHeight, ceil(bounds.height)))
+        // header + text top pad + text + action row pads + top pad
+        return 40 + 8 + textHeight + 10 + 48 + 13
+    }
+}
+
+private struct VoiceIslandExpandedCardSizeKey: PreferenceKey {
+    static var defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        let next = nextValue()
+        if next.width > 0, next.height > 0 {
+            value = next
+        }
     }
 }
 
@@ -485,6 +786,7 @@ private struct VoiceEntranceKeystoneShape: Shape {
 
 private struct VoiceDynamicIslandView: View {
     @ObservedObject var store: BrainStore
+    var onExpandedCardSizeChange: ((CGSize) -> Void)?
     @Namespace private var islandNamespace
     @State private var isSlamSettled = false
 
@@ -522,11 +824,33 @@ private struct VoiceDynamicIslandView: View {
         }
     }
 
+    private var contentBleed: EdgeInsets {
+        let isExpanded = store.pendingVoiceTranscriptDraft != nil || store.isEnhancingVoiceTranscript
+        let bleed = isExpanded ? VoiceIslandLayout.expandedShadowBleed : VoiceIslandLayout.compactShadowBleed
+        return EdgeInsets(top: bleed.top, leading: bleed.left, bottom: bleed.bottom, trailing: bleed.right)
+    }
+
+    /// True only when Zirn is genuinely foreground on a *real* window — i.e. the editor pill
+    /// should own the review. A click on the Island's own (nonactivating) panel can mark the app
+    /// active while the Island panel is key; that is NOT deferral, so the Island keeps rendering.
+    private var isDeferringToEditorPill: Bool {
+        guard NSApp.isActive else { return false }
+        if NSApp.keyWindow is VoiceIslandPanel { return false }
+        return true
+    }
+
     var body: some View {
         Group {
-            if let draft = store.pendingVoiceTranscriptDraft {
+            // Defense in depth: never paint Island chrome while Zirn is *genuinely* foreground
+            // (a real document window is key). Panel hide is authoritative; this only avoids a
+            // one-frame expanded review flash. Interacting with the Island itself (its panel is
+            // key) or an in-flight refine must keep rendering the expanded review here.
+            if isDeferringToEditorPill && !store.isEnhancingVoiceTranscript {
+                Color.clear
+                    .frame(width: 1, height: 1)
+            } else if let draft = store.pendingVoiceTranscriptDraft {
                 expandedTranscriptView(draft)
-            } else if let notice = store.voiceTranscriptionNotice, !NSApp.isActive {
+            } else if let notice = store.voiceTranscriptionNotice {
                 failedNoticePillView(notice)
             } else if store.pendingVoiceAudioSourceSelection != nil {
                 sourceChoicePillView
@@ -537,27 +861,32 @@ private struct VoiceDynamicIslandView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .padding(contentBleed)
         .opacity(isSlamSettled ? 1 : 0.10)
         .scaleEffect(x: isSlamSettled ? 1 : 1.12, y: isSlamSettled ? 1 : 1.28, anchor: .top)
         .offset(y: isSlamSettled ? 0 : -18)
         .background(alignment: .top) {
             VoiceEntranceKeystoneShape()
                 .fill(Color.black.opacity(isSlamSettled ? 0 : 0.34))
+                .padding(contentBleed)
                 .scaleEffect(x: isSlamSettled ? 1 : 1.18, y: isSlamSettled ? 1 : 1.38, anchor: .top)
                 .allowsHitTesting(false)
         }
         .onAppear {
             isSlamSettled = false
             DispatchQueue.main.async {
-                withAnimation(.spring(response: 0.24, dampingFraction: 0.78)) {
+                withAnimation(.easeInOut(duration: 0.24)) {
                     isSlamSettled = true
                 }
             }
         }
-        .animation(.spring(response: 0.46, dampingFraction: 0.86), value: store.isFinalizingVoiceTranscript)
-        .animation(.spring(response: 0.46, dampingFraction: 0.86), value: store.pendingVoiceTranscriptDraft?.id)
-        .animation(.spring(response: 0.38, dampingFraction: 0.9), value: store.pendingVoiceAudioSourceSelection)
+        .animation(.easeInOut(duration: 0.32), value: store.isFinalizingVoiceTranscript)
+        .animation(.easeInOut(duration: 0.32), value: store.pendingVoiceTranscriptDraft?.id)
+        .animation(.easeInOut(duration: 0.32), value: store.pendingVoiceAudioSourceSelection)
         .animation(.easeInOut(duration: 0.2), value: store.isEnhancingVoiceTranscript)
+        .onPreferenceChange(VoiceIslandExpandedCardSizeKey.self) { size in
+            onExpandedCardSizeChange?(size)
+        }
     }
 
     private var sourceChoicePillView: some View {
@@ -571,14 +900,14 @@ private struct VoiceDynamicIslandView: View {
 
             ForEach(VoiceAudioSource.allCases) { source in
                 VoiceIslandAudioSourceButton(source: source) {
-                    withAnimation(.spring(response: 0.38, dampingFraction: 0.88)) {
+                    withAnimation(.easeInOut(duration: 0.32)) {
                         store.selectVoiceAudioSource(source)
                     }
                 }
             }
 
             Button {
-                withAnimation(.easeOut(duration: 0.16)) {
+                withAnimation(.easeInOut(duration: 0.28)) {
                     store.dismissVoiceAudioSourceSelection()
                 }
             } label: {
@@ -636,7 +965,7 @@ private struct VoiceDynamicIslandView: View {
             Spacer(minLength: 8)
 
             Button {
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+                withAnimation(.easeInOut(duration: 0.32)) {
                     store.stopVoiceCapture()
                 }
             } label: {
@@ -709,7 +1038,7 @@ private struct VoiceDynamicIslandView: View {
                 Spacer(minLength: 0)
 
                 Button {
-                    withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
+                    withAnimation(.easeInOut(duration: 0.32)) {
                         store.cancelFinalizingVoiceTranscription()
                     }
                 } label: {
@@ -835,7 +1164,7 @@ private struct VoiceDynamicIslandView: View {
                     style: .dark,
                     isDisabled: store.isEnhancingVoiceTranscript
                 ) {
-                    withAnimation(.spring(response: 0.38, dampingFraction: 0.88)) {
+                    withAnimation(.easeInOut(duration: 0.32)) {
                         store.discardPendingVoiceTranscript()
                     }
                 }
@@ -864,10 +1193,11 @@ private struct VoiceDynamicIslandView: View {
         }
         .padding(.horizontal, 14)
         .padding(.top, 13)
-        .frame(width: 520, alignment: .topLeading)
+        .frame(width: VoiceIslandLayout.expandedCardWidth, alignment: .topLeading)
         .fixedSize(horizontal: false, vertical: true)
         .background {
             // Sized exactly to the card — never larger than the rounded shell.
+            // No NSVisualEffectView: behindWindow materials paint a rectangular window band.
             VoiceIslandExpandedGlassChrome(cornerRadius: 28)
         }
         .clipShape(cardShape)
@@ -875,14 +1205,27 @@ private struct VoiceDynamicIslandView: View {
             cardShape
                 .stroke(Color.white.opacity(0.14), lineWidth: 0.9)
         }
-        .shadow(color: .black.opacity(0.42), radius: 24, y: 10)
+        // Soft shadow fades into transparent panel bleed — never clipped into a hard rectangle.
+        .shadow(color: .black.opacity(0.32), radius: 14, y: 6)
+        .background(alignment: .center) {
+            GeometryReader { proxy in
+                Color.clear
+                    .preference(key: VoiceIslandExpandedCardSizeKey.self, value: proxy.size)
+            }
+        }
         .matchedGeometryEffect(id: "voice-island-shell", in: islandNamespace)
         .animation(.easeInOut(duration: 0.16), value: draft.revisionIndex)
         .animation(.easeInOut(duration: 0.16), value: draft.revisionHistory.count)
+        .transition(.asymmetric(
+            insertion: .opacity.combined(with: .scale(scale: 0.98, anchor: .top)),
+            removal: .opacity.combined(with: .scale(scale: 0.98, anchor: .top))
+        ))
     }
 }
 
-/// Soft black upper chrome that yields to real AppKit frosted glass in the lower half.
+/// Soft black upper chrome that yields to a translucent lower veil — continuous-rounded only.
+/// Intentionally avoids `NSVisualEffectView` / window-server materials: those ignore SwiftUI
+/// clipShape and leave a sharp rectangular residue the size of the (larger) shadow-bleed panel.
 private struct VoiceIslandExpandedGlassChrome: View {
     let cornerRadius: CGFloat
 
@@ -892,31 +1235,24 @@ private struct VoiceIslandExpandedGlassChrome: View {
 
     var body: some View {
         ZStack {
-            // Opaque black base — fully covers the card so nothing rectangular can peek out.
             cardShape
                 .fill(Color.black.opacity(0.96))
 
-            // Frosted glass only in the lower band (where the fade reveals it).
-            VoiceIslandFrostedGlassView(cornerRadius: cornerRadius)
-                .mask {
-                    cardShape
-                        .fill(
-                            LinearGradient(
-                                stops: [
-                                    .init(color: .clear, location: 0),
-                                    .init(color: .clear, location: 0.42),
-                                    .init(color: .white.opacity(0.35), location: 0.55),
-                                    .init(color: .white.opacity(0.88), location: 0.72),
-                                    .init(color: .white, location: 1)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                }
-                .clipShape(cardShape)
+            // Simulated lower-glass sheen (drawn in-process, respects continuous clip).
+            cardShape
+                .fill(
+                    LinearGradient(
+                        stops: [
+                            .init(color: Color.white.opacity(0.00), location: 0),
+                            .init(color: Color.white.opacity(0.02), location: 0.42),
+                            .init(color: Color.white.opacity(0.07), location: 0.68),
+                            .init(color: Color.white.opacity(0.11), location: 1)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
 
-            // Soft black veil on top that clears toward the bottom so glass shows through.
             cardShape
                 .fill(
                     LinearGradient(
@@ -931,167 +1267,9 @@ private struct VoiceIslandExpandedGlassChrome: View {
                         endPoint: .bottom
                     )
                 )
-
-            // Extra SwiftUI material punch in the lower glass band (already shape-clipped).
-            cardShape
-                .fill(.thinMaterial)
-                .mask {
-                    LinearGradient(
-                        stops: [
-                            .init(color: .clear, location: 0),
-                            .init(color: .clear, location: 0.38),
-                            .init(color: .white.opacity(0.40), location: 0.55),
-                            .init(color: .white.opacity(0.88), location: 0.78),
-                            .init(color: .white, location: 1)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                }
-                .allowsHitTesting(false)
         }
-        .compositingGroup()
-        .mask(cardShape)
         .clipShape(cardShape)
         .allowsHitTesting(false)
-    }
-}
-
-/// Clipped frosted glass. `NSVisualEffectView` ignores SwiftUI `clipShape` alone, so
-/// corner radius is applied via a continuous CAShapeLayer mask matching the card.
-private struct VoiceIslandFrostedGlassView: NSViewRepresentable {
-    let cornerRadius: CGFloat
-
-    func makeNSView(context: Context) -> VoiceIslandClippedGlassContainer {
-        let container = VoiceIslandClippedGlassContainer()
-        container.cornerRadius = cornerRadius
-        container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.clear.cgColor
-        container.layer?.masksToBounds = true
-        container.layer?.cornerRadius = cornerRadius
-        container.layer?.cornerCurve = .continuous
-
-        let effect = NSVisualEffectView()
-        effect.material = .hudWindow
-        effect.blendingMode = .behindWindow
-        effect.state = .active
-        effect.isEmphasized = true
-        effect.wantsLayer = true
-        effect.layer?.backgroundColor = NSColor.clear.cgColor
-        effect.layer?.masksToBounds = true
-        effect.layer?.cornerRadius = cornerRadius
-        effect.layer?.cornerCurve = .continuous
-        effect.autoresizingMask = [.width, .height]
-        effect.frame = container.bounds
-        container.addSubview(effect)
-        container.effectView = effect
-        container.applyContinuousCornerMask()
-        return container
-    }
-
-    func updateNSView(_ container: VoiceIslandClippedGlassContainer, context: Context) {
-        container.cornerRadius = cornerRadius
-        container.layer?.masksToBounds = true
-        container.layer?.cornerRadius = cornerRadius
-        container.layer?.cornerCurve = .continuous
-        container.layer?.backgroundColor = NSColor.clear.cgColor
-        if let effect = container.effectView {
-            effect.material = .hudWindow
-            effect.blendingMode = .behindWindow
-            effect.state = .active
-            effect.isEmphasized = true
-            effect.frame = container.bounds
-            effect.layer?.backgroundColor = NSColor.clear.cgColor
-            effect.layer?.masksToBounds = true
-            effect.layer?.cornerRadius = cornerRadius
-            effect.layer?.cornerCurve = .continuous
-        }
-        container.applyContinuousCornerMask()
-    }
-}
-
-private final class VoiceIslandClippedGlassContainer: NSView {
-    weak var effectView: NSVisualEffectView?
-    var cornerRadius: CGFloat = 28
-
-    override var isFlipped: Bool { true }
-
-    override func layout() {
-        super.layout()
-        effectView?.frame = bounds
-        effectView?.layer?.backgroundColor = NSColor.clear.cgColor
-        effectView?.layer?.cornerRadius = cornerRadius
-        effectView?.layer?.cornerCurve = .continuous
-        effectView?.layer?.masksToBounds = true
-        layer?.masksToBounds = true
-        layer?.cornerRadius = cornerRadius
-        layer?.cornerCurve = .continuous
-        layer?.backgroundColor = NSColor.clear.cgColor
-        applyContinuousCornerMask()
-    }
-
-    func applyContinuousCornerMask() {
-        wantsLayer = true
-        guard bounds.width > 0, bounds.height > 0 else { return }
-
-        layer?.mask = Self.continuousRoundedRectMask(in: bounds, cornerRadius: cornerRadius)
-
-        if let effect = effectView {
-            effect.wantsLayer = true
-            effect.layer?.mask = Self.continuousRoundedRectMask(in: effect.bounds, cornerRadius: cornerRadius)
-        }
-    }
-
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        needsLayout = true
-        applyContinuousCornerMask()
-    }
-
-    private static func continuousRoundedRectMask(in rect: CGRect, cornerRadius: CGFloat) -> CAShapeLayer {
-        let mask = CAShapeLayer()
-        mask.frame = rect
-        mask.path = continuousRoundedRectPath(in: rect, cornerRadius: cornerRadius)
-        mask.fillColor = NSColor.black.cgColor
-        return mask
-    }
-
-    /// Approximates SwiftUI continuous corner curves closely enough to kill square bleed.
-    private static func continuousRoundedRectPath(in rect: CGRect, cornerRadius: CGFloat) -> CGPath {
-        let radius = min(cornerRadius, min(rect.width, rect.height) / 2)
-        let path = CGMutablePath()
-        let minX = rect.minX
-        let minY = rect.minY
-        let maxX = rect.maxX
-        let maxY = rect.maxY
-
-        path.move(to: CGPoint(x: minX + radius, y: minY))
-        path.addLine(to: CGPoint(x: maxX - radius, y: minY))
-        path.addCurve(
-            to: CGPoint(x: maxX, y: minY + radius),
-            control1: CGPoint(x: maxX - radius * 0.45, y: minY),
-            control2: CGPoint(x: maxX, y: minY + radius * 0.45)
-        )
-        path.addLine(to: CGPoint(x: maxX, y: maxY - radius))
-        path.addCurve(
-            to: CGPoint(x: maxX - radius, y: maxY),
-            control1: CGPoint(x: maxX, y: maxY - radius * 0.45),
-            control2: CGPoint(x: maxX - radius * 0.45, y: maxY)
-        )
-        path.addLine(to: CGPoint(x: minX + radius, y: maxY))
-        path.addCurve(
-            to: CGPoint(x: minX, y: maxY - radius),
-            control1: CGPoint(x: minX + radius * 0.45, y: maxY),
-            control2: CGPoint(x: minX, y: maxY - radius * 0.45)
-        )
-        path.addLine(to: CGPoint(x: minX, y: minY + radius))
-        path.addCurve(
-            to: CGPoint(x: minX + radius, y: minY),
-            control1: CGPoint(x: minX, y: minY + radius * 0.45),
-            control2: CGPoint(x: minX + radius * 0.45, y: minY)
-        )
-        path.closeSubpath()
-        return path
     }
 }
 
